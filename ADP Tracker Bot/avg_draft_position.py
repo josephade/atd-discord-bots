@@ -1,10 +1,8 @@
-# avg_draft_position.py
 import os
 import re
 import json
 import logging
 from collections import defaultdict
-from typing import Optional, Tuple, List, Dict
 
 import discord
 from discord import Intents
@@ -13,84 +11,41 @@ import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
-# ------------------------------------------------------------
-# Logging (works well on Render; make sure PYTHONUNBUFFERED=1)
-# ------------------------------------------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# ----------------- logging (unbuffered-friendly) -----------------
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler()],
-    force=True,  # override any previous basicConfig
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 log = logging.getLogger("adp")
 
-# ------------------------------------------------------------
-# Env & credentials
-# ------------------------------------------------------------
-load_dotenv()  # local convenience; ignored on Render if no .env
+# ----------------- env -----------------
+load_dotenv()
 
-# raw values first so "0" defaults don't mask missing vars
-DISCORD_TOKEN_RAW = os.getenv("DISCORD_TOKEN")
-DISCORD_CHANNEL_ID_RAW = os.getenv("DISCORD_CHANNEL_ID")
-GOOGLE_SHEET_ID_RAW = os.getenv("GOOGLE_SHEET_ID")
-GOOGLE_WORKSHEET_GID_RAW = os.getenv("GOOGLE_WORKSHEET_GID")
+def need(name):
+    v = os.getenv(name)
+    if not v:
+        raise SystemExit(f"Missing env: {name}")
+    return v
 
-NAME_COL_LETTER = os.getenv("NAME_COLUMN", "A").upper()
-ADP_COL_LETTER  = os.getenv("ADP_COLUMN",  "B").upper()
+# Sheet + creds
+SHEET_ID = need("GOOGLE_SHEET_ID")
+WS_GID   = int(need("GOOGLE_WORKSHEET_GID"))
 
-# thresholds (tweak in env if needed)
-FUZZY_THRESHOLD  = int(os.getenv("FUZZY_THRESHOLD", "85"))
-LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
-
-# Credentials: either JSON string or a file path
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
-missing = []
-if not DISCORD_TOKEN_RAW:          missing.append("DISCORD_TOKEN")
-if not DISCORD_CHANNEL_ID_RAW:     missing.append("DISCORD_CHANNEL_ID")
-if not GOOGLE_SHEET_ID_RAW:        missing.append("GOOGLE_SHEET_ID")
-if not GOOGLE_WORKSHEET_GID_RAW:   missing.append("GOOGLE_WORKSHEET_GID")
+# Name column (where player names live)
+NAME_COL_LETTER = os.getenv("NAME_COLUMN", "A").upper()
 
-creds_source = None
-if GOOGLE_CREDENTIALS_JSON:
-    creds_source = "json"
-elif GOOGLE_CREDENTIALS_PATH and os.path.exists(GOOGLE_CREDENTIALS_PATH):
-    creds_source = "file"
-else:
-    missing.append("GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH (file not found)")
+# Channel/column mapping (two channels)
+CHAN1 = int(need("DISCORD_CHANNEL_ID_1"))
+COL1  = need("ADP_COLUMN_1").upper()   # e.g. "E"
+CHAN2 = int(need("DISCORD_CHANNEL_ID_2"))
+COL2  = need("ADP_COLUMN_2").upper()   # e.g. "D"
 
-if missing:
-    msg = "Missing/invalid environment variables:\n  - " + "\n  - ".join(missing)
-    log.error(msg)
-    raise SystemExit(msg)
+DISCORD_TOKEN = need("DISCORD_TOKEN")
 
-# safe conversions
-DISCORD_TOKEN = DISCORD_TOKEN_RAW
-CHANNEL_ID    = int(DISCORD_CHANNEL_ID_RAW)
-SHEET_ID      = GOOGLE_SHEET_ID_RAW
-WS_GID        = int(GOOGLE_WORKSHEET_GID_RAW)
-
-# ------------------------------------------------------------
-# Google Sheets
-# ------------------------------------------------------------
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-if creds_source == "json":
-    log.info("[CREDS] Using GOOGLE_CREDENTIALS_JSON")
-    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
-else:
-    log.info("[CREDS] Using GOOGLE_CREDENTIALS_PATH=%s", GOOGLE_CREDENTIALS_PATH)
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
-
-gc = gspread.authorize(creds)
-sh = gc.open_by_key(SHEET_ID)
-ws = sh.get_worksheet_by_id(WS_GID)
-
+# ----------------- helpers -----------------
 def col_to_index(col_letter: str) -> int:
     idx = 0
     for c in col_letter.strip().upper():
@@ -98,50 +53,45 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
-ADP_COL_INDEX  = col_to_index(ADP_COL_LETTER)
 
-# ------------------------------------------------------------
-# Normalization & cleaning
-# ------------------------------------------------------------
+channel_to_col_letter = {
+    CHAN1: COL1,
+    CHAN2: COL2,
+}
+channel_to_col_index = {ch: col_to_index(letter)
+                        for ch, letter in channel_to_col_letter.items()}
+
+log.info(f"[CFG] Name column: {NAME_COL_LETTER} ({NAME_COL_INDEX})")
+for ch, letter in channel_to_col_letter.items():
+    log.info(f"[CFG] Channel {ch} -> column {letter} (index {channel_to_col_index[ch]})")
+
+# ----------------- google sheets -----------------
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+if GOOGLE_CREDENTIALS_JSON:
+    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
+else:
+    if not os.path.exists(GOOGLE_CREDENTIALS_PATH):
+        raise SystemExit("GOOGLE_CREDENTIALS_JSON is empty and GOOGLE_CREDENTIALS_PATH not found")
+    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
+
+gc = gspread.authorize(creds)
+sh = gc.open_by_key(SHEET_ID)
+ws = sh.get_worksheet_by_id(WS_GID)
+
+# ----------------- normalization + player load -----------------
 NONLETTER_RE  = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
 
-# Discord artifacts
-CUSTOM_EMOJI_RE        = re.compile(r"<a?:[^:\s>]+:\d+>")      # <:name:123> or <a:name:123>
-MENTION_OR_CHANNEL_RE  = re.compile(r"<[@#][!&]?\d+>")         # <@123>, <@!123>, <#123>, <@&123>
-LEADING_PICK_RE        = re.compile(r"^\s*\d+\s*[.)-]?\s*")    # "65." | "65 -" | "65)"
-URL_RE                 = re.compile(r"https?://\S+")
-
-def normalize_key(s: str) -> str:
+def clean(s: str) -> str:
     s = NONLETTER_RE.sub(" ", s)
     s = WHITESPACE_RE.sub(" ", s).strip().lower()
     return s
 
-def clean_message(s: str) -> str:
-    # remove leading pick number only for matching
-    s = LEADING_PICK_RE.sub("", s)
-    s = CUSTOM_EMOJI_RE.sub(" ", s)
-    s = MENTION_OR_CHANNEL_RE.sub(" ", s)
-    s = URL_RE.sub(" ", s)
-    return normalize_key(s)
-
-def extract_typed_pick(s: str) -> Optional[int]:
-    """
-    Returns the leading integer pick if present (e.g. '65.' -> 65), else None.
-    (We read it from the raw text before cleaning.)
-    """
-    m = re.match(r"^\s*(\d+)\s*[.)-]?", s)
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            return None
-    return None
-
-# ------------------------------------------------------------
-# Load players from the sheet
-# ------------------------------------------------------------
-def load_players() -> Tuple[List[str], Dict[str, int], List[str], Dict[str, str]]:
+def load_players():
     col_vals = ws.col_values(NAME_COL_INDEX)
     names_orig, name_to_row = [], {}
     for i, v in enumerate(col_vals, start=1):
@@ -149,113 +99,92 @@ def load_players() -> Tuple[List[str], Dict[str, int], List[str], Dict[str, str]
         if v:
             names_orig.append(v)
             name_to_row[v] = i
-    keys_norm  = [normalize_key(n) for n in names_orig]
-    key_to_orig = {normalize_key(n): n for n in names_orig}
-    log.info("[INIT] Loaded %d players", len(names_orig))
-    return names_orig, name_to_row, keys_norm, key_to_orig
+    key_to_orig = {clean(n): n for n in names_orig}
+    log.info(f"[INIT] Loaded {len(names_orig)} players")
+    return names_orig, name_to_row, key_to_orig
 
-ALL_NAMES, NAME_TO_ROW, ALL_KEYS, KEY_TO_ORIG = load_players()
+NAMES, NAME_TO_ROW, KEY_TO_ORIG = load_players()
 
-# ------------------------------------------------------------
-# Matching
-# ------------------------------------------------------------
-def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
-    cleaned = clean_message(text)
-    log.info("[MSG] Raw=%r | Cleaned=%r", text, cleaned)
-
-    if not cleaned:
-        return None
-
-    # exact after normalization
-    if cleaned in KEY_TO_ORIG:
-        orig = KEY_TO_ORIG[cleaned]
-        row  = NAME_TO_ROW[orig]
-        log.info("[MATCH] Exact -> %s (row=%s, score=100)", orig, row)
-        return (orig, row, 100.0)
-
-    # strict then gentle
-    hits = process.extract(cleaned, ALL_KEYS, scorer=fuzz.token_sort_ratio,
-                           score_cutoff=FUZZY_THRESHOLD, limit=1)
-    if not hits:
-        hits = process.extract(cleaned, ALL_KEYS, scorer=fuzz.token_sort_ratio,
-                               score_cutoff=LOW_FUZZY_CUTOFF, limit=1)
-
-    if hits:
-        best_key, score, _ = hits[0]
-        orig = KEY_TO_ORIG.get(best_key)
-        if orig:
-            row = NAME_TO_ROW[orig]
-            log.info("[MATCH] Fuzzy -> %s (row=%s, score=%.1f)", orig, row, score)
-            return (orig, row, score)
-
-    log.info("[MATCH] No match above threshold")
-    return None
-
-# ------------------------------------------------------------
-# Discord bot
-# ------------------------------------------------------------
+# ----------------- discord -----------------
 intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Keep history of typed picks to compute averages
-pick_history: Dict[str, List[int]] = defaultdict(list)
+# keep per-player history to compute running average
+pick_history = defaultdict(list)
+
+def try_parse_picknum(text: str):
+    m = re.match(r"^\s*(\d+)\s*[).:-]?", text)
+    return int(m.group(1)) if m else None
+
+def find_best_match(text: str):
+    # remove emojis and punctuation from name part only
+    # we’ll also accept messages like "67. Player Name"
+    # extract the non-number part for name matching
+    text_no_pick = re.sub(r"^\s*\d+\s*[).:-]?\s*", "", text)
+    cleaned = clean(text_no_pick)
+    if not cleaned:
+        return None
+
+    # exact first
+    exact = KEY_TO_ORIG.get(cleaned)
+    if exact:
+        return exact, NAME_TO_ROW[exact], 100.0
+
+    # fuzzy (ignore team emoji/name)
+    hits = process.extract(cleaned, list(KEY_TO_ORIG.keys()),
+                          scorer=fuzz.token_set_ratio, limit=1)
+    if hits:
+        k, score, _ = hits[0]
+        if score >= 85:
+            return KEY_TO_ORIG[k], NAME_TO_ROW[KEY_TO_ORIG[k]], score
+    return None
 
 @client.event
 async def on_ready():
-    log.info("✅ ADP Tracker Logged in as %s (channel %s)", client.user, CHANNEL_ID)
+    log.info(f"ADP Tracker logged in as {client.user} — watching channels {list(channel_to_col_letter.keys())}")
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    if message.channel.id != CHANNEL_ID:
-        return
+
+    col_index = channel_to_col_index.get(message.channel.id)
+    col_letter = channel_to_col_letter.get(message.channel.id)
+    if not col_index:
+        return  # not a tracked channel
 
     raw = (message.content or "").strip()
     if not raw:
         return
 
-    log.info("[DISCORD] %s said: %r", f"{message.author.name}#{message.author.discriminator}", raw)
+    log.info(f"[DISCORD] {message.author} said: {raw!r}")
+    pick_num = try_parse_picknum(raw)
+    if pick_num is None:
+        log.info("[PICK] No pick number found; ignoring.")
+        return
+    log.info(f"[PICK] Detected typed pick: {pick_num}")
 
-    # try to parse a typed pick from the raw message
-    typed_pick = extract_typed_pick(raw)
-    if typed_pick is not None:
-        log.info("[PICK] Detected typed pick: %s", typed_pick)
-
-    match = find_best_match(raw)
-    if not match:
-        try:
-            await message.add_reaction("❓")
-        except Exception:
-            pass
+    best = find_best_match(raw)
+    log.info(f"[MSG] Raw={raw!r} | Cleaned={clean(re.sub(r'^\\s*\\d+\\s*[).:-]?\\s*','',raw))!r}")
+    if not best:
+        log.info("[MATCH] No match above threshold")
+        try: await message.add_reaction("❓")
+        except Exception: pass
         return
 
-    name, row, _score = match
+    name, row, score = best
+    log.info(f"[MATCH] {'Exact' if score==100 else 'Fuzzy'} -> {name} (row={row}, score={score})")
 
-    # value to record: typed number if present, else fall back to count index
-    if typed_pick is None:
-        typed_pick = len(pick_history[name]) + 1  # fallback
-    pick_history[name].append(typed_pick)
+    # update running average (first time == typed pick)
+    pick_history[name].append(pick_num)
+    avg_pick = round(sum(pick_history[name]) / len(pick_history[name]), 2)
 
-    # compute average
-    avg_pick = sum(pick_history[name]) / len(pick_history[name])
+    ws.update_cell(row, col_index, avg_pick)
+    log.info(f"[UPDATE] {name} -> wrote avg {avg_pick:.2f} to row {row} col {col_index} ({col_letter})")
 
-    # write to sheet
-    try:
-        ws.update_cell(row, ADP_COL_INDEX, round(avg_pick, 2))
-        log.info("[UPDATE] %s -> wrote avg %.2f to row %d col %d",
-                 name, avg_pick, row, ADP_COL_INDEX)
-        try:
-            await message.add_reaction("✅")
-        except Exception:
-            pass
-    except Exception as e:
-        log.exception("[ERROR] Failed to update sheet: %s", e)
-        try:
-            await message.add_reaction("‼️")
-        except Exception:
-            pass
+    try: await message.add_reaction("✅")
+    except Exception: pass
 
 if __name__ == "__main__":
     client.run(DISCORD_TOKEN)
