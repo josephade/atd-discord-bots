@@ -1,0 +1,6 @@
+discord.py
+python-dotenv
+gspread
+google-auth
+rapidfuzz
+requests
