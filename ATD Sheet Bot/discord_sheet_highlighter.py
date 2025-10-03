@@ -1,8 +1,8 @@
 import os
 import re
-import time
-import asyncio
-from typing import Dict, List, Tuple, Iterable, Optional
+import json
+import logging
+from typing import Dict, List, Tuple, Optional
 
 import discord
 from discord import Intents
@@ -11,35 +11,63 @@ import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
+# ================== LOGGING ==================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("highlighter")
+
 # ================== ENV CONFIG ==================
 load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-WS_GID = int(os.getenv("GOOGLE_WORKSHEET_GID", "0"))
+def need(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise SystemExit(f"Missing env: {name}")
+    return v
+
+DISCORD_TOKEN = need("DISCORD_TOKEN")
+CHANNEL_ID = int(need("DISCORD_CHANNEL_ID"))
+
+SHEET_ID = need("GOOGLE_SHEET_ID")
+WS_GID = int(need("GOOGLE_WORKSHEET_GID"))
 
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
-ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
+ROW_END_COL   = os.getenv("ROW_HILIGHT_END", "D").upper()
 
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "88"))
 LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
 
-if not (DISCORD_TOKEN and CHANNEL_ID and SHEET_ID and WS_GID):
-    raise SystemExit("Missing env vars. Check your .env file!")
+# Optional: write to a column (e.g., "E")
+WRITE_COLUMN = os.getenv("WRITE_COLUMN", "").strip().upper()
+
+# Credentials: JSON or PATH
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
+
+if not GOOGLE_CREDENTIALS_JSON and not os.path.exists(GOOGLE_CREDENTIALS_PATH):
+    raise SystemExit("Missing credentials: set GOOGLE_CREDENTIALS_JSON or a valid GOOGLE_CREDENTIALS_PATH")
+
+log.info("[CFG] Channel=%s | Sheet=%s gid=%s | Names=%s | Highlight=%s:%s | WriteColumn=%s",
+         CHANNEL_ID, SHEET_ID, WS_GID, NAME_COL_LETTER, ROW_START_COL, ROW_END_COL, WRITE_COLUMN or "(disabled)")
 
 # ================== GOOGLE SHEETS ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-CREDS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
-creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
-gc = gspread.authorize(creds)
 
+if GOOGLE_CREDENTIALS_JSON:
+    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
+else:
+    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
+
+gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
 ws = sh.get_worksheet_by_id(WS_GID)
+log.info("[GS] Connected to worksheet id=%s", WS_GID)
 
 def col_to_index(col_letter: str) -> int:
     idx = 0
@@ -48,6 +76,9 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
+ROW_START_IDX = col_to_index(ROW_START_COL)
+ROW_END_IDX   = col_to_index(ROW_END_COL)
+WRITE_COL_INDEX = col_to_index(WRITE_COLUMN) if WRITE_COLUMN else None
 
 # ================== NORMALIZATION ==================
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
@@ -60,8 +91,13 @@ def normalize_key(s: str) -> str:
     return s
 
 def normalize_msg(t: str) -> str:
-    t = CUSTOM_EMOJI_RE.sub(" ", t)
+    t = CUSTOM_EMOJI_RE.sub(" ", t)  # strip <:emoji:123> from message
     return normalize_key(t)
+
+def try_parse_picknum(text: str) -> Optional[int]:
+    """Detect a leading number like '66.', '66 -', '66)' etc."""
+    m = re.match(r"^\s*(\d+)\s*[).:-]?\s*", text)
+    return int(m.group(1)) if m else None
 
 # ================== LOAD NAMES ==================
 def load_player_names() -> Tuple[List[str], Dict[str, int], List[str], Dict[str, str]]:
@@ -74,15 +110,17 @@ def load_player_names() -> Tuple[List[str], Dict[str, int], List[str], Dict[str,
             name_to_row[v] = i
     keys_norm = [normalize_key(n) for n in names_orig]
     key_to_orig = {normalize_key(n): n for n in names_orig}
-    print(f"[INIT] Loaded {len(names_orig)} names")
+    log.info("[INIT] Loaded %d names", len(names_orig))
     return names_orig, name_to_row, keys_norm, key_to_orig
 
 ALL_NAMES, NAME_TO_ROW, ALL_KEYS, KEY_TO_ORIG = load_player_names()
 
 # ================== MATCHING ==================
 def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
-    q = normalize_msg(text)
-    print(f"[MSG] {text!r} -> {q!r}")
+    # remove a leading pick number when matching names
+    name_part = re.sub(r"^\s*\d+\s*[).:-]?\s*", "", text)
+    q = normalize_msg(name_part)
+    log.info("[MSG] Raw=%r | Cleaned=%r", text, q)
     if not q:
         return None
 
@@ -90,15 +128,28 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
     if exact_orig:
         return (exact_orig, NAME_TO_ROW[exact_orig], 100.0)
 
-    hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD, limit=3)
+    hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_set_ratio, score_cutoff=FUZZY_THRESHOLD, limit=3)
     if not hits:
-        hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_sort_ratio, score_cutoff=LOW_FUZZY_CUTOFF, limit=3)
+        hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_set_ratio, score_cutoff=LOW_FUZZY_CUTOFF, limit=3)
         if not hits:
             return None
 
     best_key, score, _ = hits[0]
     orig = KEY_TO_ORIG.get(best_key)
     return (orig, NAME_TO_ROW[orig], score) if orig else None
+
+# ================== HIGHLIGHT ==================
+def highlight_row(row: int):
+    rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
+    log.info("[HILIGHT] Range=%s", rng)
+    ws.format(rng, {"backgroundColor": {"red": 0.72, "green": 0.89, "blue": 0.79}})  # soft green
+
+def maybe_write_value(row: int, value: Optional[int]):
+    if WRITE_COL_INDEX is None:
+        return
+    out = value if value is not None else 1  # if no pick typed, write 1 by default
+    ws.update_cell(row, WRITE_COL_INDEX, out)
+    log.info("[WRITE] Row=%s Col=%s (%s) -> %s", row, WRITE_COL_INDEX, WRITE_COLUMN, out)
 
 # ================== DISCORD BOT ==================
 intents = Intents.default()
@@ -107,25 +158,38 @@ client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
-    print(f"✅ Logged in as {client.user}")
+    log.info("✅ Logged in as %s | Watching channel %s", client.user, CHANNEL_ID)
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.channel.id != CHANNEL_ID:
         return
 
-    content = message.content.strip()
+    content = (message.content or "").strip()
     if not content:
         return
 
+    log.info("[DISCORD] %s said: %r", message.author, content)
+    typed_pick = try_parse_picknum(content)
+    if typed_pick is not None:
+        log.info("[PICK] Detected typed pick: %s", typed_pick)
+
     best = find_best_match(content)
     if not best:
-        await message.add_reaction("❓")
+        log.info("[MATCH] No match above threshold")
+        try: await message.add_reaction("❓")
+        except Exception: pass
         return
 
-    _, row, score = best
-    print(f"[MATCH] {content} -> row {row}, score={score}")
-    await message.add_reaction("✅")
+    name, row, score = best
+    log.info("[MATCH] %s -> row %s (score=%s)", name, row, score)
+
+    # Highlight & optional write
+    highlight_row(row)
+    maybe_write_value(row, typed_pick)
+
+    try: await message.add_reaction("✅")
+    except Exception: pass
 
 if __name__ == "__main__":
     client.run(DISCORD_TOKEN)
