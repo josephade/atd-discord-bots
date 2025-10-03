@@ -144,7 +144,7 @@ def highlight_row(row: int):
     log.info("[HILIGHT] Range=%s (bg=#2659ea, text=white)", rng)
 
     # Hex #2659ea -> RGB floats 0–1
-    bg = {"red": 38/255, "green": 89/255, "blue": 234/255}
+    bg = {"red": 0.15, "green": 0.35, "blue": 0.85}
 
     ws.format(rng, {
         "backgroundColor": bg,
