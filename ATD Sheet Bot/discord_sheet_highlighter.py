@@ -40,10 +40,8 @@ ROW_END_COL   = os.getenv("ROW_HILIGHT_END", "D").upper()
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "88"))
 LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
 
-# Optional: write to a column (e.g., "E")
 WRITE_COLUMN = os.getenv("WRITE_COLUMN", "").strip().upper()
 
-# Credentials: JSON or PATH
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
@@ -91,7 +89,7 @@ def normalize_key(s: str) -> str:
     return s
 
 def normalize_msg(t: str) -> str:
-    t = CUSTOM_EMOJI_RE.sub(" ", t)  # strip <:emoji:123> from message
+    t = CUSTOM_EMOJI_RE.sub(" ", t) 
     return normalize_key(t)
 
 def try_parse_picknum(text: str) -> Optional[int]:
@@ -117,7 +115,6 @@ ALL_NAMES, NAME_TO_ROW, ALL_KEYS, KEY_TO_ORIG = load_player_names()
 
 # ================== MATCHING ==================
 def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
-    # remove a leading pick number when matching names
     name_part = re.sub(r"^\s*\d+\s*[).:-]?\s*", "", text)
     q = normalize_msg(name_part)
     log.info("[MSG] Raw=%r | Cleaned=%r", text, q)
@@ -141,22 +138,23 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
 # ================== HIGHLIGHT ==================
 def highlight_row(row: int):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-    log.info("[HILIGHT] Range=%s (bg=#2659ea, text=white)", rng)
+    log.info("[HILIGHT] Range=%s (bg=#2659ea, text=white, bold)", rng)
 
-    # Hex #2659ea -> RGB floats 0–1
+    # Hex #2659ea
     bg = {"red": 0.15, "green": 0.35, "blue": 0.85}
 
     ws.format(rng, {
         "backgroundColor": bg,
         "textFormat": {
-            "foregroundColor": {"red": 1, "green": 1, "blue": 1}
+            "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+            "bold": True
         }
     })
 
 def maybe_write_value(row: int, value: Optional[int]):
     if WRITE_COL_INDEX is None:
         return
-    out = value if value is not None else 1  # if no pick typed, write 1 by default
+    out = value if value is not None else 1 
     ws.update_cell(row, WRITE_COL_INDEX, out)
     log.info("[WRITE] Row=%s Col=%s (%s) -> %s", row, WRITE_COL_INDEX, WRITE_COLUMN, out)
 
@@ -193,7 +191,6 @@ async def on_message(message: discord.Message):
     name, row, score = best
     log.info("[MATCH] %s -> row %s (score=%s)", name, row, score)
 
-    # Highlight & optional write
     highlight_row(row)
     maybe_write_value(row, typed_pick)
 
