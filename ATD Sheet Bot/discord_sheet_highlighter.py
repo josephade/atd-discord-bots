@@ -141,8 +141,17 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
 # ================== HIGHLIGHT ==================
 def highlight_row(row: int):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-    log.info("[HILIGHT] Range=%s", rng)
-    ws.format(rng, {"backgroundColor": {"red": 0.72, "green": 0.89, "blue": 0.79}})  # soft green
+    log.info("[HILIGHT] Range=%s (bg=#2659ea, text=white)", rng)
+
+    # Hex #2659ea -> RGB floats 0–1
+    bg = {"red": 38/255, "green": 89/255, "blue": 234/255}
+
+    ws.format(rng, {
+        "backgroundColor": bg,
+        "textFormat": {
+            "foregroundColor": {"red": 1, "green": 1, "blue": 1}
+        }
+    })
 
 def maybe_write_value(row: int, value: Optional[int]):
     if WRITE_COL_INDEX is None:
