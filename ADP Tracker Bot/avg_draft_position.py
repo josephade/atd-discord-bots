@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 from collections import defaultdict
 
@@ -11,28 +12,64 @@ from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
 # ================== ENV CONFIG ==================
-load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+load_dotenv()  # loads .env if present next to the script
 
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-WS_GID = int(os.getenv("GOOGLE_WORKSHEET_GID", "0"))
+# Read raw strings first (so "0" defaults don't hide missing values)
+DISCORD_TOKEN_RAW = os.getenv("DISCORD_TOKEN")
+DISCORD_CHANNEL_ID_RAW = os.getenv("DISCORD_CHANNEL_ID")
+GOOGLE_SHEET_ID_RAW = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_WORKSHEET_GID_RAW = os.getenv("GOOGLE_WORKSHEET_GID")
 
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
-ADP_COL_LETTER = os.getenv("ADP_COLUMN", "C").upper()
+ADP_COL_LETTER  = os.getenv("ADP_COLUMN", "C").upper()
 
-if not (DISCORD_TOKEN and CHANNEL_ID and SHEET_ID and WS_GID):
-    raise SystemExit("Missing env vars. Check .env file!")
+# Figure out credentials source (either JSON or a file path)
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
+
+# Collect missing/invalid envs
+missing = []
+if not DISCORD_TOKEN_RAW:
+    missing.append("DISCORD_TOKEN")
+if not DISCORD_CHANNEL_ID_RAW:
+    missing.append("DISCORD_CHANNEL_ID")
+if not GOOGLE_SHEET_ID_RAW:
+    missing.append("GOOGLE_SHEET_ID")
+if not GOOGLE_WORKSHEET_GID_RAW:
+    missing.append("GOOGLE_WORKSHEET_GID")
+
+# Validate credentials presence
+creds_source = None
+if GOOGLE_CREDENTIALS_JSON:
+    creds_source = "json"
+elif GOOGLE_CREDENTIALS_PATH and os.path.exists(GOOGLE_CREDENTIALS_PATH):
+    creds_source = "file"
+else:
+    missing.append("GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH (file not found)")
+
+# If anything missing -> exit with a clear list
+if missing:
+    msg = "Missing/invalid environment variables:\n  - " + "\n  - ".join(missing)
+    raise SystemExit(msg)
+
+# Safe conversions now that presence is confirmed
+DISCORD_TOKEN = DISCORD_TOKEN_RAW
+CHANNEL_ID = int(DISCORD_CHANNEL_ID_RAW)
+SHEET_ID = GOOGLE_SHEET_ID_RAW
+WS_GID = int(GOOGLE_WORKSHEET_GID_RAW)
 
 # ================== GOOGLE SHEETS ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-CREDS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
-creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
-gc = gspread.authorize(creds)
 
+if creds_source == "json":
+    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
+else:
+    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
+
+gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
 ws = sh.get_worksheet_by_id(WS_GID)
 
@@ -43,10 +80,11 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
-ADP_COL_INDEX = col_to_index(ADP_COL_LETTER)
+ADP_COL_INDEX  = col_to_index(ADP_COL_LETTER)
 
 # ================== NORMALIZATION ==================
-NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
+import re
+NONLETTER_RE  = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
 
 def normalize_key(s: str) -> str:
@@ -92,20 +130,21 @@ def find_best_match(text: str):
 
 @client.event
 async def on_ready():
-    print(f"✅ ADP Tracker Logged in as {client.user}")
+    print(f"✅ ADP Tracker Logged in as {client.user} (channel {CHANNEL_ID})")
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.channel.id != CHANNEL_ID:
         return
 
-    text = message.content.strip()
+    text = (message.content or "").strip()
     if not text:
         return
 
     best = find_best_match(text)
     if not best:
-        await message.add_reaction("❓")
+        try: await message.add_reaction("❓")
+        except Exception: pass
         return
 
     name, row, _ = best
@@ -115,7 +154,8 @@ async def on_message(message: discord.Message):
     avg_pick = sum(pick_history[name]) / len(pick_history[name])
     ws.update_cell(row, ADP_COL_INDEX, round(avg_pick, 2))
     print(f"[UPDATE] {name} -> avg pick {avg_pick:.2f}")
-    await message.add_reaction("✅")
+    try: await message.add_reaction("✅")
+    except Exception: pass
 
 if __name__ == "__main__":
     client.run(DISCORD_TOKEN)
