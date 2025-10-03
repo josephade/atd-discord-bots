@@ -1,8 +1,13 @@
 import os
 import re
 import json
+import sys
 import asyncio
 from collections import defaultdict
+from typing import Optional, Tuple
+
+import logging
+from logging import StreamHandler
 
 import discord
 from discord import Intents
@@ -10,6 +15,27 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
+
+# ================== LOGGING (make Render show every line) ==================
+# Force line-buffered stdout if available (Py3.7+)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+# Send logs to stdout, override any prior config, include level + message
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[StreamHandler(sys.stdout)],
+    force=True,
+)
+log = logging.getLogger("adp-bot")
+
+# Optional: quiet down very chatty libraries
+logging.getLogger("discord").setLevel(logging.INFO)
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("gspread").setLevel(logging.INFO)
 
 # ================== ENV CONFIG ==================
 load_dotenv()  # loads .env if present next to the script
@@ -50,6 +76,7 @@ else:
 # If anything missing -> exit with a clear list
 if missing:
     msg = "Missing/invalid environment variables:\n  - " + "\n  - ".join(missing)
+    log.error(msg)
     raise SystemExit(msg)
 
 # Safe conversions now that presence is confirmed
@@ -58,20 +85,29 @@ CHANNEL_ID = int(DISCORD_CHANNEL_ID_RAW)
 SHEET_ID = GOOGLE_SHEET_ID_RAW
 WS_GID = int(GOOGLE_WORKSHEET_GID_RAW)
 
+log.info("ENV OK | channel=%s sheet=%s gid=%s name_col=%s adp_col=%s",
+         CHANNEL_ID, SHEET_ID, WS_GID, NAME_COL_LETTER, ADP_COL_LETTER)
+
 # ================== GOOGLE SHEETS ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-if creds_source == "json":
-    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
-else:
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
+try:
+    if creds_source == "json":
+        log.info("Using GOOGLE_CREDENTIALS_JSON for auth")
+        creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
+    else:
+        log.info("Using GOOGLE_CREDENTIALS_PATH=%s for auth", GOOGLE_CREDENTIALS_PATH)
+        creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
 
-gc = gspread.authorize(creds)
-sh = gc.open_by_key(SHEET_ID)
-ws = sh.get_worksheet_by_id(WS_GID)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SHEET_ID)
+    ws = sh.get_worksheet_by_id(WS_GID)
+except Exception:
+    log.exception("Failed to initialize Google Sheets client")
+    raise
 
 def col_to_index(col_letter: str) -> int:
     idx = 0
@@ -83,7 +119,6 @@ NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 ADP_COL_INDEX  = col_to_index(ADP_COL_LETTER)
 
 # ================== NORMALIZATION ==================
-import re
 NONLETTER_RE  = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
 
@@ -94,7 +129,12 @@ def normalize_key(s: str) -> str:
 
 # ================== LOAD PLAYERS ==================
 def load_players():
-    col_vals = ws.col_values(NAME_COL_INDEX)
+    try:
+        col_vals = ws.col_values(NAME_COL_INDEX)
+    except Exception:
+        log.exception("Failed to read player name column (index %s) from Google Sheet", NAME_COL_INDEX)
+        raise
+
     names_orig, name_to_row = [], {}
     for i, v in enumerate(col_vals, start=1):
         v = (v or "").strip()
@@ -103,7 +143,7 @@ def load_players():
             name_to_row[v] = i
     keys_norm = [normalize_key(n) for n in names_orig]
     key_to_orig = {normalize_key(n): n for n in names_orig}
-    print(f"[INIT] Loaded {len(names_orig)} players")
+    log.info("[INIT] Loaded %d players", len(names_orig))
     return names_orig, name_to_row, keys_norm, key_to_orig
 
 ALL_NAMES, NAME_TO_ROW, ALL_KEYS, KEY_TO_ORIG = load_players()
@@ -115,47 +155,98 @@ client = discord.Client(intents=intents)
 
 pick_history = defaultdict(list)
 
-def find_best_match(text: str):
+def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
     q = normalize_key(text)
+    log.info("[MSG] Raw=%r | Normalized=%r", text, q)
+
     exact_orig = KEY_TO_ORIG.get(q)
     if exact_orig:
+        log.info("[MATCH] Exact match -> %s (row=%s, score=100)", exact_orig, NAME_TO_ROW[exact_orig])
         return exact_orig, NAME_TO_ROW[exact_orig], 100.0
 
     hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_sort_ratio, score_cutoff=85, limit=1)
     if hits:
         best_key, score, _ = hits[0]
         orig = KEY_TO_ORIG.get(best_key)
-        return (orig, NAME_TO_ROW[orig], score) if orig else None
+        if orig:
+            log.info("[MATCH] Fuzzy match -> %s (row=%s, score=%.1f)", orig, NAME_TO_ROW[orig], score)
+            return orig, NAME_TO_ROW[orig], score
+
+    log.info("[MATCH] No match above threshold")
     return None
+
+async def heartbeat():
+    # keep-alive log every 5 minutes
+    while True:
+        log.info("heartbeat: bot alive; watching channel %s", CHANNEL_ID)
+        await asyncio.sleep(300)
 
 @client.event
 async def on_ready():
-    print(f"✅ ADP Tracker Logged in as {client.user} (channel {CHANNEL_ID})")
+    log.info("✅ ADP Tracker Logged in as %s (channel %s)", client.user, CHANNEL_ID)
+    try:
+        client.loop.create_task(heartbeat())
+    except Exception:
+        # older discord.py versions may differ; ignore if it fails
+        pass
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot or message.channel.id != CHANNEL_ID:
-        return
+    try:
+        if message.author.bot or message.channel.id != CHANNEL_ID:
+            return
 
-    text = (message.content or "").strip()
-    if not text:
-        return
+        text = (message.content or "").strip()
+        if not text:
+            return
 
-    best = find_best_match(text)
-    if not best:
-        try: await message.add_reaction("❓")
-        except Exception: pass
-        return
+        log.info("[DISCORD] %s#%s said: %r", message.author.name, message.author.discriminator, text)
 
-    name, row, _ = best
-    pick_num = len(pick_history[name]) + 1
-    pick_history[name].append(pick_num)
+        best = find_best_match(text)
+        if not best:
+            try:
+                await message.add_reaction("❓")
+            except Exception:
+                log.warning("Failed to add ❓ reaction", exc_info=True)
+            return
 
-    avg_pick = sum(pick_history[name]) / len(pick_history[name])
-    ws.update_cell(row, ADP_COL_INDEX, round(avg_pick, 2))
-    print(f"[UPDATE] {name} -> avg pick {avg_pick:.2f}")
-    try: await message.add_reaction("✅")
-    except Exception: pass
+        name, row, _ = best
+
+        # If your messages include "65. Player Name", you can parse the leading number:
+        typed_pick = None
+        m = re.match(r"^\s*(\d+)", text)
+        if m:
+            typed_pick = int(m.group(1))
+        else:
+            # fallback to simple running average index if you want
+            pick_num = len(pick_history[name]) + 1
+            pick_history[name].append(pick_num)
+            typed_pick = round(sum(pick_history[name]) / len(pick_history[name]), 2)
+
+        # Write to Sheets
+        try:
+            ws.update_cell(row, ADP_COL_INDEX, typed_pick)
+            log.info("[UPDATE] Wrote %s to row=%s col=%s for %s",
+                     typed_pick, row, ADP_COL_INDEX, name)
+        except Exception:
+            log.exception("Sheets update failed for row=%s col=%s value=%r", row, ADP_COL_INDEX, typed_pick)
+            try:
+                await message.add_reaction("‼️")
+            except Exception:
+                pass
+            return
+
+        # React success
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            log.warning("Failed to add ✅ reaction", exc_info=True)
+
+    except Exception:
+        log.exception("Unhandled exception in on_message")
 
 if __name__ == "__main__":
+    # extra safety: unbuffered mode hint
+    if not os.getenv("PYTHONUNBUFFERED"):
+        log.info("Tip: set PYTHONUNBUFFERED=1 or run with `python -u` for instant logs")
     client.run(DISCORD_TOKEN)
