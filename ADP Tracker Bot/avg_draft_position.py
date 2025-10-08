@@ -2,7 +2,6 @@ import os
 import re
 import json
 import logging
-from collections import defaultdict
 
 import discord
 from discord import Intents
@@ -11,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
-# ----------------- logging (unbuffered-friendly) -----------------
+# ----------------- logging -----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
@@ -21,7 +20,7 @@ log = logging.getLogger("adp")
 # ----------------- env -----------------
 load_dotenv()
 
-def need(name):
+def need(name: str) -> str:
     v = os.getenv(name)
     if not v:
         raise SystemExit(f"Missing env: {name}")
@@ -37,7 +36,7 @@ GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.
 # Name column (where player names live)
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "A").upper()
 
-# Channel/column mapping (two channels)
+# Two channels -> two columns
 CHAN1 = int(need("DISCORD_CHANNEL_ID_1"))
 COL1  = need("ADP_COLUMN_1").upper()   # e.g. "E"
 CHAN2 = int(need("DISCORD_CHANNEL_ID_2"))
@@ -54,12 +53,8 @@ def col_to_index(col_letter: str) -> int:
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 
-channel_to_col_letter = {
-    CHAN1: COL1,
-    CHAN2: COL2,
-}
-channel_to_col_index = {ch: col_to_index(letter)
-                        for ch, letter in channel_to_col_letter.items()}
+channel_to_col_letter = { CHAN1: COL1, CHAN2: COL2 }
+channel_to_col_index  = { ch: col_to_index(letter) for ch, letter in channel_to_col_letter.items() }
 
 log.info(f"[CFG] Name column: {NAME_COL_LETTER} ({NAME_COL_INDEX})")
 for ch, letter in channel_to_col_letter.items():
@@ -105,40 +100,38 @@ def load_players():
 
 NAMES, NAME_TO_ROW, KEY_TO_ORIG = load_players()
 
-# ----------------- discord -----------------
-intents = Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
-# keep per-player history to compute running average
-pick_history = defaultdict(list)
+# ----------------- parsing & matching -----------------
+LEADING_PICK_RE = re.compile(r"^\s*(\d+)\s*[).:-]?\s*", re.ASCII)
 
 def try_parse_picknum(text: str):
-    m = re.match(r"^\s*(\d+)\s*[).:-]?", text)
+    m = LEADING_PICK_RE.match(text)
     return int(m.group(1)) if m else None
 
 def find_best_match(text: str):
-    # remove emojis and punctuation from name part only
-    # we’ll also accept messages like "67. Player Name"
-    # extract the non-number part for name matching
-    text_no_pick = re.sub(r"^\s*\d+\s*[).:-]?\s*", "", text)
+    # remove the leading pick before matching the name
+    text_no_pick = LEADING_PICK_RE.sub("", text)
     cleaned = clean(text_no_pick)
     if not cleaned:
         return None
 
-    # exact first
     exact = KEY_TO_ORIG.get(cleaned)
     if exact:
         return exact, NAME_TO_ROW[exact], 100.0
 
-    # fuzzy (ignore team emoji/name)
-    hits = process.extract(cleaned, list(KEY_TO_ORIG.keys()),
-                          scorer=fuzz.token_set_ratio, limit=1)
+    # fuzzy fallback
+    keys = list(KEY_TO_ORIG.keys())
+    hits = process.extract(cleaned, keys, scorer=fuzz.token_set_ratio, limit=1)
     if hits:
         k, score, _ = hits[0]
         if score >= 85:
-            return KEY_TO_ORIG[k], NAME_TO_ROW[KEY_TO_ORIG[k]], score
+            orig = KEY_TO_ORIG[k]
+            return orig, NAME_TO_ROW[orig], score
     return None
+
+# ----------------- discord -----------------
+intents = Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
@@ -159,14 +152,18 @@ async def on_message(message: discord.Message):
         return
 
     log.info(f"[DISCORD] {message.author} said: {raw!r}")
+
     pick_num = try_parse_picknum(raw)
     if pick_num is None:
         log.info("[PICK] No pick number found; ignoring.")
+        try: await message.add_reaction("❓")
+        except Exception: pass
         return
+
     log.info(f"[PICK] Detected typed pick: {pick_num}")
 
     best = find_best_match(raw)
-    log.info(f"[MSG] Raw={raw!r} | Cleaned={clean(re.sub(r'^\\s*\\d+\\s*[).:-]?\\s*','',raw))!r}")
+    log.info(f"[MSG] Raw={raw!r} | Cleaned={clean(LEADING_PICK_RE.sub('', raw))!r}")
     if not best:
         log.info("[MATCH] No match above threshold")
         try: await message.add_reaction("❓")
@@ -176,12 +173,9 @@ async def on_message(message: discord.Message):
     name, row, score = best
     log.info(f"[MATCH] {'Exact' if score==100 else 'Fuzzy'} -> {name} (row={row}, score={score})")
 
-    # update running average (first time == typed pick)
-    pick_history[name].append(pick_num)
-    avg_pick = round(sum(pick_history[name]) / len(pick_history[name]), 2)
-
-    ws.update_cell(row, col_index, avg_pick)
-    log.info(f"[UPDATE] {name} -> wrote avg {avg_pick:.2f} to row {row} col {col_index} ({col_letter})")
+    # *** write EXACT typed pick (no averaging) ***
+    ws.update_cell(row, col_index, int(pick_num))
+    log.info(f"[UPDATE] {name} -> wrote pick {pick_num} to row {row} col {col_index} ({col_letter})")
 
     try: await message.add_reaction("✅")
     except Exception: pass
