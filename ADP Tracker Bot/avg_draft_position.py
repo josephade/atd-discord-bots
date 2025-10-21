@@ -173,7 +173,6 @@ async def on_message(message: discord.Message):
     name, row, score = best
     log.info(f"[MATCH] {'Exact' if score==100 else 'Fuzzy'} -> {name} (row={row}, score={score})")
 
-    # *** write EXACT typed pick (no averaging) ***
     ws.update_cell(row, col_index, int(pick_num))
     log.info(f"[UPDATE] {name} -> wrote pick {pick_num} to row {row} col {col_index} ({col_letter})")
 
