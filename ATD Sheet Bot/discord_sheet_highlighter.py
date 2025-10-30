@@ -28,35 +28,35 @@ def need(name: str) -> str:
     return v
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
-CHANNEL_ID = int(need("DISCORD_CHANNEL_ID"))
+
+# Support two channels → two worksheets
+CHANNEL_ID_1 = int(need("DISCORD_CHANNEL_ID_1"))
+CHANNEL_ID_2 = int(need("DISCORD_CHANNEL_ID_2"))
 
 SHEET_ID = need("GOOGLE_SHEET_ID")
-WS_GID = int(need("GOOGLE_WORKSHEET_GID"))
+WS_GID_1 = int(need("GOOGLE_WORKSHEET_GID_1"))
+WS_GID_2 = int(need("GOOGLE_WORKSHEET_GID_2"))
 
+# Common formatting config
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
-ROW_END_COL   = os.getenv("ROW_HILIGHT_END", "D").upper()
+ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
+WRITE_COLUMN = os.getenv("WRITE_COLUMN", "").strip().upper()
 
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "88"))
 LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
 
-WRITE_COLUMN = os.getenv("WRITE_COLUMN", "").strip().upper()
-
+# ================== GOOGLE SHEETS AUTH ==================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
 if not GOOGLE_CREDENTIALS_JSON and not os.path.exists(GOOGLE_CREDENTIALS_PATH):
-    raise SystemExit("Missing credentials: set GOOGLE_CREDENTIALS_JSON or a valid GOOGLE_CREDENTIALS_PATH")
+    raise SystemExit("Missing credentials: set GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH")
 
-log.info("[CFG] Channel=%s | Sheet=%s gid=%s | Names=%s | Highlight=%s:%s | WriteColumn=%s",
-         CHANNEL_ID, SHEET_ID, WS_GID, NAME_COL_LETTER, ROW_START_COL, ROW_END_COL, WRITE_COLUMN or "(disabled)")
-
-# ================== GOOGLE SHEETS ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 if GOOGLE_CREDENTIALS_JSON:
     creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
 else:
@@ -64,8 +64,11 @@ else:
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
-ws = sh.get_worksheet_by_id(WS_GID)
-log.info("[GS] Connected to worksheet id=%s", WS_GID)
+ws_map = {
+    CHANNEL_ID_1: sh.get_worksheet_by_id(WS_GID_1),
+    CHANNEL_ID_2: sh.get_worksheet_by_id(WS_GID_2),
+}
+log.info("[GS] Connected to %s with 2 worksheets: %s and %s", SHEET_ID, WS_GID_1, WS_GID_2)
 
 def col_to_index(col_letter: str) -> int:
     idx = 0
@@ -75,7 +78,7 @@ def col_to_index(col_letter: str) -> int:
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 ROW_START_IDX = col_to_index(ROW_START_COL)
-ROW_END_IDX   = col_to_index(ROW_END_COL)
+ROW_END_IDX = col_to_index(ROW_END_COL)
 WRITE_COL_INDEX = col_to_index(WRITE_COLUMN) if WRITE_COLUMN else None
 
 # ================== NORMALIZATION ==================
@@ -89,16 +92,15 @@ def normalize_key(s: str) -> str:
     return s
 
 def normalize_msg(t: str) -> str:
-    t = CUSTOM_EMOJI_RE.sub(" ", t) 
+    t = CUSTOM_EMOJI_RE.sub(" ", t)
     return normalize_key(t)
 
 def try_parse_picknum(text: str) -> Optional[int]:
-    """Detect a leading number like '66.', '66 -', '66)' etc."""
     m = re.match(r"^\s*(\d+)\s*[).:-]?\s*", text)
     return int(m.group(1)) if m else None
 
 # ================== LOAD NAMES ==================
-def load_player_names() -> Tuple[List[str], Dict[str, int], List[str], Dict[str, str]]:
+def load_player_names(ws) -> Tuple[List[str], Dict[str, int], List[str], Dict[str, str]]:
     col_vals = ws.col_values(NAME_COL_INDEX)
     names_orig, name_to_row = [], {}
     for i, v in enumerate(col_vals, start=1):
@@ -108,41 +110,42 @@ def load_player_names() -> Tuple[List[str], Dict[str, int], List[str], Dict[str,
             name_to_row[v] = i
     keys_norm = [normalize_key(n) for n in names_orig]
     key_to_orig = {normalize_key(n): n for n in names_orig}
-    log.info("[INIT] Loaded %d names", len(names_orig))
+    log.info("[INIT] Loaded %d names from %s", len(names_orig), ws.title)
     return names_orig, name_to_row, keys_norm, key_to_orig
 
-ALL_NAMES, NAME_TO_ROW, ALL_KEYS, KEY_TO_ORIG = load_player_names()
+# load player maps per worksheet
+data_maps = {}
+for cid, ws in ws_map.items():
+    data_maps[cid] = load_player_names(ws)
 
 # ================== MATCHING ==================
-def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
+def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
+    names_orig, name_to_row, keys_norm, key_to_orig = data_maps[ws_id]
     name_part = re.sub(r"^\s*\d+\s*[).:-]?\s*", "", text)
     q = normalize_msg(name_part)
     log.info("[MSG] Raw=%r | Cleaned=%r", text, q)
     if not q:
         return None
 
-    exact_orig = KEY_TO_ORIG.get(q)
+    exact_orig = key_to_orig.get(q)
     if exact_orig:
-        return (exact_orig, NAME_TO_ROW[exact_orig], 100.0)
+        return (exact_orig, name_to_row[exact_orig], 100.0)
 
-    hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_set_ratio, score_cutoff=FUZZY_THRESHOLD, limit=3)
+    hits = process.extract(q, keys_norm, scorer=fuzz.token_set_ratio, score_cutoff=FUZZY_THRESHOLD, limit=3)
     if not hits:
-        hits = process.extract(q, ALL_KEYS, scorer=fuzz.token_set_ratio, score_cutoff=LOW_FUZZY_CUTOFF, limit=3)
+        hits = process.extract(q, keys_norm, scorer=fuzz.token_set_ratio, score_cutoff=LOW_FUZZY_CUTOFF, limit=3)
         if not hits:
             return None
 
     best_key, score, _ = hits[0]
-    orig = KEY_TO_ORIG.get(best_key)
-    return (orig, NAME_TO_ROW[orig], score) if orig else None
+    orig = key_to_orig.get(best_key)
+    return (orig, name_to_row[orig], score) if orig else None
 
 # ================== HIGHLIGHT ==================
-def highlight_row(row: int):
+def highlight_row(ws, row: int):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-    log.info("[HILIGHT] Range=%s (bg=#2659ea, text=white, bold)", rng)
-
-    # Hex #2659ea
+    log.info("[HILIGHT] %s Range=%s (bg=#2659ea, text=white, bold)", ws.title, rng)
     bg = {"red": 0.15, "green": 0.35, "blue": 0.85}
-
     ws.format(rng, {
         "backgroundColor": bg,
         "textFormat": {
@@ -151,12 +154,12 @@ def highlight_row(row: int):
         }
     })
 
-def maybe_write_value(row: int, value: Optional[int]):
+def maybe_write_value(ws, row: int, value: Optional[int]):
     if WRITE_COL_INDEX is None:
         return
-    out = value if value is not None else 1 
+    out = value if value is not None else 1
     ws.update_cell(row, WRITE_COL_INDEX, out)
-    log.info("[WRITE] Row=%s Col=%s (%s) -> %s", row, WRITE_COL_INDEX, WRITE_COLUMN, out)
+    log.info("[WRITE] %s Row=%s Col=%s (%s) -> %s", ws.title, row, WRITE_COL_INDEX, WRITE_COLUMN, out)
 
 # ================== DISCORD BOT ==================
 intents = Intents.default()
@@ -165,37 +168,45 @@ client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
-    log.info("✅ Logged in as %s | Watching channel %s", client.user, CHANNEL_ID)
+    log.info("✅ Logged in as %s | Watching channels: %s and %s", client.user, CHANNEL_ID_1, CHANNEL_ID_2)
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot or message.channel.id != CHANNEL_ID:
+    if message.author.bot:
         return
+
+    ws = ws_map.get(message.channel.id)
+    if not ws:
+        return  # ignore messages outside tracked channels
 
     content = (message.content or "").strip()
     if not content:
         return
 
-    log.info("[DISCORD] %s said: %r", message.author, content)
+    log.info("[DISCORD] %s (%s) said: %r", message.author, ws.title, content)
     typed_pick = try_parse_picknum(content)
     if typed_pick is not None:
         log.info("[PICK] Detected typed pick: %s", typed_pick)
 
-    best = find_best_match(content)
+    best = find_best_match(message.channel.id, content)
     if not best:
         log.info("[MATCH] No match above threshold")
-        try: await message.add_reaction("❓")
-        except Exception: pass
+        try:
+            await message.add_reaction("❓")
+        except Exception:
+            pass
         return
 
     name, row, score = best
-    log.info("[MATCH] %s -> row %s (score=%s)", name, row, score)
+    log.info("[MATCH] %s (%s) -> row %s (score=%s)", name, ws.title, row, score)
 
-    highlight_row(row)
-    maybe_write_value(row, typed_pick)
+    highlight_row(ws, row)
+    maybe_write_value(ws, row, typed_pick)
 
-    try: await message.add_reaction("✅")
-    except Exception: pass
+    try:
+        await message.add_reaction("✅")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     client.run(DISCORD_TOKEN)
