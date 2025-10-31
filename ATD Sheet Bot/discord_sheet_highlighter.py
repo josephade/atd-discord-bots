@@ -29,7 +29,7 @@ def need(name: str) -> str:
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
 
-# Support two channels → two worksheets
+# Two Discord channels → two Google Sheet tabs
 CHANNEL_ID_1 = int(need("DISCORD_CHANNEL_ID_1"))
 CHANNEL_ID_2 = int(need("DISCORD_CHANNEL_ID_2"))
 
@@ -37,11 +37,10 @@ SHEET_ID = need("GOOGLE_SHEET_ID")
 WS_GID_1 = int(need("GOOGLE_WORKSHEET_GID_1"))
 WS_GID_2 = int(need("GOOGLE_WORKSHEET_GID_2"))
 
-# Common formatting config
+# Highlight configuration
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
-WRITE_COLUMN = os.getenv("WRITE_COLUMN", "").strip().upper()
 
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "88"))
 LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
@@ -77,9 +76,6 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
-ROW_START_IDX = col_to_index(ROW_START_COL)
-ROW_END_IDX = col_to_index(ROW_END_COL)
-WRITE_COL_INDEX = col_to_index(WRITE_COLUMN) if WRITE_COLUMN else None
 
 # ================== NORMALIZATION ==================
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
@@ -96,6 +92,7 @@ def normalize_msg(t: str) -> str:
     return normalize_key(t)
 
 def try_parse_picknum(text: str) -> Optional[int]:
+    """Detect a leading number like '66.', '66 -', '66)' etc."""
     m = re.match(r"^\s*(\d+)\s*[).:-]?\s*", text)
     return int(m.group(1)) if m else None
 
@@ -120,46 +117,77 @@ for cid, ws in ws_map.items():
 
 # ================== MATCHING ==================
 def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
+    """Find the best matching player name, even inside full sentences."""
     names_orig, name_to_row, keys_norm, key_to_orig = data_maps[ws_id]
-    name_part = re.sub(r"^\s*\d+\s*[).:-]?\s*", "", text)
-    q = normalize_msg(name_part)
-    log.info("[MSG] Raw=%r | Cleaned=%r", text, q)
-    if not q:
+
+    # 1️⃣ Clean and normalize the message
+    msg_clean = normalize_msg(text)
+    log.info("[MSG] Raw=%r | Normalized=%r", text, msg_clean)
+
+    if not msg_clean:
         return None
 
-    exact_orig = key_to_orig.get(q)
-    if exact_orig:
-        return (exact_orig, name_to_row[exact_orig], 100.0)
+    # 2️⃣ Tokenize message into possible name fragments
+    # remove common filler/stop words
+    stopwords = {
+        "the", "from", "you", "u", "for", "and", "but", "with", "to", "of", "my",
+        "your", "me", "lock", "locks", "steal", "stole", "draft", "pick", "round",
+        "team", "up", "haha", "hahaha", "lmao", "lol", "yo", "bro", "him", "her"
+    }
+    tokens = [w for w in re.split(r"\s+", msg_clean) if w and w not in stopwords]
 
-    hits = process.extract(q, keys_norm, scorer=fuzz.token_set_ratio, score_cutoff=FUZZY_THRESHOLD, limit=3)
-    if not hits:
-        hits = process.extract(q, keys_norm, scorer=fuzz.token_set_ratio, score_cutoff=LOW_FUZZY_CUTOFF, limit=3)
-        if not hits:
-            return None
+    if not tokens:
+        return None
 
-    best_key, score, _ = hits[0]
-    orig = key_to_orig.get(best_key)
-    return (orig, name_to_row[orig], score) if orig else None
+    # 3️⃣ Generate n-grams (1–3 words) to catch names like "Nikola Jokic"
+    candidates = set()
+    for i in range(len(tokens)):
+        for j in range(i + 1, min(len(tokens), i + 3) + 1):
+            frag = " ".join(tokens[i:j])
+            if len(frag) >= 3:
+                candidates.add(frag)
+
+    # 4️⃣ Fuzzy match each candidate against player names
+    best_match = None
+    best_score = 0
+    best_orig = None
+
+    for cand in candidates:
+        hits = process.extract(cand, keys_norm, scorer=fuzz.token_set_ratio, limit=1)
+        if hits:
+            k, score, _ = hits[0]
+            if score > best_score:
+                best_score = score
+                best_orig = key_to_orig.get(k)
+
+    # 5️⃣ Return match only if above threshold
+    if best_orig and best_score >= LOW_FUZZY_CUTOFF:
+        log.info("[SMART MATCH] '%s' → %s (score=%s)", text, best_orig, best_score)
+        return (best_orig, name_to_row[best_orig], best_score)
+    else:
+        log.info("[SMART MATCH] No strong player name found in: %r", text)
+        return None
+
+
 
 # ================== HIGHLIGHT ==================
 def highlight_row(ws, row: int):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-    log.info("[HILIGHT] %s Range=%s (bg=#2659ea, text=white, bold)", ws.title, rng)
-    bg = {"red": 0.15, "green": 0.35, "blue": 0.85}
+    log.info("[HILIGHT] %s Range=%s (bg=#4a86e8, text=black, font=Roboto Condensed, size=10px, not bold)", ws.title, rng)
+    
+    # Hex #4A86E8 → RGB (0.290, 0.525, 0.909)
+    bg = {"red": 0.29, "green": 0.525, "blue": 0.909}
+    text_color = {"red": 0, "green": 0, "blue": 0}
+
     ws.format(rng, {
         "backgroundColor": bg,
         "textFormat": {
-            "foregroundColor": {"red": 1, "green": 1, "blue": 1},
-            "bold": True
+            "foregroundColor": text_color,
+            "bold": False,
+            "fontSize": 10,
+            "fontFamily": "Roboto Condensed"
         }
     })
-
-def maybe_write_value(ws, row: int, value: Optional[int]):
-    if WRITE_COL_INDEX is None:
-        return
-    out = value if value is not None else 1
-    ws.update_cell(row, WRITE_COL_INDEX, out)
-    log.info("[WRITE] %s Row=%s Col=%s (%s) -> %s", ws.title, row, WRITE_COL_INDEX, WRITE_COLUMN, out)
 
 # ================== DISCORD BOT ==================
 intents = Intents.default()
@@ -184,9 +212,6 @@ async def on_message(message: discord.Message):
         return
 
     log.info("[DISCORD] %s (%s) said: %r", message.author, ws.title, content)
-    typed_pick = try_parse_picknum(content)
-    if typed_pick is not None:
-        log.info("[PICK] Detected typed pick: %s", typed_pick)
 
     best = find_best_match(message.channel.id, content)
     if not best:
@@ -201,7 +226,6 @@ async def on_message(message: discord.Message):
     log.info("[MATCH] %s (%s) -> row %s (score=%s)", name, ws.title, row, score)
 
     highlight_row(ws, row)
-    maybe_write_value(ws, row, typed_pick)
 
     try:
         await message.add_reaction("✅")
