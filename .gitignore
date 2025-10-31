@@ -1,6 +1,7 @@
 # .gitignore
 *.env
 service_account.json
+credentials.json
 __pycache__/
 *.pyc
 .env
