@@ -37,8 +37,8 @@ NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 
-FUZZY_THRESHOLD = 75   # relaxed
-LOW_FUZZY_CUTOFF = 65  # extra fallback
+FUZZY_THRESHOLD = 75
+LOW_FUZZY_CUTOFF = 65
 
 # ================== GOOGLE AUTH ==================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -197,8 +197,12 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot or message.webhook_id is not None:
         return
-    if message.type != MessageType.default:
+
+    # ✅ Allow both normal and reply messages
+    if message.type not in (MessageType.default, MessageType.reply):
         return
+
+    # Skip non-text content (images, stickers, etc.)
     if message.attachments or message.embeds or message.stickers:
         return
 
@@ -207,6 +211,12 @@ async def on_message(message: discord.Message):
         return
 
     content = (message.content or "").strip()
+    if message.reference and message.reference.resolved:
+        parent = message.reference.resolved
+        if isinstance(parent, discord.Message) and parent.content:
+            log.info(f"[FROM REPLY] Combining with parent: '{parent.content[:50]}'")
+            content = f"{parent.content} {content}".strip()
+
     if not content:
         return
 
