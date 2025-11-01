@@ -31,9 +31,10 @@ def need(name: str) -> str:
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
 
-# Multi-channel / multi-tab support
+# Support 2 channels → 2 worksheets
 CHANNEL_ID_1 = int(need("DISCORD_CHANNEL_ID_1"))
 CHANNEL_ID_2 = int(need("DISCORD_CHANNEL_ID_2"))
+
 SHEET_ID = need("GOOGLE_SHEET_ID")
 WS_GID_1 = int(need("GOOGLE_WORKSHEET_GID_1"))
 WS_GID_2 = int(need("GOOGLE_WORKSHEET_GID_2"))
@@ -46,14 +47,13 @@ ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "88"))
 LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
 
-# Google auth
+# ================== GOOGLE AUTH ==================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
 if not GOOGLE_CREDENTIALS_JSON and not os.path.exists(GOOGLE_CREDENTIALS_PATH):
     raise SystemExit("Missing credentials: set GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH")
 
-# ================== GOOGLE SHEETS ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -74,7 +74,9 @@ ws_map = {
 
 log.info("[GS] Connected to %s with worksheets %s and %s", SHEET_ID, WS_GID_1, WS_GID_2)
 
+# ================== HELPERS ==================
 def col_to_index(col_letter: str) -> int:
+    """Convert Excel-style letters (e.g. 'A', 'AZ') → numeric index."""
     idx = 0
     for c in col_letter.strip().upper():
         idx = idx * 26 + (ord(c) - 64)
@@ -82,7 +84,6 @@ def col_to_index(col_letter: str) -> int:
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 
-# ================== NORMALIZATION ==================
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
 CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
@@ -110,17 +111,14 @@ def load_player_names(ws) -> Tuple[List[str], Dict[str, int], List[str], Dict[st
     log.info("[INIT] Loaded %d names from '%s'", len(names_orig), ws.title)
     return names_orig, name_to_row, keys_norm, key_to_orig
 
-data_maps = {}
-for cid, ws in ws_map.items():
-    data_maps[cid] = load_player_names(ws)
+data_maps = {cid: load_player_names(ws) for cid, ws in ws_map.items()}
 
-# ================== IMPROVED MATCHING ==================
+# ================== MATCHING ==================
 def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
-    """Smart fuzzy matcher with token order priority and better disambiguation."""
     names_orig, name_to_row, keys_norm, key_to_orig = data_maps[ws_id]
     msg_clean = normalize_msg(text)
 
-    # Strip prices and comments like ($1), (other pick ...)
+    # Remove $ and comments
     msg_clean = re.sub(r"\$?\d+(\.\d+)?", "", msg_clean)
     msg_clean = re.sub(r"\([^)]*\)", "", msg_clean)
     msg_clean = msg_clean.strip()
@@ -139,30 +137,26 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
     if len(tokens) == 1 and len(tokens[0]) < 4:
         return None  # ignore generic one-word messages
 
-    # Exact direct match
+    # Direct match first
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
             log.info(f"[DIRECT MATCH] '{msg_clean}' -> {orig}")
             return orig, name_to_row[orig], 100.0
 
-    # Fuzzy search
+    # Fuzzy
     hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
     if not hits:
         return None
 
-    # Manual re-ranking
     best_key, best_score = None, 0
     for key, score, _ in hits:
         orig = key_to_orig.get(key)
         if not orig:
             continue
-
-        # Boost if tokens appear in same order
         if normalize_key(orig) in msg_clean:
             score += 10
         elif normalize_key(orig).split()[0] == msg_clean.split()[0]:
             score += 5
-
         if score > best_score:
             best_score, best_key = score, key
 
@@ -174,29 +168,44 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
     log.info("[MATCH] No strong enough match found for '%s'", text)
     return None
 
-# ================== HIGHLIGHT ==================
+# ================== RELIABLE HIGHLIGHT ==================
 async def highlight_row(ws, row: int):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
     log.info("[HIGHLIGHT] %s range=%s", ws.title, rng)
 
-    # #4a86e8 background, black text, Roboto Condensed font, size 10
-    bg = {"red": 0.29, "green": 0.52, "blue": 0.91}
-    fmt = {
-        "backgroundColor": bg,
-        "textFormat": {
-            "foregroundColor": {"red": 0, "green": 0, "blue": 0},
-            "fontFamily": "Roboto Condensed",
-            "fontSize": 10,
-            "bold": False
-        }
+    # Color + text style
+    bg = {"red": 0.29, "green": 0.52, "blue": 0.91}  # #4a86e8
+    text_fmt = {
+        "foregroundColor": {"red": 0, "green": 0, "blue": 0},
+        "fontFamily": "Roboto Condensed",
+        "fontSize": 10,
+        "bold": False
     }
 
-    await asyncio.to_thread(ws.format, rng, fmt)
+    requests = [{
+        "repeatCell": {
+            "range": {
+                "sheetId": ws.id,
+                "startRowIndex": row - 1,
+                "endRowIndex": row,
+                "startColumnIndex": col_to_index(ROW_START_COL) - 1,
+                "endColumnIndex": col_to_index(ROW_END_COL),
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": bg,
+                    "textFormat": text_fmt
+                }
+            },
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"
+        }
+    }]
+
+    await asyncio.to_thread(ws.spreadsheet.batch_update, {"requests": requests})
 
 # ================== DISCORD BOT ==================
 intents = Intents.default()
 intents.message_content = True
-
 client = discord.Client(intents=intents, reconnect=True)
 
 @client.event
@@ -228,11 +237,13 @@ async def on_message(message: discord.Message):
 
     best = find_best_match(message.channel.id, content)
     if not best:
-        return  # no ? reaction spam
+        return
 
     name, row, score = best
     log.info("[MATCH] %s (%s) → row %s (score=%.1f)", name, ws.title, row, score)
+
     await highlight_row(ws, row)
+
     try:
         await message.add_reaction("✅")
     except Exception:
