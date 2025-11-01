@@ -113,9 +113,10 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
     msg_clean = normalize_msg(text)
 
+    # ✅ Smarter skip detection — only skip if message is short and mostly skip words
     skip_triggers = {"skipped", "skip", "pass", "waiting"}
-    if any(word in msg_clean for word in skip_triggers):
-        log.info("[SKIP] Ignored system message")
+    if len(msg_clean.split()) <= 3 and any(word in msg_clean for word in skip_triggers):
+        log.info(f"[SKIP] Ignored short skip-like message: '{msg_clean}'")
         return None
     if not msg_clean:
         return None
@@ -142,7 +143,6 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
 
     best_key, best_score = max(hits, key=lambda x: x[1])[:2]
     if best_score < FUZZY_THRESHOLD:
-        # Check if surname is present even if fuzzy low
         last_name = best_key.split()[-1]
         if last_name in msg_clean:
             orig = key_to_orig.get(best_key)
@@ -202,8 +202,8 @@ async def on_message(message: discord.Message):
     if message.type not in (MessageType.default, MessageType.reply):
         return
 
-    # Skip non-text content (images, stickers, etc.)
-    if message.attachments or message.embeds or message.stickers:
+    # ✅ Only skip media-only messages (text + image = allowed)
+    if (message.attachments or message.embeds or message.stickers) and not message.content:
         return
 
     ws = ws_map.get(message.channel.id)
