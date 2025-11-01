@@ -37,8 +37,8 @@ NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 
-FUZZY_THRESHOLD = 80
-LOW_FUZZY_CUTOFF = 70
+FUZZY_THRESHOLD = 75   # relaxed
+LOW_FUZZY_CUTOFF = 65  # extra fallback
 
 # ================== GOOGLE AUTH ==================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -68,20 +68,26 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
+CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
-CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+SMART_QUOTE_RE = re.compile(r"[‘’´`“”]")  # Unicode quotes/apostrophes
 
 def normalize_key(s: str) -> str:
+    s = SMART_QUOTE_RE.sub("'", s)
     s = NONLETTER_RE.sub(" ", s)
     s = WHITESPACE_RE.sub(" ", s).strip().lower()
     return s
 
 def normalize_msg(t: str) -> str:
+    t = SMART_QUOTE_RE.sub("'", t)
     t = CUSTOM_EMOJI_RE.sub(" ", t)
-    t = re.sub(r"\$?\d+(\.\d+)?", "", t)  # remove $ and numbers
-    t = re.sub(r"\([^)]*\)", "", t)       # remove (...) text
-    return normalize_key(t)
+    t = re.sub(r"[\u200B-\u200D\uFEFF]", "", t)  # remove zero-width spaces
+    t = re.sub(r"\$?\d+(\.\d+)?", "", t)         # remove money/numbers
+    t = re.sub(r"\([^)]*\)", "", t)              # remove (...)
+    t = NONLETTER_RE.sub(" ", t)
+    t = WHITESPACE_RE.sub(" ", t)
+    return t.strip().lower()
 
 # ================== LOAD NAMES ==================
 def load_player_names(ws):
@@ -111,8 +117,7 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     if any(word in msg_clean for word in skip_triggers):
         log.info("[SKIP] Ignored system message")
         return None
-
-    if not msg_clean or len(msg_clean.split()) < 2:
+    if not msg_clean:
         return None
 
     # 1️⃣ Direct substring match
@@ -134,10 +139,19 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     if not hits:
         log.info(f"[MATCH] No hits for '{msg_clean}'")
         return None
+
     best_key, best_score = max(hits, key=lambda x: x[1])[:2]
     if best_score < FUZZY_THRESHOLD:
+        # Check if surname is present even if fuzzy low
+        last_name = best_key.split()[-1]
+        if last_name in msg_clean:
+            orig = key_to_orig.get(best_key)
+            if orig:
+                log.info(f"[SURNAME+FUZZY MATCH] '{msg_clean}' → {orig} (score={best_score})")
+                return orig, name_to_row[orig], best_score, "Surname+Fuzzy"
         log.info(f"[MATCH] Weak fuzzy {best_score} for '{msg_clean}' (best={best_key})")
         return None
+
     orig = key_to_orig.get(best_key)
     if orig:
         log.info(f"[FUZZY MATCH] '{msg_clean}' → {orig} (score={best_score})")
