@@ -14,10 +14,7 @@ from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
 # ================== LOGGING ==================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("highlighter")
 
 # ================== ENV CONFIG ==================
@@ -30,35 +27,27 @@ def need(name: str) -> str:
     return v
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
-
-# Two Discord channels → two Google Sheet tabs
 CHANNEL_ID_1 = int(need("DISCORD_CHANNEL_ID_1"))
 CHANNEL_ID_2 = int(need("DISCORD_CHANNEL_ID_2"))
-
 SHEET_ID = need("GOOGLE_SHEET_ID")
 WS_GID_1 = int(need("GOOGLE_WORKSHEET_GID_1"))
 WS_GID_2 = int(need("GOOGLE_WORKSHEET_GID_2"))
 
-# Highlight formatting
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 
-FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "88"))
-LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", "80"))
+FUZZY_THRESHOLD = 80
+LOW_FUZZY_CUTOFF = 70
 
 # ================== GOOGLE AUTH ==================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
-if not GOOGLE_CREDENTIALS_JSON and not os.path.exists(GOOGLE_CREDENTIALS_PATH):
-    raise SystemExit("Missing credentials: set GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH")
-
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 if GOOGLE_CREDENTIALS_JSON:
     creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
 else:
@@ -70,7 +59,6 @@ ws_map = {
     CHANNEL_ID_1: sh.get_worksheet_by_id(WS_GID_1),
     CHANNEL_ID_2: sh.get_worksheet_by_id(WS_GID_2),
 }
-log.info("[GS] Connected to %s with worksheets %s and %s", SHEET_ID, WS_GID_1, WS_GID_2)
 
 # ================== HELPERS ==================
 def col_to_index(col_letter: str) -> int:
@@ -80,7 +68,6 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
-
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
 CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
@@ -92,87 +79,81 @@ def normalize_key(s: str) -> str:
 
 def normalize_msg(t: str) -> str:
     t = CUSTOM_EMOJI_RE.sub(" ", t)
+    t = re.sub(r"\$?\d+(\.\d+)?", "", t)  # remove $ and numbers
+    t = re.sub(r"\([^)]*\)", "", t)       # remove (...) text
     return normalize_key(t)
 
 # ================== LOAD NAMES ==================
-def load_player_names(ws) -> Tuple[List[str], Dict[str, int], List[str], Dict[str, str]]:
+def load_player_names(ws):
     col_vals = ws.col_values(NAME_COL_INDEX)
-    names_orig, name_to_row = [], {}
+    names_orig, name_to_row, surnames = [], {}, {}
     for i, v in enumerate(col_vals, start=1):
         v = (v or "").strip()
-        if v:
-            names_orig.append(v)
-            name_to_row[v] = i
+        if not v:
+            continue
+        names_orig.append(v)
+        name_to_row[v] = i
+        last = v.split()[-1].lower()
+        surnames.setdefault(last, []).append(v)
     keys_norm = [normalize_key(n) for n in names_orig]
     key_to_orig = {normalize_key(n): n for n in names_orig}
     log.info("[INIT] Loaded %d names from '%s'", len(names_orig), ws.title)
-    return names_orig, name_to_row, keys_norm, key_to_orig
+    return names_orig, name_to_row, keys_norm, key_to_orig, surnames
 
 data_maps = {cid: load_player_names(ws) for cid, ws in ws_map.items()}
 
 # ================== MATCHING ==================
-def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
-    names_orig, name_to_row, keys_norm, key_to_orig = data_maps[ws_id]
+def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, str]]:
+    names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
     msg_clean = normalize_msg(text)
 
-    # Remove money, brackets, or junk
-    msg_clean = re.sub(r"\$?\d+(\.\d+)?", "", msg_clean)
-    msg_clean = re.sub(r"\([^)]*\)", "", msg_clean)
-    msg_clean = msg_clean.strip()
-
-    log.info("[MSG] Raw=%r | Cleaned=%r", text, msg_clean)
-    if not msg_clean:
-        return None
-
-    skip_triggers = {"skipped", "skip", "pass", "waiting", "round skipped"}
+    skip_triggers = {"skipped", "skip", "pass", "waiting"}
     if any(word in msg_clean for word in skip_triggers):
         log.info("[SKIP] Ignored system message")
         return None
 
-    # Direct substring match first
-    for orig in names_orig:
-        if normalize_key(orig) in msg_clean:
-            log.info(f"[DIRECT MATCH] '{msg_clean}' -> {orig}")
-            return orig, name_to_row[orig], 100.0
-
-    # Fuzzy match fallback
-    hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
-    if not hits:
+    if not msg_clean or len(msg_clean.split()) < 2:
         return None
 
-    best_key, best_score = None, 0
-    for key, score, _ in hits:
-        orig = key_to_orig.get(key)
-        if not orig:
-            continue
+    # 1️⃣ Direct substring match
+    for orig in names_orig:
         if normalize_key(orig) in msg_clean:
-            score += 10
-        elif normalize_key(orig).split()[0] == msg_clean.split()[0]:
-            score += 5
-        if score > best_score:
-            best_score, best_key = score, key
+            log.info(f"[DIRECT MATCH] '{msg_clean}' → {orig}")
+            return orig, name_to_row[orig], 100.0, "Direct"
 
-    if best_key and best_score >= 88:
-        orig = key_to_orig[best_key]
-        log.info("[MATCH] '%s' → %s (score=%.1f)", text, orig, best_score)
-        return (orig, name_to_row[orig], best_score)
+    # 2️⃣ Unique surname fallback
+    words = msg_clean.split()
+    for w in words:
+        if w in surnames and len(surnames[w]) == 1:
+            orig = surnames[w][0]
+            log.info(f"[SURNAME MATCH] '{w}' uniquely → {orig}")
+            return orig, name_to_row[orig], 95.0, "Surname"
 
-    log.info("[MATCH] No strong enough match found for '%s'", text)
+    # 3️⃣ Fuzzy fallback
+    hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
+    if not hits:
+        log.info(f"[MATCH] No hits for '{msg_clean}'")
+        return None
+    best_key, best_score = max(hits, key=lambda x: x[1])[:2]
+    if best_score < FUZZY_THRESHOLD:
+        log.info(f"[MATCH] Weak fuzzy {best_score} for '{msg_clean}' (best={best_key})")
+        return None
+    orig = key_to_orig.get(best_key)
+    if orig:
+        log.info(f"[FUZZY MATCH] '{msg_clean}' → {orig} (score={best_score})")
+        return orig, name_to_row[orig], best_score, "Fuzzy"
     return None
 
-# ================== RELIABLE HIGHLIGHT ==================
-async def highlight_row(ws, row: int):
+# ================== HIGHLIGHT ==================
+async def highlight_row(ws, row: int, reason: str):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-    log.info("[HIGHLIGHT] %s range=%s", ws.title, rng)
-
     bg = {"red": 0.29, "green": 0.52, "blue": 0.91}  # #4a86e8
     text_fmt = {
         "foregroundColor": {"red": 0, "green": 0, "blue": 0},
         "fontFamily": "Roboto Condensed",
         "fontSize": 10,
-        "bold": False
+        "bold": False,
     }
-
     requests = [{
         "repeatCell": {
             "range": {
@@ -183,11 +164,11 @@ async def highlight_row(ws, row: int):
                 "endColumnIndex": col_to_index(ROW_END_COL),
             },
             "cell": {"userEnteredFormat": {"backgroundColor": bg, "textFormat": text_fmt}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"
+            "fields": "userEnteredFormat(backgroundColor,textFormat)",
         }
     }]
-
     await asyncio.to_thread(ws.spreadsheet.batch_update, {"requests": requests})
+    log.info(f"[HIGHLIGHT] {ws.title} range={rng} ({reason})")
 
 # ================== DISCORD BOT ==================
 intents = Intents.default()
@@ -199,22 +180,12 @@ async def on_ready():
     log.info("✅ Logged in as %s | Watching channels %s and %s", client.user, CHANNEL_ID_1, CHANNEL_ID_2)
 
 @client.event
-async def on_resumed():
-    log.info("🔄 Discord connection resumed.")
-
-@client.event
-async def on_disconnect():
-    log.warning("⚠️ Lost connection to Discord gateway.")
-
-@client.event
 async def on_message(message: discord.Message):
-    # Skip bots, webhooks, or non-default messages
     if message.author.bot or message.webhook_id is not None:
         return
     if message.type != MessageType.default:
         return
     if message.attachments or message.embeds or message.stickers:
-        log.info("[SKIP] Ignored media or embed message from %s", message.author)
         return
 
     ws = ws_map.get(message.channel.id)
@@ -225,15 +196,12 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    log.info("[DISCORD] %s (%s): %r", message.author, ws.title, content)
     best = find_best_match(message.channel.id, content)
     if not best:
         return
 
-    name, row, score = best
-    log.info("[MATCH] %s (%s) → row %s (score=%.1f)", name, ws.title, row, score)
-    await highlight_row(ws, row)
-
+    name, row, score, reason = best
+    await highlight_row(ws, row, reason)
     try:
         await message.add_reaction("✅")
     except Exception:
