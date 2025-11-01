@@ -7,7 +7,7 @@ import asyncio
 from typing import Dict, List, Tuple, Optional
 
 import discord
-from discord import Intents
+from discord import Intents, MessageType
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
@@ -31,7 +31,7 @@ def need(name: str) -> str:
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
 
-# Support 2 channels → 2 worksheets
+# Two Discord channels → two Google Sheet tabs
 CHANNEL_ID_1 = int(need("DISCORD_CHANNEL_ID_1"))
 CHANNEL_ID_2 = int(need("DISCORD_CHANNEL_ID_2"))
 
@@ -66,17 +66,14 @@ else:
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
-
 ws_map = {
     CHANNEL_ID_1: sh.get_worksheet_by_id(WS_GID_1),
     CHANNEL_ID_2: sh.get_worksheet_by_id(WS_GID_2),
 }
-
 log.info("[GS] Connected to %s with worksheets %s and %s", SHEET_ID, WS_GID_1, WS_GID_2)
 
 # ================== HELPERS ==================
 def col_to_index(col_letter: str) -> int:
-    """Convert Excel-style letters (e.g. 'A', 'AZ') → numeric index."""
     idx = 0
     for c in col_letter.strip().upper():
         idx = idx * 26 + (ord(c) - 64)
@@ -118,7 +115,7 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
     names_orig, name_to_row, keys_norm, key_to_orig = data_maps[ws_id]
     msg_clean = normalize_msg(text)
 
-    # Remove $ and comments
+    # Remove money, brackets, or junk
     msg_clean = re.sub(r"\$?\d+(\.\d+)?", "", msg_clean)
     msg_clean = re.sub(r"\([^)]*\)", "", msg_clean)
     msg_clean = msg_clean.strip()
@@ -127,23 +124,18 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float]]:
     if not msg_clean:
         return None
 
-    # Skip irrelevant phrases
     skip_triggers = {"skipped", "skip", "pass", "waiting", "round skipped"}
     if any(word in msg_clean for word in skip_triggers):
         log.info("[SKIP] Ignored system message")
         return None
 
-    tokens = msg_clean.split()
-    if len(tokens) == 1 and len(tokens[0]) < 4:
-        return None  # ignore generic one-word messages
-
-    # Direct match first
+    # Direct substring match first
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
             log.info(f"[DIRECT MATCH] '{msg_clean}' -> {orig}")
             return orig, name_to_row[orig], 100.0
 
-    # Fuzzy
+    # Fuzzy match fallback
     hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
     if not hits:
         return None
@@ -173,7 +165,6 @@ async def highlight_row(ws, row: int):
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
     log.info("[HIGHLIGHT] %s range=%s", ws.title, rng)
 
-    # Color + text style
     bg = {"red": 0.29, "green": 0.52, "blue": 0.91}  # #4a86e8
     text_fmt = {
         "foregroundColor": {"red": 0, "green": 0, "blue": 0},
@@ -191,12 +182,7 @@ async def highlight_row(ws, row: int):
                 "startColumnIndex": col_to_index(ROW_START_COL) - 1,
                 "endColumnIndex": col_to_index(ROW_END_COL),
             },
-            "cell": {
-                "userEnteredFormat": {
-                    "backgroundColor": bg,
-                    "textFormat": text_fmt
-                }
-            },
+            "cell": {"userEnteredFormat": {"backgroundColor": bg, "textFormat": text_fmt}},
             "fields": "userEnteredFormat(backgroundColor,textFormat)"
         }
     }]
@@ -222,7 +208,13 @@ async def on_disconnect():
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
+    # Skip bots, webhooks, or non-default messages
+    if message.author.bot or message.webhook_id is not None:
+        return
+    if message.type != MessageType.default:
+        return
+    if message.attachments or message.embeds or message.stickers:
+        log.info("[SKIP] Ignored media or embed message from %s", message.author)
         return
 
     ws = ws_map.get(message.channel.id)
@@ -234,14 +226,12 @@ async def on_message(message: discord.Message):
         return
 
     log.info("[DISCORD] %s (%s): %r", message.author, ws.title, content)
-
     best = find_best_match(message.channel.id, content)
     if not best:
         return
 
     name, row, score = best
     log.info("[MATCH] %s (%s) → row %s (score=%.1f)", name, ws.title, row, score)
-
     await highlight_row(ws, row)
 
     try:
