@@ -82,8 +82,8 @@ def normalize_key(s: str) -> str:
 def normalize_msg(t: str) -> str:
     t = SMART_QUOTE_RE.sub("'", t)
     t = CUSTOM_EMOJI_RE.sub(" ", t)
-    t = re.sub(r"[\u200B-\u200D\uFEFF]", "", t)  # remove zero-width spaces
-    t = re.sub(r"\$?\d+(\.\d+)?", "", t)         # remove money/numbers
+    t = re.sub(r"[\u200B-\u200D\uFEFF]", "", t)  # zero-width
+    t = re.sub(r"\$?\d+(\.\d+)?", "", t)         # money/numbers
     t = re.sub(r"\([^)]*\)", "", t)              # remove (...)
     t = NONLETTER_RE.sub(" ", t)
     t = WHITESPACE_RE.sub(" ", t)
@@ -113,7 +113,6 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
     msg_clean = normalize_msg(text)
 
-    # ✅ Smarter skip detection — only skip if message is short and mostly skip words
     skip_triggers = {"skipped", "skip", "pass", "waiting"}
     if len(msg_clean.split()) <= 3 and any(word in msg_clean for word in skip_triggers):
         log.info(f"[SKIP] Ignored short skip-like message: '{msg_clean}'")
@@ -128,8 +127,7 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
             return orig, name_to_row[orig], 100.0, "Direct"
 
     # 2️⃣ Unique surname fallback
-    words = msg_clean.split()
-    for w in words:
+    for w in msg_clean.split():
         if w in surnames and len(surnames[w]) == 1:
             orig = surnames[w][0]
             log.info(f"[SURNAME MATCH] '{w}' uniquely → {orig}")
@@ -140,7 +138,6 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     if not hits:
         log.info(f"[MATCH] No hits for '{msg_clean}'")
         return None
-
     best_key, best_score = max(hits, key=lambda x: x[1])[:2]
     if best_score < FUZZY_THRESHOLD:
         last_name = best_key.split()[-1]
@@ -197,12 +194,8 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot or message.webhook_id is not None:
         return
-
-    # ✅ Allow both normal and reply messages
     if message.type not in (MessageType.default, MessageType.reply):
         return
-
-    # ✅ Only skip media-only messages (text + image = allowed)
     if (message.attachments or message.embeds or message.stickers) and not message.content:
         return
 
@@ -211,11 +204,18 @@ async def on_message(message: discord.Message):
         return
 
     content = (message.content or "").strip()
+
+    # ✅ Smarter parent merge: ignore skip messages
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
-            log.info(f"[FROM REPLY] Combining with parent: '{parent.content[:50]}'")
-            content = f"{parent.content} {content}".strip()
+            parent_clean = normalize_msg(parent.content)
+            skip_words = {"skip", "skipped", "pass", "waiting"}
+            if not any(word in parent_clean for word in skip_words):
+                log.info(f"[FROM REPLY] Combining with parent: '{parent.content[:50]}'")
+                content = f"{parent.content} {content}".strip()
+            else:
+                log.info(f"[FROM REPLY] Skipping parent merge (contains skip word): '{parent.content[:30]}'")
 
     if not content:
         return
@@ -226,10 +226,17 @@ async def on_message(message: discord.Message):
 
     name, row, score, reason = best
     await highlight_row(ws, row, reason)
+
     try:
         await message.add_reaction("✅")
-    except Exception:
-        pass
+        confirm = await message.reply(
+            f"🟩 Highlighted **{name}** ({reason}) in *{ws.title}* (row {row})",
+            mention_author=False
+        )
+        await asyncio.sleep(5)
+        await confirm.delete()
+    except Exception as e:
+        log.warning(f"[CONFIRM ERROR] {e}")
 
 # ================== MAIN ==================
 if __name__ == "__main__":
