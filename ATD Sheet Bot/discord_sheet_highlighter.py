@@ -108,6 +108,9 @@ def load_player_names(ws):
 
 data_maps = {cid: load_player_names(ws) for cid, ws in ws_map.items()}
 
+# Track permanently highlighted players
+highlighted_forever: set[str] = set()
+
 # ================== MATCHING ==================
 def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, str]]:
     names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
@@ -119,12 +122,16 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
         log.info(f"[IGNORE] Too short to be valid pick: '{msg_clean}'")
         return None
 
-    skip_triggers = {"skipped", "skip", "pass", "waiting", "block", "blocked", "how", "steal", "steals", "lock", "gone", "invalid"}
+    skip_triggers = {
+        "skipped", "skip", "pass", "waiting", "block", "blocked", "how", "steal", "steals",
+        "lock", "gone", "invalid", "bot", "register", "testing", "bro", "man", "lol", "lmfao",
+        "okay", "why", "cant", "didnt", "pick", "was", "error"
+    }
     if any(word in msg_words for word in skip_triggers):
-        log.info(f"[IGNORE] Non-pick word detected in: '{msg_clean}'")
+        log.info(f"[IGNORE] Non-pick or conversation word detected: '{msg_clean}'")
         return None
 
-    # Require something that looks like a name or season
+    # Require name or year-like pattern
     if not re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", text) and not re.search(r"\d{4}-\d{2}", text):
         log.info(f"[IGNORE] No name-like pattern found: '{text}'")
         return None
@@ -132,14 +139,12 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     # 1️⃣ Direct match
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
-            log.info(f"[DIRECT MATCH] '{msg_clean}' → {orig}")
             return orig, name_to_row[orig], 100.0, "Direct"
 
     # 2️⃣ Unique surname
     for w in msg_words:
         if w in surnames and len(surnames[w]) == 1:
             orig = surnames[w][0]
-            log.info(f"[SURNAME MATCH] '{w}' uniquely → {orig}")
             return orig, name_to_row[orig], 95.0, "Surname"
 
     # 3️⃣ Fuzzy
@@ -148,17 +153,23 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
         return None
     best_key, best_score = hits[0][:2]
     if best_score < FUZZY_THRESHOLD:
-        log.info(f"[MATCH] Weak fuzzy ({best_score}) for '{msg_clean}'")
         return None
-
     orig = key_to_orig.get(best_key)
     if orig:
-        log.info(f"[FUZZY MATCH] '{msg_clean}' → {orig} ({best_score})")
         return orig, name_to_row[orig], best_score, "Fuzzy"
     return None
 
 # ================== HIGHLIGHT ==================
-async def highlight_row(ws, row: int, reason: str):
+async def highlight_row(ws, row: int, reason: str, name: str):
+    cache_key = f"{ws.title}:{name.lower()}"
+
+    # Skip if player already permanently highlighted
+    if cache_key in highlighted_forever:
+        log.info(f"[SKIP] {name} already permanently highlighted")
+        return
+
+    highlighted_forever.add(cache_key)
+
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
     bg = {"red": 0.29, "green": 0.52, "blue": 0.91}  # #4a86e8
     text_fmt = {
@@ -190,7 +201,7 @@ client = discord.Client(intents=intents, reconnect=True)
 
 @client.event
 async def on_ready():
-    log.info("✅ Logged in as %s | Watching channels %s and %s", client.user, CHANNEL_ID_1, CHANNEL_ID_2)
+    log.info(f"✅ Logged in as {client.user} | Watching channels {CHANNEL_ID_1} and {CHANNEL_ID_2}")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -199,7 +210,6 @@ async def on_message(message: discord.Message):
     if message.type not in (MessageType.default, MessageType.reply):
         return
     if (message.attachments or message.embeds or message.stickers) and not message.content:
-        log.info("[SKIP] Ignored image/media-only message")
         return
 
     ws = ws_map.get(message.channel.id)
@@ -208,17 +218,17 @@ async def on_message(message: discord.Message):
 
     content = (message.content or "").strip()
 
-    # ✅ Reply handling – skip parent with “skip”
+    # ✅ Smart reply merge
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
             parent_clean = normalize_msg(parent.content)
-            skip_words = {"skip", "skipped", "pass", "waiting"}
-            if not any(word in parent_clean for word in skip_words):
+            convo_words = {"bot", "register", "skip", "invalid", "test", "why", "how", "bro", "lol", "cant", "block", "pick"}
+            if not any(word in normalize_msg(message.content) for word in convo_words):
                 log.info(f"[FROM REPLY] Combining with parent: '{parent.content[:50]}'")
                 content = f"{parent.content} {content}".strip()
             else:
-                log.info(f"[FROM REPLY] Skipped parent merge: '{parent.content[:30]}'")
+                log.info(f"[FROM REPLY] Skipped merging reply (conversation detected): '{message.content[:40]}'")
 
     if not content:
         return
@@ -228,7 +238,7 @@ async def on_message(message: discord.Message):
         return
 
     name, row, score, reason = best
-    await highlight_row(ws, row, reason)
+    await highlight_row(ws, row, reason, name)
 
     try:
         await message.add_reaction("✅")
