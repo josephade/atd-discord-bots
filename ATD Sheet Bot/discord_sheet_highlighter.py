@@ -125,7 +125,7 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     skip_triggers = {
         "skipped", "skip", "pass", "waiting", "block", "blocked", "how", "steal", "steals",
         "lock", "gone", "invalid", "bot", "register", "testing", "bro", "man", "lol", "lmfao",
-        "okay", "why", "cant", "didnt", "pick", "was", "error"
+        "okay", "why", "cant", "didnt", "pick", "was", "error", "team", "round"
     }
     if any(word in msg_words for word in skip_triggers):
         log.info(f"[IGNORE] Non-pick or conversation word detected: '{msg_clean}'")
@@ -160,13 +160,14 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
     return None
 
 # ================== HIGHLIGHT ==================
-async def highlight_row(ws, row: int, reason: str, name: str):
+async def highlight_row(ws, row: int, reason: str, name: str) -> bool:
+    """Highlights the row unless already permanently highlighted.
+       Returns True if newly highlighted, False if skipped."""
     cache_key = f"{ws.title}:{name.lower()}"
 
-    # Skip if player already permanently highlighted
     if cache_key in highlighted_forever:
         log.info(f"[SKIP] {name} already permanently highlighted")
-        return
+        return False
 
     highlighted_forever.add(cache_key)
 
@@ -193,6 +194,7 @@ async def highlight_row(ws, row: int, reason: str, name: str):
     }]
     await asyncio.to_thread(ws.spreadsheet.batch_update, {"requests": requests})
     log.info(f"[HIGHLIGHT] {ws.title} range={rng} ({reason})")
+    return True
 
 # ================== DISCORD BOT ==================
 intents = Intents.default()
@@ -222,7 +224,6 @@ async def on_message(message: discord.Message):
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
-            parent_clean = normalize_msg(parent.content)
             convo_words = {"bot", "register", "skip", "invalid", "test", "why", "how", "bro", "lol", "cant", "block", "pick"}
             if not any(word in normalize_msg(message.content) for word in convo_words):
                 log.info(f"[FROM REPLY] Combining with parent: '{parent.content[:50]}'")
@@ -238,18 +239,20 @@ async def on_message(message: discord.Message):
         return
 
     name, row, score, reason = best
-    await highlight_row(ws, row, reason, name)
+    newly_highlighted = await highlight_row(ws, row, reason, name)
 
-    try:
-        await message.add_reaction("✅")
-        confirm = await message.reply(
-            f"🟩 Highlighted **{name}** ({reason}) in *{ws.title}* (row {row})",
-            mention_author=False
-        )
-        await asyncio.sleep(5)
-        await confirm.delete()
-    except Exception as e:
-        log.warning(f"[CONFIRM ERROR] {e}")
+    # 🟩 Only react/reply if it was newly highlighted
+    if newly_highlighted:
+        try:
+            await message.add_reaction("✅")
+            confirm = await message.reply(
+                f"🟩 Highlighted **{name}** ({reason}) in *{ws.title}* (row {row})",
+                mention_author=False
+            )
+            await asyncio.sleep(5)
+            await confirm.delete()
+        except Exception as e:
+            log.warning(f"[CONFIRM ERROR] {e}")
 
 # ================== MAIN ==================
 if __name__ == "__main__":
