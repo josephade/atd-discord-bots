@@ -71,7 +71,7 @@ NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
-SMART_QUOTE_RE = re.compile(r"[‘’´`“”]")  # Unicode quotes/apostrophes
+SMART_QUOTE_RE = re.compile(r"[‘’´`“”]")
 
 def normalize_key(s: str) -> str:
     s = SMART_QUOTE_RE.sub("'", s)
@@ -82,9 +82,9 @@ def normalize_key(s: str) -> str:
 def normalize_msg(t: str) -> str:
     t = SMART_QUOTE_RE.sub("'", t)
     t = CUSTOM_EMOJI_RE.sub(" ", t)
-    t = re.sub(r"[\u200B-\u200D\uFEFF]", "", t)  # zero-width
-    t = re.sub(r"\$?\d+(\.\d+)?", "", t)         # money/numbers
-    t = re.sub(r"\([^)]*\)", "", t)              # remove (...)
+    t = re.sub(r"[\u200B-\u200D\uFEFF]", "", t)
+    t = re.sub(r"\$?\d+(\.\d+)?", "", t)
+    t = re.sub(r"\([^)]*\)", "", t)
     t = NONLETTER_RE.sub(" ", t)
     t = WHITESPACE_RE.sub(" ", t)
     return t.strip().lower()
@@ -112,46 +112,48 @@ data_maps = {cid: load_player_names(ws) for cid, ws in ws_map.items()}
 def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, str]]:
     names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
     msg_clean = normalize_msg(text)
+    msg_words = msg_clean.split()
 
-    skip_triggers = {"skipped", "skip", "pass", "waiting"}
-    if len(msg_clean.split()) <= 3 and any(word in msg_clean for word in skip_triggers):
-        log.info(f"[SKIP] Ignored short skip-like message: '{msg_clean}'")
-        return None
-    if not msg_clean:
+    # 🚫 Ignore irrelevant or short messages
+    if len(msg_words) < 2:
+        log.info(f"[IGNORE] Too short to be valid pick: '{msg_clean}'")
         return None
 
-    # 1️⃣ Direct substring match
+    skip_triggers = {"skipped", "skip", "pass", "waiting", "block", "blocked", "how", "steal", "steals", "lock", "gone", "invalid"}
+    if any(word in msg_words for word in skip_triggers):
+        log.info(f"[IGNORE] Non-pick word detected in: '{msg_clean}'")
+        return None
+
+    # Require something that looks like a name or season
+    if not re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", text) and not re.search(r"\d{4}-\d{2}", text):
+        log.info(f"[IGNORE] No name-like pattern found: '{text}'")
+        return None
+
+    # 1️⃣ Direct match
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
             log.info(f"[DIRECT MATCH] '{msg_clean}' → {orig}")
             return orig, name_to_row[orig], 100.0, "Direct"
 
-    # 2️⃣ Unique surname fallback
-    for w in msg_clean.split():
+    # 2️⃣ Unique surname
+    for w in msg_words:
         if w in surnames and len(surnames[w]) == 1:
             orig = surnames[w][0]
             log.info(f"[SURNAME MATCH] '{w}' uniquely → {orig}")
             return orig, name_to_row[orig], 95.0, "Surname"
 
-    # 3️⃣ Fuzzy fallback
+    # 3️⃣ Fuzzy
     hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
     if not hits:
-        log.info(f"[MATCH] No hits for '{msg_clean}'")
         return None
-    best_key, best_score = max(hits, key=lambda x: x[1])[:2]
+    best_key, best_score = hits[0][:2]
     if best_score < FUZZY_THRESHOLD:
-        last_name = best_key.split()[-1]
-        if last_name in msg_clean:
-            orig = key_to_orig.get(best_key)
-            if orig:
-                log.info(f"[SURNAME+FUZZY MATCH] '{msg_clean}' → {orig} (score={best_score})")
-                return orig, name_to_row[orig], best_score, "Surname+Fuzzy"
-        log.info(f"[MATCH] Weak fuzzy {best_score} for '{msg_clean}' (best={best_key})")
+        log.info(f"[MATCH] Weak fuzzy ({best_score}) for '{msg_clean}'")
         return None
 
     orig = key_to_orig.get(best_key)
     if orig:
-        log.info(f"[FUZZY MATCH] '{msg_clean}' → {orig} (score={best_score})")
+        log.info(f"[FUZZY MATCH] '{msg_clean}' → {orig} ({best_score})")
         return orig, name_to_row[orig], best_score, "Fuzzy"
     return None
 
@@ -197,6 +199,7 @@ async def on_message(message: discord.Message):
     if message.type not in (MessageType.default, MessageType.reply):
         return
     if (message.attachments or message.embeds or message.stickers) and not message.content:
+        log.info("[SKIP] Ignored image/media-only message")
         return
 
     ws = ws_map.get(message.channel.id)
@@ -205,7 +208,7 @@ async def on_message(message: discord.Message):
 
     content = (message.content or "").strip()
 
-    # ✅ Smarter parent merge: ignore skip messages
+    # ✅ Reply handling – skip parent with “skip”
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
@@ -215,7 +218,7 @@ async def on_message(message: discord.Message):
                 log.info(f"[FROM REPLY] Combining with parent: '{parent.content[:50]}'")
                 content = f"{parent.content} {content}".strip()
             else:
-                log.info(f"[FROM REPLY] Skipping parent merge (contains skip word): '{parent.content[:30]}'")
+                log.info(f"[FROM REPLY] Skipped parent merge: '{parent.content[:30]}'")
 
     if not content:
         return
