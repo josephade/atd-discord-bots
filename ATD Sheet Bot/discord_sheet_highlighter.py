@@ -13,11 +13,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
-# ================== LOGGING ==================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("highlighter")
 
-# ================== ENV CONFIG ==================
 load_dotenv()
 
 def need(name: str) -> str:
@@ -40,7 +38,6 @@ ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 FUZZY_THRESHOLD = 75
 LOW_FUZZY_CUTOFF = 65
 
-# ================== GOOGLE AUTH ==================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
@@ -48,6 +45,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
 if GOOGLE_CREDENTIALS_JSON:
     creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
 else:
@@ -60,7 +58,6 @@ ws_map = {
     CHANNEL_ID_2: sh.get_worksheet_by_id(WS_GID_2),
 }
 
-# ================== HELPERS ==================
 def col_to_index(col_letter: str) -> int:
     idx = 0
     for c in col_letter.strip().upper():
@@ -89,7 +86,6 @@ def normalize_msg(t: str) -> str:
     t = WHITESPACE_RE.sub(" ", t)
     return t.strip().lower()
 
-# ================== LOAD NAMES ==================
 def load_player_names(ws):
     col_vals = ws.col_values(NAME_COL_INDEX)
     names_orig, name_to_row, surnames = [], {}, {}
@@ -107,17 +103,13 @@ def load_player_names(ws):
     return names_orig, name_to_row, keys_norm, key_to_orig, surnames
 
 data_maps = {cid: load_player_names(ws) for cid, ws in ws_map.items()}
-
-# Track permanently highlighted players
 highlighted_forever: set[str] = set()
 
-# ================== MATCHING ==================
 def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, str]]:
     names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
     msg_clean = normalize_msg(text)
     msg_words = msg_clean.split()
 
-    # 🚫 Ignore irrelevant or short messages
     if len(msg_words) < 2:
         log.info(f"[IGNORE] Too short to be valid pick: '{msg_clean}'")
         return None
@@ -131,23 +123,19 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
         log.info(f"[IGNORE] Non-pick or conversation word detected: '{msg_clean}'")
         return None
 
-    # Require name or year-like pattern
     if not re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", text) and not re.search(r"\d{4}-\d{2}", text):
         log.info(f"[IGNORE] No name-like pattern found: '{text}'")
         return None
 
-    # 1️⃣ Direct match
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
             return orig, name_to_row[orig], 100.0, "Direct"
 
-    # 2️⃣ Unique surname
     for w in msg_words:
         if w in surnames and len(surnames[w]) == 1:
             orig = surnames[w][0]
             return orig, name_to_row[orig], 95.0, "Surname"
 
-    # 3️⃣ Fuzzy
     hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
     if not hits:
         return None
@@ -159,12 +147,8 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
         return orig, name_to_row[orig], best_score, "Fuzzy"
     return None
 
-# ================== HIGHLIGHT ==================
 async def highlight_row(ws, row: int, reason: str, name: str) -> bool:
-    """Highlights the row unless already permanently highlighted.
-       Returns True if newly highlighted, False if skipped."""
     cache_key = f"{ws.title}:{name.lower()}"
-
     if cache_key in highlighted_forever:
         log.info(f"[SKIP] {name} already permanently highlighted")
         return False
@@ -172,7 +156,7 @@ async def highlight_row(ws, row: int, reason: str, name: str) -> bool:
     highlighted_forever.add(cache_key)
 
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-    bg = {"red": 0.29, "green": 0.52, "blue": 0.91}  # #4a86e8
+    bg = {"red": 0.29, "green": 0.52, "blue": 0.91}
     text_fmt = {
         "foregroundColor": {"red": 0, "green": 0, "blue": 0},
         "fontFamily": "Roboto Condensed",
@@ -196,7 +180,6 @@ async def highlight_row(ws, row: int, reason: str, name: str) -> bool:
     log.info(f"[HIGHLIGHT] {ws.title} range={rng} ({reason})")
     return True
 
-# ================== DISCORD BOT ==================
 intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents, reconnect=True)
@@ -220,7 +203,6 @@ async def on_message(message: discord.Message):
 
     content = (message.content or "").strip()
 
-    # ✅ Smart reply merge
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
@@ -241,7 +223,6 @@ async def on_message(message: discord.Message):
     name, row, score, reason = best
     newly_highlighted = await highlight_row(ws, row, reason, name)
 
-    # 🟩 Only react/reply if it was newly highlighted
     if newly_highlighted:
         try:
             await message.add_reaction("✅")
@@ -254,7 +235,6 @@ async def on_message(message: discord.Message):
         except Exception as e:
             log.warning(f"[CONFIRM ERROR] {e}")
 
-# ================== MAIN ==================
 if __name__ == "__main__":
     while True:
         try:
