@@ -13,9 +13,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
+# ================== LOGGING ==================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("highlighter")
 
+# ================== LOAD ENV ==================
 load_dotenv()
 
 def need(name: str) -> str:
@@ -25,22 +27,21 @@ def need(name: str) -> str:
     return v
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
-CHANNEL_ID_1 = int(need("DISCORD_CHANNEL_ID_1"))
-CHANNEL_ID_2 = int(need("DISCORD_CHANNEL_ID_2"))
+CHANNEL_ID = int(need("DISCORD_CHANNEL_ID"))
 SHEET_ID = need("GOOGLE_SHEET_ID")
-WS_GID_1 = int(need("GOOGLE_WORKSHEET_GID_1"))
-WS_GID_2 = int(need("GOOGLE_WORKSHEET_GID_2"))
+WS_GID = int(need("GOOGLE_WORKSHEET_GID"))
 
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 
-FUZZY_THRESHOLD = 75
-LOW_FUZZY_CUTOFF = 65
+FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
+LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", 65))
 
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
+# ================== GOOGLE AUTH ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -53,11 +54,9 @@ else:
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
-ws_map = {
-    CHANNEL_ID_1: sh.get_worksheet_by_id(WS_GID_1),
-    CHANNEL_ID_2: sh.get_worksheet_by_id(WS_GID_2),
-}
+ws = sh.get_worksheet_by_id(WS_GID)
 
+# ================== HELPERS ==================
 def col_to_index(col_letter: str) -> int:
     idx = 0
     for c in col_letter.strip().upper():
@@ -86,6 +85,7 @@ def normalize_msg(t: str) -> str:
     t = WHITESPACE_RE.sub(" ", t)
     return t.strip().lower()
 
+# ================== LOAD PLAYER NAMES ==================
 def load_player_names(ws):
     col_vals = ws.col_values(NAME_COL_INDEX)
     names_orig, name_to_row, surnames = [], {}, {}
@@ -102,11 +102,11 @@ def load_player_names(ws):
     log.info("[INIT] Loaded %d names from '%s'", len(names_orig), ws.title)
     return names_orig, name_to_row, keys_norm, key_to_orig, surnames
 
-data_maps = {cid: load_player_names(ws) for cid, ws in ws_map.items()}
+names_orig, name_to_row, keys_norm, key_to_orig, surnames = load_player_names(ws)
 highlighted_forever: set[str] = set()
 
-def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, str]]:
-    names_orig, name_to_row, keys_norm, key_to_orig, surnames = data_maps[ws_id]
+# ================== FIND MATCH ==================
+def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
     msg_clean = normalize_msg(text)
     msg_words = msg_clean.split()
 
@@ -147,7 +147,8 @@ def find_best_match(ws_id: int, text: str) -> Optional[Tuple[str, int, float, st
         return orig, name_to_row[orig], best_score, "Fuzzy"
     return None
 
-async def highlight_row(ws, row: int, reason: str, name: str) -> bool:
+# ================== HIGHLIGHT ==================
+async def highlight_row(row: int, reason: str, name: str) -> bool:
     cache_key = f"{ws.title}:{name.lower()}"
     if cache_key in highlighted_forever:
         log.info(f"[SKIP] {name} already permanently highlighted")
@@ -180,25 +181,24 @@ async def highlight_row(ws, row: int, reason: str, name: str) -> bool:
     log.info(f"[HIGHLIGHT] {ws.title} range={rng} ({reason})")
     return True
 
+# ================== DISCORD BOT ==================
 intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents, reconnect=True)
 
 @client.event
 async def on_ready():
-    log.info(f"✅ Logged in as {client.user} | Watching channels {CHANNEL_ID_1} and {CHANNEL_ID_2}")
+    log.info(f"✅ Logged in as {client.user} | Watching channel {CHANNEL_ID}")
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.webhook_id is not None:
         return
+    if message.channel.id != CHANNEL_ID:
+        return
     if message.type not in (MessageType.default, MessageType.reply):
         return
     if (message.attachments or message.embeds or message.stickers) and not message.content:
-        return
-
-    ws = ws_map.get(message.channel.id)
-    if not ws:
         return
 
     content = (message.content or "").strip()
@@ -216,18 +216,18 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    best = find_best_match(message.channel.id, content)
+    best = find_best_match(content)
     if not best:
         return
 
     name, row, score, reason = best
-    newly_highlighted = await highlight_row(ws, row, reason, name)
+    newly_highlighted = await highlight_row(row, reason, name)
 
     if newly_highlighted:
         try:
             await message.add_reaction("✅")
             confirm = await message.reply(
-                f"🟩 Highlighted **{name}** ({reason}) in *{ws.title}* (row {row})",
+                f"🟩 Highlighted **{name}** ({reason}) (row {row})",
                 mention_author=False
             )
             await asyncio.sleep(5)
@@ -235,6 +235,7 @@ async def on_message(message: discord.Message):
         except Exception as e:
             log.warning(f"[CONFIRM ERROR] {e}")
 
+# ================== MAIN ==================
 if __name__ == "__main__":
     while True:
         try:
