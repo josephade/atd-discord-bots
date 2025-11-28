@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
+from gspread.utils import rowcol_to_a1
 
 # ----------------- logging -----------------
 logging.basicConfig(
@@ -194,7 +195,8 @@ async def on_message(message: discord.Message):
     match_type = "Exact" if score == 100 else "Fuzzy"
     log.info(f"[MATCH] {match_type} → {name} (row={row}, score={score})")
 
-    ws.update_cell(row, col_index, int(pick_num))
+    cell = rowcol_to_a1(row, col_index)
+    ws.update(cell, [[int(pick_num)]])
     log.info(
         f"[UPDATE] {name}: wrote pick {pick_num} to row {row}, col {col_index} ({col_letter})"
     )
