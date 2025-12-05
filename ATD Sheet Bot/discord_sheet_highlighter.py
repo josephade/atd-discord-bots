@@ -13,11 +13,20 @@ import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
-# ================== LOGGING ==================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+# ==========================================================
+# LOGGING CONFIGURATION (IMPROVED)
+# ==========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 log = logging.getLogger("highlighter")
 
-# ================== LOAD ENV ==================
+# ==========================================================
+# LOAD ENVIRONMENT
+# ==========================================================
+
 load_dotenv()
 
 def need(name: str) -> str:
@@ -41,7 +50,10 @@ LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", 65))
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
-# ================== GOOGLE AUTH ==================
+# ==========================================================
+# GOOGLE SHEETS AUTH
+# ==========================================================
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -56,7 +68,10 @@ gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
 ws = sh.get_worksheet_by_id(WS_GID)
 
-# ================== HELPERS ==================
+# ==========================================================
+# HELPERS
+# ==========================================================
+
 def col_to_index(col_letter: str) -> int:
     idx = 0
     for c in col_letter.strip().upper():
@@ -64,6 +79,7 @@ def col_to_index(col_letter: str) -> int:
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
+
 CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
@@ -85,7 +101,10 @@ def normalize_msg(t: str) -> str:
     t = WHITESPACE_RE.sub(" ", t)
     return t.strip().lower()
 
-# ================== LOAD PLAYER NAMES ==================
+# ==========================================================
+# LOAD PLAYER NAMES
+# ==========================================================
+
 def load_player_names(ws):
     col_vals = ws.col_values(NAME_COL_INDEX)
     names_orig, name_to_row, keys_norm, surnames = [], {}, [], {}
@@ -106,36 +125,42 @@ def load_player_names(ws):
         last = v.split()[-1].lower()
         surnames.setdefault(last, []).append(v)
 
-    log.info("[INIT] Loaded %d names from '%s'", len(names_orig), ws.title)
+    log.info(
+        f"[INIT] Loaded {len(names_orig)} players | Sheet='{ws.title}' | NameCol='{NAME_COL_LETTER}' (idx {NAME_COL_INDEX})"
+    )
+
     return names_orig, name_to_row, keys_norm, key_to_orig, surnames
 
 names_orig, name_to_row, keys_norm, key_to_orig, surnames = load_player_names(ws)
 highlighted_forever: set[str] = set()
 
-# ================== FIND MATCH ==================
+# ==========================================================
+# FIND BEST MATCH (WITH DETAILED LOGGING)
+# ==========================================================
+
 def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
     msg_clean = normalize_msg(text)
     msg_words = msg_clean.split()
 
-    # Require at least 2 words to attempt name match
     if len(msg_words) < 2:
         return None
 
-    # SKIP conversation-like messages
     skip_triggers = {
         "skipped", "skip", "pass", "waiting", "block", "blocked",
         "invalid", "bot", "register", "testing", "bro", "man", "lol",
         "pick", "why", "cant", "team", "round"
     }
-    if any(word in msg_words for word in skip_triggers):
+
+    if any(w in msg_words for w in skip_triggers):
+        log.info(f"[SKIP] Ignored message (general chatter): '{text}'")
         return None
 
-    # Direct match (case-insensitive)
+    # Direct full-name match
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
             return orig, name_to_row[orig], 100.0, "Direct"
 
-    # Unique surname match
+    # Unique surname
     for w in msg_words:
         if w in surnames and len(surnames[w]) == 1:
             orig = surnames[w][0]
@@ -145,6 +170,7 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
     hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
     if not hits:
         return None
+
     best_key, best_score = hits[0][:2]
 
     if best_score < FUZZY_THRESHOLD:
@@ -156,16 +182,22 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
 
     return None
 
-# ================== HIGHLIGHT ==================
+# ==========================================================
+# APPLY HIGHLIGHT (FIXED + IMPROVED LOGGING)
+# ==========================================================
+
 async def highlight_row(row: int, reason: str, name: str):
     cache_key = f"{ws.title}:{name.lower()}"
-
     if cache_key in highlighted_forever:
         return "already"
 
     highlighted_forever.add(cache_key)
 
+    start_col = col_to_index(ROW_START_COL) - 1
+    end_col = col_to_index(ROW_END_COL)
+
     rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
+
     bg = {"red": 0.29, "green": 0.52, "blue": 0.91}
     text_fmt = {
         "foregroundColor": {"red": 0, "green": 0, "blue": 0},
@@ -180,31 +212,39 @@ async def highlight_row(row: int, reason: str, name: str):
                 "sheetId": ws.id,
                 "startRowIndex": row - 1,
                 "endRowIndex": row,
-                "startColumnIndex": col_to_index(ROW_START_COL) - 1,
-                "endColumnIndex": col_to_index(ROW_END_COL),
+                "startColumnIndex": start_col,
+                "endColumnIndex": end_col,
             },
             "cell": {"userEnteredFormat": {"backgroundColor": bg, "textFormat": text_fmt}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)",
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"
         }
     }]
 
-    await asyncio.to_thread(ws.spreadsheet.batch_update, {"requests": requests})
-    log.info(f"[HIGHLIGHT] {ws.title} range={rng} ({reason})")
+    # FIX: Use sh.batch_update (correct spreadsheet handle)
+    await asyncio.to_thread(sh.batch_update, {"requests": requests})
+
+    log.info(
+        f"[HIGHLIGHT] Sheet='{ws.title}' | Name='{name}' | Row={row} | Range={rng} | Reason={reason}"
+    )
 
     return True
 
-# ================== DISCORD BOT ==================
+# ==========================================================
+# DISCORD BOT
+# ==========================================================
+
 intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents, reconnect=True)
 
 @client.event
 async def on_ready():
-    log.info(f"✅ Logged in as {client.user} | Watching channel {CHANNEL_ID}")
+    log.info(f"🔗 Connected as {client.user} | Watching Channel={CHANNEL_ID}")
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot or message.webhook_id is not None:
+
+    if message.author.bot or message.webhook_id:
         return
     if message.channel.id != CHANNEL_ID:
         return
@@ -212,31 +252,41 @@ async def on_message(message: discord.Message):
         return
 
     content = (message.content or "").strip()
+    original_content = content
 
-    # --- FIXED REPLY HANDLING ---
+    # Handle replies (merge parent content)
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
             if len(normalize_msg(message.content)) > 1:
-                log.info(f"[FROM REPLY] Merged with parent '{parent.content[:50]}'")
                 content = f"{parent.content} {content}".strip()
+                log.info(
+                    f"[MERGE] Reply merged | Parent='{parent.content[:40]}' | Child='{message.content[:40]}'"
+                )
 
     if not content:
         return
 
     best = find_best_match(content)
     if not best:
+        log.info(
+            f"[NO MATCH] msgID={message.id} | msg='{original_content}'"
+        )
         return
 
     name, row, score, reason = best
+
+    log.info(
+        f"[MATCH] msgID={message.id} | Name='{name}' | Row={row} | Score={score:.1f} | Reason={reason} | Cleaned='{normalize_msg(content)}'"
+    )
+
     result = await highlight_row(row, reason, name)
 
-    # --- SUCCESSFUL HIGHLIGHT ---
     if result == True:
         try:
             await message.add_reaction("✅")
             confirm = await message.reply(
-                f"🟩 Highlighted **{name}** ({reason}) (row {row})",
+                f"🟩 Highlighted **{name}** (row {row}) [{reason}]",
                 mention_author=False
             )
             await asyncio.sleep(5)
@@ -244,12 +294,11 @@ async def on_message(message: discord.Message):
         except Exception as e:
             log.warning(f"[CONFIRM ERROR] {e}")
 
-    # --- ALREADY HIGHLIGHTED ---
     elif result == "already":
         try:
             await message.add_reaction("❌")
             note = await message.reply(
-                f"⚠️ **{name}** has already been highlighted.",
+                f"⚠️ **{name}** already highlighted.",
                 mention_author=False
             )
             await asyncio.sleep(5)
@@ -257,12 +306,14 @@ async def on_message(message: discord.Message):
         except:
             pass
 
+# ==========================================================
+# MAIN LOOP (RECONNECT SAFE)
+# ==========================================================
 
-# ================== MAIN ==================
 if __name__ == "__main__":
     while True:
         try:
             client.run(DISCORD_TOKEN)
         except Exception as e:
-            log.error(f"[DISCORD ERROR] {e}. Reconnecting in 5s...")
+            log.error(f"[DISCORD ERROR] {e} | Reconnecting in 5s...")
             time.sleep(5)
