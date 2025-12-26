@@ -4,7 +4,7 @@ import json
 import time
 import logging
 import asyncio
-from typing import Dict, List, Tuple, Optional
+from typing import Tuple, Optional, List
 
 import discord
 from discord import Intents, MessageType
@@ -14,7 +14,7 @@ from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
 # ==========================================================
-# LOGGING CONFIGURATION
+# LOGGING
 # ==========================================================
 
 logging.basicConfig(
@@ -24,7 +24,7 @@ logging.basicConfig(
 log = logging.getLogger("highlighter")
 
 # ==========================================================
-# LOAD ENVIRONMENT
+# ENV
 # ==========================================================
 
 load_dotenv()
@@ -45,18 +45,18 @@ ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
-LOW_FUZZY_CUTOFF = int(os.getenv("LOW_FUZZY_CUTOFF", 65))
-
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
-GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
 # ==========================================================
-# ATD COMMAND CONFIG
+# COMMANDS
 # ==========================================================
 
-ATD_RESET_COMMAND = "!newatd"
-HELP_COMMAND = "!helpatd"
-ALLOWED_ROLE_NAMES = {"Server Manager", "LeComissioner"} # Roles allowed to reset ATD
+CMD_HELP = "!helpatd"
+CMD_RESET = "!newatd"
+CMD_STATUS = "!status"
+CMD_UNDO = "!undo"
+CMD_FORCE = "!force"
+
+ALLOWED_ROLE_NAMES = {"Admin", "Moderator"}  # empty set() to disable
 
 # ==========================================================
 # GOOGLE SHEETS AUTH
@@ -67,14 +67,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-if GOOGLE_CREDENTIALS_JSON:
-    creds = Credentials.from_service_account_info(
-        json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES
-    )
-else:
-    creds = Credentials.from_service_account_file(
-        GOOGLE_CREDENTIALS_PATH, scopes=SCOPES
-    )
+creds = Credentials.from_service_account_file(
+    os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json"),
+    scopes=SCOPES,
+)
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
@@ -84,137 +80,84 @@ ws = sh.get_worksheet_by_id(WS_GID)
 # HELPERS
 # ==========================================================
 
-def col_to_index(col_letter: str) -> int:
+def col_to_index(col: str) -> int:
     idx = 0
-    for c in col_letter.strip().upper():
+    for c in col:
         idx = idx * 26 + (ord(c) - 64)
     return idx
 
 NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 
-CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
-NONLETTER_RE = re.compile(r"[^A-Za-z\s]", re.UNICODE)
+NONLETTER_RE = re.compile(r"[^A-Za-z\s]")
 WHITESPACE_RE = re.compile(r"\s+")
-SMART_QUOTE_RE = re.compile(r"[‘’´`“”]")
 
-def normalize_key(s: str) -> str:
-    s = SMART_QUOTE_RE.sub("'", s)
+def normalize(s: str) -> str:
     s = NONLETTER_RE.sub(" ", s)
-    s = WHITESPACE_RE.sub(" ", s).strip().lower()
-    return s
-
-def normalize_msg(t: str) -> str:
-    t = SMART_QUOTE_RE.sub("'", t)
-    t = CUSTOM_EMOJI_RE.sub(" ", t)
-    t = re.sub(r"[\u200B-\u200D\uFEFF]", "", t)
-    t = re.sub(r"\$?\d+(\.\d+)?", "", t)
-    t = re.sub(r"\([^)]*\)", "", t)
-    t = NONLETTER_RE.sub(" ", t)
-    t = WHITESPACE_RE.sub(" ", t)
-    return t.strip().lower()
+    s = WHITESPACE_RE.sub(" ", s)
+    return s.strip().lower()
 
 # ==========================================================
-# LOAD PLAYER NAMES
+# LOAD PLAYERS
 # ==========================================================
 
-def load_player_names(ws):
-    col_vals = ws.col_values(NAME_COL_INDEX)
-    names_orig, name_to_row, keys_norm, surnames = [], {}, [], {}
-    key_to_orig = {}
+def load_players():
+    col = ws.col_values(NAME_COL_INDEX)
+    names, row_map, keys = [], {}, []
+    key_to_name = {}
 
-    for i, v in enumerate(col_vals, start=1):
-        v = (v or "").strip()
-        if not v:
+    for i, v in enumerate(col, start=1):
+        if not v.strip():
             continue
+        names.append(v)
+        row_map[v] = i
+        k = normalize(v)
+        keys.append(k)
+        key_to_name[k] = v
 
-        names_orig.append(v)
-        name_to_row[v] = i
+    log.info(f"[INIT] Loaded {len(names)} players")
+    return names, row_map, keys, key_to_name
 
-        norm = normalize_key(v)
-        keys_norm.append(norm)
-        key_to_orig[norm] = v
-
-        last = v.split()[-1].lower()
-        surnames.setdefault(last, []).append(v)
-
-    log.info(
-        f"[INIT] Loaded {len(names_orig)} players | "
-        f"Sheet='{ws.title}' | NameCol='{NAME_COL_LETTER}'"
-    )
-
-    return names_orig, name_to_row, keys_norm, key_to_orig, surnames
-
-names_orig, name_to_row, keys_norm, key_to_orig, surnames = load_player_names(ws)
+names_orig, name_to_row, keys_norm, key_to_orig = load_players()
 
 # ==========================================================
-# IN-MEMORY HIGHLIGHT CACHE
+# STATE
 # ==========================================================
 
 highlighted_forever: set[str] = set()
+highlight_stack: List[Tuple[str, int]] = []
 
 # ==========================================================
-# FIND BEST MATCH
+# MATCHING
 # ==========================================================
 
-def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
-    msg_clean = normalize_msg(text)
-    msg_words = msg_clean.split()
+def find_best_match(text: str) -> Optional[Tuple[str, int, float]]:
+    msg = normalize(text)
 
-    if len(msg_words) < 2:
+    for n in names_orig:
+        if normalize(n) in msg:
+            return n, name_to_row[n], 100.0
+
+    hit = process.extractOne(msg, keys_norm, scorer=fuzz.token_sort_ratio)
+    if not hit or hit[1] < FUZZY_THRESHOLD:
         return None
 
-    skip_triggers = {
-        "skipped", "skip", "pass", "waiting", "block", "blocked",
-        "invalid", "bot", "register", "testing", "bro", "man", "lol",
-        "pick", "why", "cant", "team", "round"
-    }
-
-    if any(w in msg_words for w in skip_triggers):
-        return None
-
-    for orig in names_orig:
-        if normalize_key(orig) in msg_clean:
-            return orig, name_to_row[orig], 100.0, "Direct"
-
-    for w in msg_words:
-        if w in surnames and len(surnames[w]) == 1:
-            orig = surnames[w][0]
-            return orig, name_to_row[orig], 95.0, "Surname"
-
-    hits = process.extract(
-        msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3
-    )
-
-    if not hits:
-        return None
-
-    best_key, best_score = hits[0][:2]
-
-    if best_score < FUZZY_THRESHOLD:
-        return None
-
-    orig = key_to_orig.get(best_key)
-    if orig:
-        return orig, name_to_row[orig], best_score, "Fuzzy"
-
-    return None
+    name = key_to_orig[hit[0]]
+    return name, name_to_row[name], hit[1]
 
 # ==========================================================
-# APPLY HIGHLIGHT
+# SHEET OPS
 # ==========================================================
 
-async def highlight_row(row: int, reason: str, name: str):
-    cache_key = f"{ws.title}:{name.lower()}"
-
-    if cache_key in highlighted_forever:
+async def apply_highlight(row: int, name: str):
+    key = f"{ws.title}:{name.lower()}"
+    if key in highlighted_forever:
         return "already"
 
-    highlighted_forever.add(cache_key)
+    highlighted_forever.add(key)
+    highlight_stack.append((name, row))
 
-    start_col = col_to_index(ROW_START_COL) - 1
-    end_col = col_to_index(ROW_END_COL)
-
-    bg = {"red": 0.29, "green": 0.52, "blue": 0.91}
+    start = col_to_index(ROW_START_COL) - 1
+    end = col_to_index(ROW_END_COL)
 
     requests = [{
         "repeatCell": {
@@ -222,21 +165,36 @@ async def highlight_row(row: int, reason: str, name: str):
                 "sheetId": ws.id,
                 "startRowIndex": row - 1,
                 "endRowIndex": row,
-                "startColumnIndex": start_col,
-                "endColumnIndex": end_col,
+                "startColumnIndex": start,
+                "endColumnIndex": end,
             },
-            "cell": {"userEnteredFormat": {"backgroundColor": bg}},
+            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.3, "green": 0.6, "blue": 0.9}}},
             "fields": "userEnteredFormat.backgroundColor"
         }
     }]
 
     await asyncio.to_thread(sh.batch_update, {"requests": requests})
-
-    log.info(
-        f"[HIGHLIGHT] Name='{name}' | Row={row} | Reason={reason}"
-    )
-
     return True
+
+async def clear_highlight(row: int):
+    start = col_to_index(ROW_START_COL) - 1
+    end = col_to_index(ROW_END_COL)
+
+    requests = [{
+        "repeatCell": {
+            "range": {
+                "sheetId": ws.id,
+                "startRowIndex": row - 1,
+                "endRowIndex": row,
+                "startColumnIndex": start,
+                "endColumnIndex": end,
+            },
+            "cell": {"userEnteredFormat": {}},
+            "fields": "userEnteredFormat"
+        }
+    }]
+
+    await asyncio.to_thread(sh.batch_update, {"requests": requests})
 
 # ==========================================================
 # DISCORD BOT
@@ -244,117 +202,120 @@ async def highlight_row(row: int, reason: str, name: str):
 
 intents = Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents, reconnect=True)
+client = discord.Client(intents=intents)
 
-@client.event
-async def on_ready():
-    log.info(f"🔗 Connected as {client.user} | Channel={CHANNEL_ID}")
+def has_permission(member: discord.Member) -> bool:
+    if not ALLOWED_ROLE_NAMES:
+        return True
+    return bool({r.name for r in member.roles} & ALLOWED_ROLE_NAMES)
 
 @client.event
 async def on_message(message: discord.Message):
 
-    if message.author.bot or message.webhook_id:
-        return
-    if message.channel.id != CHANNEL_ID:
+    if message.author.bot or message.channel.id != CHANNEL_ID:
         return
 
-    content_raw = (message.content or "").strip().lower()
+    content = message.content.strip()
 
-    # ------------------------------------------------------
-    # HELP COMMAND
-    # ------------------------------------------------------
-    if content_raw == HELP_COMMAND:
+    # ---------------- HELP ----------------
+    if content == CMD_HELP:
         await message.reply(
-            "**📘 ATD Highlight Bot – Help**\n\n"
-            "**What this bot does:**\n"
-            "• Watches draft picks in this channel\n"
-            "• Detects player names using smart matching\n"
-            "• Highlights the matching player row in Google Sheets\n\n"
-            "**How name matching works:**\n"
-            "1️⃣ Full name match (highest priority)\n"
-            "2️⃣ Unique surname match\n"
-            "3️⃣ Fuzzy match (handles typos)\n\n"
-            "**Commands:**\n"
-            "`!newatd` – Clears bot memory for a new draft\n"
-            "`!helpatd` – Shows this help message\n\n"
-            "**Important notes:**\n"
-            "• Bot memory is separate from Google Sheets\n"
-            "• Manually unhighlighting the sheet does NOT reset the bot\n"
-            "• Always run `!newatd` before starting a new ATD\n\n"
-            "✅ Designed specifically for ATD drafts",
+            "**📘 ATD Highlight Bot Help**\n\n"
+            "**Purpose**\n"
+            "• Detects draft picks in chat\n"
+            "• Highlights the corresponding player row in Google Sheets\n\n"
+            "**Matching Priority**\n"
+            "1️⃣ Full name match\n"
+            "2️⃣ Fuzzy match (handles typos)\n\n"
+            "**Commands**\n"
+            "`!newatd` – Reset bot memory for a new draft\n"
+            "`!status` – Show draft progress\n"
+            "`!undo` – Undo last highlighted pick\n"
+            "`!force <name>` – Force highlight a player\n"
+            "`!helpatd` – Show this help\n\n"
+            "⚠️ Always run `!newatd` before a new ATD",
             mention_author=False
         )
         return
 
-    # ------------------------------------------------------
-    # ATD RESET COMMAND
-    # ------------------------------------------------------
-    if content_raw == ATD_RESET_COMMAND:
-
-        if message.guild and ALLOWED_ROLE_NAMES:
-            author_roles = {r.name for r in message.author.roles}
-            if not author_roles.intersection(ALLOWED_ROLE_NAMES):
-                await message.reply("⛔ You don’t have permission to reset ATD memory.")
-                return
-
+    # ---------------- RESET ----------------
+    if content == CMD_RESET:
+        if not has_permission(message.author):
+            await message.reply("⛔ No permission.")
+            return
         highlighted_forever.clear()
+        highlight_stack.clear()
+        await message.reply("🧹 ATD memory reset.")
+        return
 
-        log.warning(
-            f"[ATD RESET] Triggered by {message.author}"
-        )
-
+    # ---------------- STATUS ----------------
+    if content == CMD_STATUS:
         await message.reply(
-            "🧹 **New ATD started**\n"
-            "Bot memory cleared. Ready for a fresh draft."
+            f"📊 **ATD Status**\n"
+            f"• Highlighted: {len(highlighted_forever)}\n"
+            f"• Sheet: {ws.title}",
+            mention_author=False
         )
         return
 
+    # ---------------- UNDO ----------------
+    if content == CMD_UNDO:
+        if not has_permission(message.author):
+            await message.reply("⛔ No permission.")
+            return
+        if not highlight_stack:
+            await message.reply("⚠️ Nothing to undo.")
+            return
+
+        name, row = highlight_stack.pop()
+        highlighted_forever.discard(f"{ws.title}:{name.lower()}")
+        await clear_highlight(row)
+        await message.reply(f"↩️ Undid highlight for **{name}**")
+        return
+
+    # ---------------- FORCE ----------------
+    if content.lower().startswith(CMD_FORCE):
+        if not has_permission(message.author):
+            await message.reply("⛔ No permission.")
+            return
+
+        forced = content[len(CMD_FORCE):].strip()
+        if not forced:
+            await message.reply("Usage: `!force <player name>`")
+            return
+
+        match = find_best_match(forced)
+        if not match:
+            await message.reply("❌ Player not found.")
+            return
+
+        name, row, _ = match
+        await apply_highlight(row, name)
+        await message.reply(f"🟩 Forced highlight: **{name}**")
+        return
+
+    # ---------------- NORMAL FLOW ----------------
     if message.type not in (MessageType.default, MessageType.reply):
         return
 
-    content = (message.content or "").strip()
-
-    if message.reference and message.reference.resolved:
-        parent = message.reference.resolved
-        if isinstance(parent, discord.Message) and parent.content:
-            if len(normalize_msg(message.content)) > 1:
-                content = f"{parent.content} {content}".strip()
-
-    if not content:
+    match = find_best_match(content)
+    if not match:
         return
 
-    best = find_best_match(content)
-    if not best:
-        return
-
-    name, row, score, reason = best
-
-    log.info(
-        f"[MATCH] Name='{name}' | Row={row} | Score={score:.1f} | Reason={reason}"
-    )
-
-    result = await highlight_row(row, reason, name)
+    name, row, _ = match
+    result = await apply_highlight(row, name)
 
     if result is True:
-        try:
-            await message.add_reaction("✅")
-            confirm = await message.reply(
-                f"🟩 Highlighted **{name}** (row {row})",
-                mention_author=False
-            )
-            await asyncio.sleep(5)
-            await confirm.delete()
-        except:
-            pass
+        await message.add_reaction("✅")
+    else:
+        await message.add_reaction("❌")
 
-    elif result == "already":
-        try:
-            await message.add_reaction("❌")
-        except:
-            pass
+@client.event
+async def on_ready():
+    log.info(f"Connected as {client.user}")
 
 # ==========================================================
-# MAIN LOOP
+# MAIN
 # ==========================================================
 
 if __name__ == "__main__":
@@ -362,5 +323,5 @@ if __name__ == "__main__":
         try:
             client.run(DISCORD_TOKEN)
         except Exception as e:
-            log.error(f"[DISCORD ERROR] {e} | Reconnecting in 5s...")
+            log.error(f"Discord error: {e}")
             time.sleep(5)
