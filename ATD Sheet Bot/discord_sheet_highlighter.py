@@ -14,7 +14,7 @@ from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 
 # ==========================================================
-# LOGGING CONFIGURATION (IMPROVED)
+# LOGGING CONFIGURATION
 # ==========================================================
 
 logging.basicConfig(
@@ -51,6 +51,13 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
 # ==========================================================
+# ATD RESET CONFIG
+# ==========================================================
+
+ATD_RESET_COMMAND = "!newatd"
+ALLOWED_ROLE_NAMES = {"Admin", "Moderator"}  # change or empty set() to disable
+
+# ==========================================================
 # GOOGLE SHEETS AUTH
 # ==========================================================
 
@@ -60,9 +67,13 @@ SCOPES = [
 ]
 
 if GOOGLE_CREDENTIALS_JSON:
-    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES)
+    creds = Credentials.from_service_account_info(
+        json.loads(GOOGLE_CREDENTIALS_JSON), scopes=SCOPES
+    )
 else:
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
+    creds = Credentials.from_service_account_file(
+        GOOGLE_CREDENTIALS_PATH, scopes=SCOPES
+    )
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SHEET_ID)
@@ -126,16 +137,22 @@ def load_player_names(ws):
         surnames.setdefault(last, []).append(v)
 
     log.info(
-        f"[INIT] Loaded {len(names_orig)} players | Sheet='{ws.title}' | NameCol='{NAME_COL_LETTER}' (idx {NAME_COL_INDEX})"
+        f"[INIT] Loaded {len(names_orig)} players | "
+        f"Sheet='{ws.title}' | NameCol='{NAME_COL_LETTER}'"
     )
 
     return names_orig, name_to_row, keys_norm, key_to_orig, surnames
 
 names_orig, name_to_row, keys_norm, key_to_orig, surnames = load_player_names(ws)
+
+# ==========================================================
+# IN-MEMORY HIGHLIGHT CACHE (RESET VIA !newatd)
+# ==========================================================
+
 highlighted_forever: set[str] = set()
 
 # ==========================================================
-# FIND BEST MATCH (WITH DETAILED LOGGING)
+# FIND BEST MATCH
 # ==========================================================
 
 def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
@@ -152,22 +169,21 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
     }
 
     if any(w in msg_words for w in skip_triggers):
-        log.info(f"[SKIP] Ignored message (general chatter): '{text}'")
         return None
 
-    # Direct full-name match
     for orig in names_orig:
         if normalize_key(orig) in msg_clean:
             return orig, name_to_row[orig], 100.0, "Direct"
 
-    # Unique surname
     for w in msg_words:
         if w in surnames and len(surnames[w]) == 1:
             orig = surnames[w][0]
             return orig, name_to_row[orig], 95.0, "Surname"
 
-    # Fuzzy match
-    hits = process.extract(msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3)
+    hits = process.extract(
+        msg_clean, keys_norm, scorer=fuzz.token_sort_ratio, limit=3
+    )
+
     if not hits:
         return None
 
@@ -183,11 +199,12 @@ def find_best_match(text: str) -> Optional[Tuple[str, int, float, str]]:
     return None
 
 # ==========================================================
-# APPLY HIGHLIGHT (FIXED + IMPROVED LOGGING)
+# APPLY HIGHLIGHT
 # ==========================================================
 
 async def highlight_row(row: int, reason: str, name: str):
     cache_key = f"{ws.title}:{name.lower()}"
+
     if cache_key in highlighted_forever:
         return "already"
 
@@ -196,15 +213,7 @@ async def highlight_row(row: int, reason: str, name: str):
     start_col = col_to_index(ROW_START_COL) - 1
     end_col = col_to_index(ROW_END_COL)
 
-    rng = f"{ROW_START_COL}{row}:{ROW_END_COL}{row}"
-
     bg = {"red": 0.29, "green": 0.52, "blue": 0.91}
-    text_fmt = {
-        "foregroundColor": {"red": 0, "green": 0, "blue": 0},
-        "fontFamily": "Roboto Condensed",
-        "fontSize": 10,
-        "bold": False,
-    }
 
     requests = [{
         "repeatCell": {
@@ -215,16 +224,15 @@ async def highlight_row(row: int, reason: str, name: str):
                 "startColumnIndex": start_col,
                 "endColumnIndex": end_col,
             },
-            "cell": {"userEnteredFormat": {"backgroundColor": bg, "textFormat": text_fmt}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"
+            "cell": {"userEnteredFormat": {"backgroundColor": bg}},
+            "fields": "userEnteredFormat.backgroundColor"
         }
     }]
 
-    # FIX: Use sh.batch_update (correct spreadsheet handle)
     await asyncio.to_thread(sh.batch_update, {"requests": requests})
 
     log.info(
-        f"[HIGHLIGHT] Sheet='{ws.title}' | Name='{name}' | Row={row} | Range={rng} | Reason={reason}"
+        f"[HIGHLIGHT] Name='{name}' | Row={row} | Reason={reason}"
     )
 
     return True
@@ -239,7 +247,7 @@ client = discord.Client(intents=intents, reconnect=True)
 
 @client.event
 async def on_ready():
-    log.info(f"🔗 Connected as {client.user} | Watching Channel={CHANNEL_ID}")
+    log.info(f"🔗 Connected as {client.user} | Channel={CHANNEL_ID}")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -248,66 +256,77 @@ async def on_message(message: discord.Message):
         return
     if message.channel.id != CHANNEL_ID:
         return
+
+    # ------------------------------------------------------
+    # ATD RESET COMMAND
+    # ------------------------------------------------------
+    if message.content.lower().strip() == ATD_RESET_COMMAND:
+
+        if message.guild and ALLOWED_ROLE_NAMES:
+            author_roles = {r.name for r in message.author.roles}
+            if not author_roles.intersection(ALLOWED_ROLE_NAMES):
+                await message.reply("⛔ You don’t have permission to reset ATD memory.")
+                return
+
+        highlighted_forever.clear()
+
+        log.warning(
+            f"[ATD RESET] Triggered by {message.author}"
+        )
+
+        await message.reply(
+            "🧹 **New ATD started**\n"
+            "Bot memory cleared. Ready for a fresh draft."
+        )
+        return
+
     if message.type not in (MessageType.default, MessageType.reply):
         return
 
     content = (message.content or "").strip()
     original_content = content
 
-    # Handle replies (merge parent content)
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
         if isinstance(parent, discord.Message) and parent.content:
             if len(normalize_msg(message.content)) > 1:
                 content = f"{parent.content} {content}".strip()
-                log.info(
-                    f"[MERGE] Reply merged | Parent='{parent.content[:40]}' | Child='{message.content[:40]}'"
-                )
 
     if not content:
         return
 
     best = find_best_match(content)
     if not best:
-        log.info(
-            f"[NO MATCH] msgID={message.id} | msg='{original_content}'"
-        )
         return
 
     name, row, score, reason = best
 
     log.info(
-        f"[MATCH] msgID={message.id} | Name='{name}' | Row={row} | Score={score:.1f} | Reason={reason} | Cleaned='{normalize_msg(content)}'"
+        f"[MATCH] Name='{name}' | Row={row} | Score={score:.1f} | Reason={reason}"
     )
 
     result = await highlight_row(row, reason, name)
 
-    if result == True:
+    if result is True:
         try:
             await message.add_reaction("✅")
             confirm = await message.reply(
-                f"🟩 Highlighted **{name}** (row {row}) [{reason}]",
+                f"🟩 Highlighted **{name}** (row {row})",
                 mention_author=False
             )
             await asyncio.sleep(5)
             await confirm.delete()
-        except Exception as e:
-            log.warning(f"[CONFIRM ERROR] {e}")
+        except:
+            pass
 
     elif result == "already":
         try:
             await message.add_reaction("❌")
-            note = await message.reply(
-                f"⚠️ **{name}** already highlighted.",
-                mention_author=False
-            )
-            await asyncio.sleep(5)
-            await note.delete()
         except:
             pass
 
 # ==========================================================
-# MAIN LOOP (RECONNECT SAFE)
+# MAIN LOOP
 # ==========================================================
 
 if __name__ == "__main__":
