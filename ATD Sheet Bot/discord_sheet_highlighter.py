@@ -55,6 +55,7 @@ CMD_RESET = "!newatd"
 CMD_STATUS = "!status"
 CMD_UNDO = "!undo"
 CMD_FORCE = "!force"
+CMD_COLOR = "!changehexcolour"
 
 ALLOWED_ROLE_NAMES = {"Admin", "Moderator"}  # empty set() to disable
 
@@ -96,6 +97,16 @@ def normalize(s: str) -> str:
     s = WHITESPACE_RE.sub(" ", s)
     return s.strip().lower()
 
+def hex_to_rgb_frac(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", hex_color):
+        return None
+    return {
+        "red": int(hex_color[0:2], 16) / 255,
+        "green": int(hex_color[2:4], 16) / 255,
+        "blue": int(hex_color[4:6], 16) / 255,
+    }
+
 # ==========================================================
 # LOAD PLAYERS
 # ==========================================================
@@ -125,6 +136,9 @@ names_orig, name_to_row, keys_norm, key_to_orig = load_players()
 
 highlighted_forever: set[str] = set()
 highlight_stack: List[Tuple[str, int]] = []
+
+# Default highlight colour (#4984e8)
+HIGHLIGHT_COLOR = {"red": 0.286, "green": 0.518, "blue": 0.910}
 
 # ==========================================================
 # MATCHING
@@ -168,7 +182,7 @@ async def apply_highlight(row: int, name: str):
                 "startColumnIndex": start,
                 "endColumnIndex": end,
             },
-            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.3, "green": 0.6, "blue": 0.9}}},
+            "cell": {"userEnteredFormat": {"backgroundColor": HIGHLIGHT_COLOR}},
             "fields": "userEnteredFormat.backgroundColor"
         }
     }]
@@ -212,7 +226,7 @@ def has_permission(member: discord.Member) -> bool:
 @client.event
 async def on_message(message: discord.Message):
 
-    if message.author.bot or message.channel.id != CHANNEL_ID:
+    if message.author.bot:
         return
 
     content = message.content.strip()
@@ -220,20 +234,22 @@ async def on_message(message: discord.Message):
     # ---------------- HELP ----------------
     if content == CMD_HELP:
         await message.reply(
-            "**📘 ATD Highlight Bot Help**\n\n"
-            "**Purpose**\n"
-            "• Detects draft picks in chat\n"
-            "• Highlights the corresponding player row in Google Sheets\n\n"
-            "**Matching Priority**\n"
-            "1️⃣ Full name match\n"
-            "2️⃣ Fuzzy match (handles typos)\n\n"
-            "**Commands**\n"
+            "**📘 ATD Highlight Bot – Help**\n\n"
+            "**What this bot does**\n"
+            "• Watches the draft channel for picks\n"
+            "• Matches player names intelligently\n"
+            "• Highlights the correct row in Google Sheets\n\n"
+            "**Commands (usable in any channel)**\n"
             "`!newatd` – Reset bot memory for a new draft\n"
-            "`!status` – Show draft progress\n"
-            "`!undo` – Undo last highlighted pick\n"
-            "`!force <name>` – Force highlight a player\n"
-            "`!helpatd` – Show this help\n\n"
-            "⚠️ Always run `!newatd` before a new ATD",
+            "`!status` – Show how many players are drafted\n"
+            "`!undo` – Undo the last highlighted pick\n"
+            "`!force <name>` – Force-highlight a specific player\n"
+            "`!changehexcolour <hex>` – Change highlight colour (e.g. `#4984e8`)\n"
+            "`!helpatd` – Show this help message\n\n"
+            "**Important notes**\n"
+            "• Only the configured draft channel triggers highlights\n"
+            "• Commands can be run from any channel\n"
+            "• Always run `!newatd` before starting a new ATD",
             mention_author=False
         )
         return
@@ -273,6 +289,25 @@ async def on_message(message: discord.Message):
         await message.reply(f"↩️ Undid highlight for **{name}**")
         return
 
+    # ---------------- CHANGE COLOUR ----------------
+    if content.lower().startswith(CMD_COLOR):
+        if not has_permission(message.author):
+            await message.reply("⛔ No permission.")
+            return
+
+        arg = content[len(CMD_COLOR):].strip()
+        rgb = hex_to_rgb_frac(arg)
+
+        if not rgb:
+            await message.reply("❌ Invalid hex colour. Example: `#4984e8`")
+            return
+
+        global HIGHLIGHT_COLOR
+        HIGHLIGHT_COLOR = rgb
+
+        await message.reply(f"🎨 Highlight colour updated to `{arg}`")
+        return
+
     # ---------------- FORCE ----------------
     if content.lower().startswith(CMD_FORCE):
         if not has_permission(message.author):
@@ -294,7 +329,10 @@ async def on_message(message: discord.Message):
         await message.reply(f"🟩 Forced highlight: **{name}**")
         return
 
-    # ---------------- NORMAL FLOW ----------------
+    # ---------------- NORMAL FLOW (ONLY DRAFT CHANNEL) ----------------
+    if message.channel.id != CHANNEL_ID:
+        return
+
     if message.type not in (MessageType.default, MessageType.reply):
         return
 
