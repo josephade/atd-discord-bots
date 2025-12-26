@@ -51,11 +51,12 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json")
 
 # ==========================================================
-# ATD RESET CONFIG
+# ATD COMMAND CONFIG
 # ==========================================================
 
 ATD_RESET_COMMAND = "!newatd"
-ALLOWED_ROLE_NAMES = {"Admin", "Moderator"}  # change or empty set() to disable
+HELP_COMMAND = "!help"
+ALLOWED_ROLE_NAMES = {"Server Manager", "LeComissioner"} # Roles allowed to reset ATD
 
 # ==========================================================
 # GOOGLE SHEETS AUTH
@@ -146,7 +147,7 @@ def load_player_names(ws):
 names_orig, name_to_row, keys_norm, key_to_orig, surnames = load_player_names(ws)
 
 # ==========================================================
-# IN-MEMORY HIGHLIGHT CACHE (RESET VIA !newatd)
+# IN-MEMORY HIGHLIGHT CACHE
 # ==========================================================
 
 highlighted_forever: set[str] = set()
@@ -257,10 +258,38 @@ async def on_message(message: discord.Message):
     if message.channel.id != CHANNEL_ID:
         return
 
+    content_raw = (message.content or "").strip().lower()
+
+    # ------------------------------------------------------
+    # HELP COMMAND
+    # ------------------------------------------------------
+    if content_raw == HELP_COMMAND:
+        await message.reply(
+            "**📘 ATD Highlight Bot – Help**\n\n"
+            "**What this bot does:**\n"
+            "• Watches draft picks in this channel\n"
+            "• Detects player names using smart matching\n"
+            "• Highlights the matching player row in Google Sheets\n\n"
+            "**How name matching works:**\n"
+            "1️⃣ Full name match (highest priority)\n"
+            "2️⃣ Unique surname match\n"
+            "3️⃣ Fuzzy match (handles typos)\n\n"
+            "**Commands:**\n"
+            "`!newatd` – Clears bot memory for a new draft\n"
+            "`!help` – Shows this help message\n\n"
+            "**Important notes:**\n"
+            "• Bot memory is separate from Google Sheets\n"
+            "• Manually unhighlighting the sheet does NOT reset the bot\n"
+            "• Always run `!newatd` before starting a new ATD\n\n"
+            "✅ Designed specifically for ATD drafts",
+            mention_author=False
+        )
+        return
+
     # ------------------------------------------------------
     # ATD RESET COMMAND
     # ------------------------------------------------------
-    if message.content.lower().strip() == ATD_RESET_COMMAND:
+    if content_raw == ATD_RESET_COMMAND:
 
         if message.guild and ALLOWED_ROLE_NAMES:
             author_roles = {r.name for r in message.author.roles}
@@ -284,7 +313,6 @@ async def on_message(message: discord.Message):
         return
 
     content = (message.content or "").strip()
-    original_content = content
 
     if message.reference and message.reference.resolved:
         parent = message.reference.resolved
