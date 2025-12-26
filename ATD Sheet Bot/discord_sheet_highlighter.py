@@ -55,7 +55,7 @@ GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.
 # ==========================================================
 
 ATD_RESET_COMMAND = "!newatd"
-HELP_COMMAND = "!help"
+HELP_COMMAND = "!helpatd"
 ALLOWED_ROLE_NAMES = {"Server Manager", "LeComissioner"} # Roles allowed to reset ATD
 
 # ==========================================================
@@ -276,7 +276,7 @@ async def on_message(message: discord.Message):
             "3️⃣ Fuzzy match (handles typos)\n\n"
             "**Commands:**\n"
             "`!newatd` – Clears bot memory for a new draft\n"
-            "`!help` – Shows this help message\n\n"
+            "`!helpatd` – Shows this help message\n\n"
             "**Important notes:**\n"
             "• Bot memory is separate from Google Sheets\n"
             "• Manually unhighlighting the sheet does NOT reset the bot\n"
