@@ -6,7 +6,7 @@ import asyncio
 from typing import Tuple, Optional, List
 
 import discord
-from discord import Intents, MessageType
+from discord import Intents
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
@@ -49,14 +49,10 @@ FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
 # COMMANDS
 # ==========================================================
 
-CMD_HELP = "!helpatd"
 CMD_RESET = "!newatd"
 CMD_STATUS = "!status"
 CMD_UNDO = "!undo"
 CMD_FORCE = "!force"
-CMD_COLOR = "!changehexcolour"
-
-ALLOWED_ROLE_NAMES = {"Admin", "Moderator", "LeComissioner"}
 
 # ==========================================================
 # GOOGLE SHEETS AUTH
@@ -95,16 +91,6 @@ def normalize(s: str) -> str:
     s = NONLETTER_RE.sub(" ", s)
     s = WHITESPACE_RE.sub(" ", s)
     return s.strip().lower()
-
-def hex_to_rgb_frac(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    if not re.fullmatch(r"[0-9a-fA-F]{6}", hex_color):
-        return None
-    return {
-        "red": int(hex_color[0:2], 16) / 255,
-        "green": int(hex_color[2:4], 16) / 255,
-        "blue": int(hex_color[4:6], 16) / 255,
-    }
 
 # ==========================================================
 # LOAD PLAYERS
@@ -251,13 +237,17 @@ async def on_message(message: discord.Message):
         return
 
     if content == CMD_STATUS:
-        await message.reply(f"📊 Highlighted: {len(highlighted_forever)}", mention_author=False)
+        await message.reply(
+            f"📊 Highlighted: {len(highlighted_forever)}",
+            mention_author=False
+        )
         return
 
     if content == CMD_UNDO:
         if not highlight_stack:
             await message.reply("⚠️ Nothing to undo.")
             return
+
         name, row = highlight_stack.pop()
         highlighted_forever.discard(f"{ws.title}:{name.lower()}")
         await clear_highlight(row)
@@ -273,6 +263,10 @@ async def on_message(message: discord.Message):
         name, row = match
         await apply_highlight(row, name)
         await safe_react(message, "✅")
+        return
+
+    # 🔒 HARD STOP — NEVER LET COMMANDS FALL THROUGH
+    if content.startswith("!"):
         return
 
     # ---------- DRAFT FLOW ----------
