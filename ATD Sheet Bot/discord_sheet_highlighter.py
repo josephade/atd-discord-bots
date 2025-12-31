@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import time
 import logging
 import asyncio
@@ -139,25 +138,23 @@ highlight_stack: List[Tuple[str, int]] = []
 HIGHLIGHT_COLOR = {"red": 0.286, "green": 0.518, "blue": 0.910}
 
 # ==========================================================
-# RATE LIMITING (CRITICAL)
+# RATE LIMITING
 # ==========================================================
 
 LAST_REACTION_TIME = 0
-REACTION_COOLDOWN = 1.5  # seconds
+REACTION_COOLDOWN = 1.5
 
 async def safe_react(message: discord.Message, emoji: str):
     global LAST_REACTION_TIME
-
     wait = REACTION_COOLDOWN - (time.time() - LAST_REACTION_TIME)
     if wait > 0:
         await asyncio.sleep(wait)
-
     try:
         await message.add_reaction(emoji)
         LAST_REACTION_TIME = time.time()
     except discord.HTTPException as e:
         if e.status == 429:
-            log.warning("⚠️ Rate limited by Discord, skipping reaction")
+            log.warning("⚠️ Rate limited, skipping reaction")
         else:
             raise
 
@@ -185,7 +182,6 @@ def find_best_match(text: str) -> Optional[Tuple[str, int]]:
 
 async def apply_highlight(row: int, name: str):
     key = f"{ws.title}:{name.lower()}"
-
     if key in highlighted_forever:
         return "already"
 
@@ -240,11 +236,6 @@ intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-def has_permission(member: discord.Member) -> bool:
-    if not ALLOWED_ROLE_NAMES:
-        return True
-    return bool({r.name for r in member.roles} & ALLOWED_ROLE_NAMES)
-
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -252,11 +243,7 @@ async def on_message(message: discord.Message):
 
     content = message.content.strip()
 
-    # ---------------- COMMANDS ----------------
-    if content == CMD_HELP:
-        await message.reply("📘 ATD Highlight Bot – use `!newatd` before drafts", mention_author=False)
-        return
-
+    # ---------- COMMANDS ----------
     if content == CMD_RESET:
         highlighted_forever.clear()
         highlight_stack.clear()
@@ -288,7 +275,7 @@ async def on_message(message: discord.Message):
         await safe_react(message, "✅")
         return
 
-    # ---------------- DRAFT FLOW ----------------
+    # ---------- DRAFT FLOW ----------
     if message.channel.id != CHANNEL_ID:
         return
 
@@ -300,11 +287,9 @@ async def on_message(message: discord.Message):
     result = await apply_highlight(row, name)
 
     if result == "already":
-        warn = await message.reply(
+        await message.reply(
             f"❌ {message.author.mention} **{name}** has already been picked. Please pick again."
         )
-        await asyncio.sleep(4)
-        await warn.delete()
         return
 
     await safe_react(message, "✅")
