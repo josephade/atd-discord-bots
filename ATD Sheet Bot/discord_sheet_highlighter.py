@@ -57,7 +57,7 @@ CMD_UNDO = "!undo"
 CMD_FORCE = "!force"
 CMD_COLOR = "!changehexcolour"
 
-ALLOWED_ROLE_NAMES = {"Admin", "Moderator"}  # empty set() to disable
+ALLOWED_ROLE_NAMES = {"Admin", "Moderator", "LeComissioner" }  # empty set() to disable
 
 # ==========================================================
 # GOOGLE SHEETS AUTH
