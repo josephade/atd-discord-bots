@@ -226,7 +226,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # 🔒 Ignore replies / quotes / system messages
     if message.type != MessageType.default:
         return
 
@@ -235,7 +234,44 @@ async def on_message(message: discord.Message):
     # ================= COMMANDS =================
 
     if content == CMD_HELP:
-        await message.reply("📘 ATD Highlight Bot\nUse !newatd, !undo, !status")
+        embed = discord.Embed(
+            title="📘 ATD Highlight Bot Help",
+            color=0x4A90E2
+        )
+
+        embed.add_field(
+            name="Purpose",
+            value=(
+                "• Detects draft picks in chat\n"
+                "• Highlights the corresponding player row in Google Sheets"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Matching Priority",
+            value=(
+                "1️⃣ Full name match\n"
+                "2️⃣ Fuzzy match (handles typos)"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`!newatd` – Reset bot memory for a new draft\n"
+                "`!status` – Show draft progress\n"
+                "`!undo` – Undo last highlighted pick\n"
+                "`!force <name>` – Force highlight a player\n"
+                "`!changehexcolour <hex>` – Change highlight colour\n"
+                "`!helpatd` – Show this help"
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text="⚠️ Always run !newatd before starting a new ATD")
+        await message.reply(embed=embed)
         return
 
     if content == CMD_RESET:
@@ -280,7 +316,7 @@ async def on_message(message: discord.Message):
         await message.add_reaction("✅")
         return
 
-    # 🚫 Stop commands falling into draft logic
+    # 🚫 Stop commands entering draft logic
     if content.startswith("!"):
         return
 
@@ -316,9 +352,4 @@ async def on_ready():
 # ==========================================================
 
 if __name__ == "__main__":
-    while True:
-        try:
-            client.run(DISCORD_TOKEN)
-        except Exception as e:
-            log.error(f"Discord error: {e}")
-            time.sleep(5)
+    client.run(DISCORD_TOKEN)
