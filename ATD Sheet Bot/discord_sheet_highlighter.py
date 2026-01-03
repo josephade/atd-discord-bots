@@ -6,7 +6,7 @@ import asyncio
 from typing import Tuple, Optional, List
 
 import discord
-from discord import Intents
+from discord import Intents, MessageType
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
@@ -49,10 +49,14 @@ FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
 # COMMANDS
 # ==========================================================
 
+CMD_HELP = "!helpatd"
 CMD_RESET = "!newatd"
 CMD_STATUS = "!status"
 CMD_UNDO = "!undo"
 CMD_FORCE = "!force"
+CMD_COLOR = "!changehexcolour"
+
+ALLOWED_ROLE_NAMES = {"Admin", "Moderator", "LeComissioner"}
 
 # ==========================================================
 # GOOGLE SHEETS AUTH
@@ -92,13 +96,24 @@ def normalize(s: str) -> str:
     s = WHITESPACE_RE.sub(" ", s)
     return s.strip().lower()
 
+def hex_to_rgb_frac(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", hex_color):
+        return None
+    return {
+        "red": int(hex_color[0:2], 16) / 255,
+        "green": int(hex_color[2:4], 16) / 255,
+        "blue": int(hex_color[4:6], 16) / 255,
+    }
+
 # ==========================================================
 # LOAD PLAYERS
 # ==========================================================
 
 def load_players():
     col = ws.col_values(NAME_COL_INDEX)
-    names, row_map, keys, key_to_name = [], {}, [], {}
+    names, row_map, keys = [], {}, []
+    key_to_name = {}
 
     for i, v in enumerate(col, start=1):
         if not v.strip():
@@ -122,27 +137,6 @@ highlighted_forever: set[str] = set()
 highlight_stack: List[Tuple[str, int]] = []
 
 HIGHLIGHT_COLOR = {"red": 0.286, "green": 0.518, "blue": 0.910}
-
-# ==========================================================
-# RATE LIMITING
-# ==========================================================
-
-LAST_REACTION_TIME = 0
-REACTION_COOLDOWN = 1.5
-
-async def safe_react(message: discord.Message, emoji: str):
-    global LAST_REACTION_TIME
-    wait = REACTION_COOLDOWN - (time.time() - LAST_REACTION_TIME)
-    if wait > 0:
-        await asyncio.sleep(wait)
-    try:
-        await message.add_reaction(emoji)
-        LAST_REACTION_TIME = time.time()
-    except discord.HTTPException as e:
-        if e.status == 429:
-            log.warning("⚠️ Rate limited, skipping reaction")
-        else:
-            raise
 
 # ==========================================================
 # MATCHING
@@ -222,14 +216,28 @@ intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+def has_permission(member: discord.Member) -> bool:
+    if not ALLOWED_ROLE_NAMES:
+        return True
+    return bool({r.name for r in member.roles} & ALLOWED_ROLE_NAMES)
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # 🔒 Ignore replies / quotes / system messages
+    if message.type != MessageType.default:
+        return
+
     content = message.content.strip()
 
-    # ---------- COMMANDS ----------
+    # ================= COMMANDS =================
+
+    if content == CMD_HELP:
+        await message.reply("📘 ATD Highlight Bot\nUse !newatd, !undo, !status")
+        return
+
     if content == CMD_RESET:
         highlighted_forever.clear()
         highlight_stack.clear()
@@ -237,10 +245,7 @@ async def on_message(message: discord.Message):
         return
 
     if content == CMD_STATUS:
-        await message.reply(
-            f"📊 Highlighted: {len(highlighted_forever)}",
-            mention_author=False
-        )
+        await message.reply(f"📊 Highlighted: {len(highlighted_forever)}")
         return
 
     if content == CMD_UNDO:
@@ -254,6 +259,16 @@ async def on_message(message: discord.Message):
         await message.reply(f"↩️ Undid highlight for **{name}**")
         return
 
+    if content.lower().startswith(CMD_COLOR):
+        rgb = hex_to_rgb_frac(content[len(CMD_COLOR):].strip())
+        if not rgb:
+            await message.reply("❌ Invalid hex colour.")
+            return
+        global HIGHLIGHT_COLOR
+        HIGHLIGHT_COLOR = rgb
+        await message.reply("🎨 Highlight colour updated.")
+        return
+
     if content.lower().startswith(CMD_FORCE):
         forced = content[len(CMD_FORCE):].strip()
         match = find_best_match(forced)
@@ -262,14 +277,15 @@ async def on_message(message: discord.Message):
             return
         name, row = match
         await apply_highlight(row, name)
-        await safe_react(message, "✅")
+        await message.add_reaction("✅")
         return
 
-    # 🔒 HARD STOP — NEVER LET COMMANDS FALL THROUGH
+    # 🚫 Stop commands falling into draft logic
     if content.startswith("!"):
         return
 
-    # ---------- DRAFT FLOW ----------
+    # ================= DRAFT FLOW =================
+
     if message.channel.id != CHANNEL_ID:
         return
 
@@ -286,10 +302,10 @@ async def on_message(message: discord.Message):
         )
         return
 
-    await safe_react(message, "✅")
-    ok = await message.reply(f"✅ **{name}** has been logged successfully.")
+    await message.add_reaction("✅")
+    msg = await message.reply(f"✅ **{name}** has been logged successfully.")
     await asyncio.sleep(3)
-    await ok.delete()
+    await msg.delete()
 
 @client.event
 async def on_ready():
