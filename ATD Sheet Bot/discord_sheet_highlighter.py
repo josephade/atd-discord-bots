@@ -3,7 +3,7 @@ import re
 import time
 import logging
 import asyncio
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
 
 import discord
 from discord import Intents, MessageType
@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("highlighter")
+log = logging.getLogger("atd-bot")
 
 # ==========================================================
 # ENV
@@ -35,31 +35,35 @@ def need(name: str) -> str:
     return v
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
-CHANNEL_ID = int(need("DISCORD_CHANNEL_ID"))
-SHEET_ID = need("GOOGLE_SHEET_ID")
-WS_GID = int(need("GOOGLE_WORKSHEET_GID"))
 
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "B").upper()
 ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
-
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
 
 # ==========================================================
-# COMMANDS
+# THREAD → SHEET CONFIG (EDIT THIS)
 # ==========================================================
 
-CMD_HELP = "!helpatd"
-CMD_RESET = "!newatd"
-CMD_STATUS = "!status"
-CMD_UNDO = "!undo"
-CMD_FORCE = "!force"
-CMD_COLOR = "!changehexcolour"
-
-ALLOWED_ROLE_NAMES = {"Admin", "Moderator", "LeComissioner"}
+THREAD_CONFIG = {
+    # thread_id: { spreadsheet_id, worksheet_name }
+    # EXAMPLE:
+    # 123456789012345678: {
+    #     "spreadsheet_id": "1AbCdEf...",
+    #     "worksheet_name": "Players"
+    # },
+    1465444677141528666: {
+        "spreadsheet_id": "1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI",
+        "worksheet_name": "East"
+    },
+    1465444571965034576: {
+        "spreadsheet_id": "1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI",
+        "worksheet_name": "West"
+    },
+}
 
 # ==========================================================
-# GOOGLE SHEETS AUTH
+# GOOGLE AUTH
 # ==========================================================
 
 SCOPES = [
@@ -71,10 +75,7 @@ creds = Credentials.from_service_account_file(
     os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.json"),
     scopes=SCOPES,
 )
-
 gc = gspread.authorize(creds)
-sh = gc.open_by_key(SHEET_ID)
-ws = sh.get_worksheet_by_id(WS_GID)
 
 # ==========================================================
 # HELPERS
@@ -97,24 +98,41 @@ def normalize(s: str) -> str:
     s = WHITESPACE_RE.sub(" ", s)
     return s.strip().lower()
 
-def hex_to_rgb_frac(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    if not re.fullmatch(r"[0-9a-fA-F]{6}", hex_color):
+# ==========================================================
+# THREAD STATE
+# ==========================================================
+
+thread_state: Dict[int, Dict] = {}
+sheet_cache: Dict[int, tuple] = {}
+player_cache: Dict[int, tuple] = {}
+
+def get_state(thread_id: int):
+    if thread_id not in thread_state:
+        thread_state[thread_id] = {
+            "highlighted": set(),
+            "stack": []
+        }
+    return thread_state[thread_id]
+
+def get_sheet(thread_id: int):
+    if thread_id not in THREAD_CONFIG:
         return None
-    return {
-        "red": int(hex_color[0:2], 16) / 255,
-        "green": int(hex_color[2:4], 16) / 255,
-        "blue": int(hex_color[4:6], 16) / 255,
-    }
 
-# ==========================================================
-# LOAD PLAYERS
-# ==========================================================
+    if thread_id in sheet_cache:
+        return sheet_cache[thread_id]
 
-def load_players():
+    cfg = THREAD_CONFIG[thread_id]
+    sh = gc.open_by_key(cfg["spreadsheet_id"])
+    ws = sh.worksheet(cfg["worksheet_name"])
+    sheet_cache[thread_id] = (sh, ws)
+    return sh, ws
+
+def load_players(thread_id: int, ws):
+    if thread_id in player_cache:
+        return player_cache[thread_id]
+
     col = ws.col_values(NAME_COL_INDEX)
-    names, row_map, keys = [], {}, []
-    key_to_name = {}
+    names, row_map, keys, key_to_name = [], {}, [], {}
 
     for i, v in enumerate(col, start=1):
         if not v.strip():
@@ -125,89 +143,27 @@ def load_players():
         keys.append(k)
         key_to_name[k] = v
 
-    log.info(f"[INIT] Loaded {len(names)} players")
-    return names, row_map, keys, key_to_name
-
-names_orig, name_to_row, keys_norm, key_to_orig = load_players()
-
-# ==========================================================
-# STATE
-# ==========================================================
-
-highlighted_forever: set[str] = set()
-highlight_stack: List[Tuple[str, int]] = []
-
-HIGHLIGHT_COLOR = {"red": 0.286, "green": 0.518, "blue": 0.910}
+    player_cache[thread_id] = (names, row_map, keys, key_to_name)
+    log.info(f"[THREAD {thread_id}] Loaded {len(names)} players")
+    return player_cache[thread_id]
 
 # ==========================================================
 # MATCHING
 # ==========================================================
 
-def find_best_match(text: str) -> Optional[Tuple[str, int]]:
+def find_best_match(text: str, names, row_map, keys, key_to_name):
     msg = normalize(text)
 
-    for n in names_orig:
+    for n in names:
         if normalize(n) in msg:
-            return n, name_to_row[n]
+            return n, row_map[n]
 
-    hit = process.extractOne(msg, keys_norm, scorer=fuzz.token_sort_ratio)
+    hit = process.extractOne(msg, keys, scorer=fuzz.token_sort_ratio)
     if not hit or hit[1] < FUZZY_THRESHOLD:
         return None
 
-    name = key_to_orig[hit[0]]
-    return name, name_to_row[name]
-
-# ==========================================================
-# SHEET OPS
-# ==========================================================
-
-async def apply_highlight(row: int, name: str):
-    key = f"{ws.title}:{name.lower()}"
-    if key in highlighted_forever:
-        return "already"
-
-    highlighted_forever.add(key)
-    highlight_stack.append((name, row))
-
-    start = col_to_index(ROW_START_COL) - 1
-    end = col_to_index(ROW_END_COL)
-
-    requests = [{
-        "repeatCell": {
-            "range": {
-                "sheetId": ws.id,
-                "startRowIndex": row - 1,
-                "endRowIndex": row,
-                "startColumnIndex": start,
-                "endColumnIndex": end,
-            },
-            "cell": {"userEnteredFormat": {"backgroundColor": HIGHLIGHT_COLOR}},
-            "fields": "userEnteredFormat.backgroundColor"
-        }
-    }]
-
-    await asyncio.to_thread(sh.batch_update, {"requests": requests})
-    return True
-
-async def clear_highlight(row: int):
-    start = col_to_index(ROW_START_COL) - 1
-    end = col_to_index(ROW_END_COL)
-
-    requests = [{
-        "repeatCell": {
-            "range": {
-                "sheetId": ws.id,
-                "startRowIndex": row - 1,
-                "endRowIndex": row,
-                "startColumnIndex": start,
-                "endColumnIndex": end,
-            },
-            "cell": {"userEnteredFormat": {}},
-            "fields": "userEnteredFormat"
-        }
-    }]
-
-    await asyncio.to_thread(sh.batch_update, {"requests": requests})
+    name = key_to_name[hit[0]]
+    return name, row_map[name]
 
 # ==========================================================
 # DISCORD BOT
@@ -222,124 +178,79 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Allow normal messages AND replies
     if message.type not in (MessageType.default, MessageType.reply):
         return
 
-    # Strip mentions before processing
+    if not isinstance(message.channel, discord.Thread):
+        return
+
+    thread_id = message.channel.id
+    sheet = get_sheet(thread_id)
+    if not sheet:
+        return
+
+    sh, ws = sheet
+    names, row_map, keys, key_to_name = load_players(thread_id, ws)
+    state = get_state(thread_id)
+
     content = MENTION_RE.sub("", message.content).strip()
 
-    # ================= COMMANDS =================
-
-    if content == CMD_HELP:
-        embed = discord.Embed(
-            title="📘 ATD Highlight Bot Help",
-            color=0x4A90E2
-        )
-
-        embed.add_field(
-            name="Purpose",
-            value=(
-                "• Detects draft picks in chat\n"
-                "• Highlights the corresponding player row in Google Sheets"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="Matching Priority",
-            value=(
-                "1️⃣ Full name match\n"
-                "2️⃣ Fuzzy match (handles typos)"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="Commands",
-            value=(
-                "`!newatd` – Reset bot memory for a new draft\n"
-                "`!status` – Show draft progress\n"
-                "`!undo` – Undo last highlighted pick\n"
-                "`!force <name>` – Force highlight a player\n"
-                "`!changehexcolour <hex>` – Change highlight colour\n"
-                "`!helpatd` – Show this help"
-            ),
-            inline=False
-        )
-
-        embed.set_footer(text="⚠️ Always run !newatd before starting a new ATD")
-        await message.reply(embed=embed)
-        return
-
-    if content == CMD_RESET:
-        highlighted_forever.clear()
-        highlight_stack.clear()
-        await message.reply("🧹 ATD memory reset.")
-        return
-
-    if content == CMD_STATUS:
-        await message.reply(f"📊 Highlighted: {len(highlighted_forever)}")
-        return
-
-    if content == CMD_UNDO:
-        if not highlight_stack:
-            await message.reply("⚠️ Nothing to undo.")
-            return
-
-        name, row = highlight_stack.pop()
-        highlighted_forever.discard(f"{ws.title}:{name.lower()}")
-        await clear_highlight(row)
-        await message.reply(f"↩️ Undid highlight for **{name}**")
-        return
-
-    if content.lower().startswith(CMD_COLOR):
-        rgb = hex_to_rgb_frac(content[len(CMD_COLOR):].strip())
-        if not rgb:
-            await message.reply("❌ Invalid hex colour.")
-            return
-        global HIGHLIGHT_COLOR
-        HIGHLIGHT_COLOR = rgb
-        await message.reply("🎨 Highlight colour updated.")
-        return
-
-    if content.lower().startswith(CMD_FORCE):
-        forced = content[len(CMD_FORCE):].strip()
-        match = find_best_match(forced)
-        if not match:
-            await message.reply("❌ Player not found.")
-            return
-        name, row = match
-        await apply_highlight(row, name)
-        await message.add_reaction("✅")
-        return
-
-    # 🚫 Stop commands entering draft logic
     if content.startswith("!"):
+        if content == "!status":
+            await message.reply(f"📊 Highlighted: {len(state['highlighted'])}")
+        elif content == "!newatd":
+            state["highlighted"].clear()
+            state["stack"].clear()
+            await message.reply("🧹 ATD memory reset.")
         return
 
-    # ================= DRAFT FLOW =================
-
-    if message.channel.id != CHANNEL_ID:
-        return
-
-    match = find_best_match(content)
+    match = find_best_match(content, names, row_map, keys, key_to_name)
     if not match:
         return
 
     name, row = match
-    result = await apply_highlight(row, name)
+    key = f"{ws.title}:{name.lower()}"
 
-    if result == "already":
+    if key in state["highlighted"]:
         await message.reply(
-            f"❌ {message.author.mention} **{name}** has already been picked. Please pick again."
+            f"❌ {message.author.mention} **{name}** has already been picked."
         )
         return
 
+    state["highlighted"].add(key)
+    state["stack"].append((name, row))
+
+    start = col_to_index(ROW_START_COL) - 1
+    end = col_to_index(ROW_END_COL)
+
+    await asyncio.to_thread(
+        sh.batch_update,
+        {
+            "requests": [{
+                "repeatCell": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": start,
+                        "endColumnIndex": end,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {
+                                "red": 0.286,
+                                "green": 0.518,
+                                "blue": 0.910
+                            }
+                        }
+                    },
+                    "fields": "userEnteredFormat.backgroundColor"
+                }
+            }]
+        }
+    )
+
     await message.add_reaction("✅")
-    msg = await message.reply(f"✅ **{name}** has been logged successfully.")
-    await asyncio.sleep(3)
-    await msg.delete()
 
 @client.event
 async def on_ready():
