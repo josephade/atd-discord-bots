@@ -90,6 +90,7 @@ NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]")
 WHITESPACE_RE = re.compile(r"\s+")
+MENTION_RE = re.compile(r"<@!?\d+>")
 
 def normalize(s: str) -> str:
     s = NONLETTER_RE.sub(" ", s)
@@ -216,20 +217,17 @@ intents = Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-def has_permission(member: discord.Member) -> bool:
-    if not ALLOWED_ROLE_NAMES:
-        return True
-    return bool({r.name for r in member.roles} & ALLOWED_ROLE_NAMES)
-
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    if message.type != MessageType.default:
+    # Allow normal messages AND replies
+    if message.type not in (MessageType.default, MessageType.reply):
         return
 
-    content = message.content.strip()
+    # Strip mentions before processing
+    content = MENTION_RE.sub("", message.content).strip()
 
     # ================= COMMANDS =================
 
