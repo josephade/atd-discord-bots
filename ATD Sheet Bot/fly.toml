@@ -1,0 +1,8 @@
+app = "atd-sheet-bot"
+
+kill_signal = "SIGINT"
+kill_timeout = 30
+
+[vm]
+  size = "shared-cpu-1x"
+  memory = 512

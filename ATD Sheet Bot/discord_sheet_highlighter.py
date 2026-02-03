@@ -1,4 +1,4 @@
-import os
+import os, json, base64
 import re
 import logging
 import asyncio
@@ -10,6 +10,13 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
+
+
+creds_b64 = os.environ["GOOGLE_CREDENTIALS_B64"]
+creds_json = base64.b64decode(creds_b64).decode("utf-8")
+creds_info = json.loads(creds_json)
+
+credentials = Credentials.from_service_account_info(creds_info)
 
 # ==========================================================
 # LOGGING
