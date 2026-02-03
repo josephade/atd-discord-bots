@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import os
+import os, json, base64
 import logging
 import discord
 from discord.ext import commands
@@ -9,6 +9,12 @@ from discord.ext import commands
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
+
+creds_b64 = os.environ["GOOGLE_CREDENTIALS_B64"]
+creds_json = base64.b64decode(creds_b64).decode("utf-8")
+creds_info = json.loads(creds_json)
+
+credentials = Credentials.from_service_account_info(creds_info)
 
 # ==========================================================
 # LOGGING
