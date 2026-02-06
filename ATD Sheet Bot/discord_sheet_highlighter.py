@@ -80,11 +80,7 @@ def is_command(text: str) -> bool:
 THREAD_CONFIG = {
     1465444677141528666: {
         "spreadsheet_id": "1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI",
-        "worksheet_name": "East",
-    },
-    1465444571965034576: {
-        "spreadsheet_id": "1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI",
-        "worksheet_name": "West",
+        "worksheet_name": "ADP",
     },
 }
 

@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+
+# Environment variables
+.env
+
+# Puppeteer
+.cache/
+.local-chromium/
+
+# Cache
+cache/*
+
+# OS
+.DS_Store
+Thumbs.db
