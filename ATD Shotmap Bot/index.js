@@ -4,6 +4,47 @@ const { generateShotmap, handleShotmapCommand } = require('./utils/screenshot');
 const fs = require('fs-extra');
 const path = require('path');
 
+// ==============================
+// 🔍 ENV SANITY CHECKS (RUN FIRST)
+// ==============================
+
+console.log('================ ENV SANITY CHECKS ================');
+
+if (!process.env.DISCORD_TOKEN) {
+  console.error('❌ DISCORD_TOKEN is MISSING');
+  process.exit(1);
+}
+
+const token = process.env.DISCORD_TOKEN;
+
+console.log('✅ DISCORD_TOKEN exists');
+console.log('🔢 Token length:', token.length);
+console.log('🔍 Starts with:', token.slice(0, 5));
+console.log('🔍 Ends with:', token.slice(-5));
+
+if (token.includes(' ')) {
+  console.error('❌ DISCORD_TOKEN contains spaces');
+  process.exit(1);
+}
+
+if (token.includes('\n')) {
+  console.error('❌ DISCORD_TOKEN contains newline characters');
+  process.exit(1);
+}
+
+if (token.startsWith('"') || token.endsWith('"')) {
+  console.error('❌ DISCORD_TOKEN includes quotes');
+  process.exit(1);
+}
+
+if (!token.startsWith('M')) {
+  console.error('❌ DISCORD_TOKEN does NOT look like a bot token (should start with "M")');
+  process.exit(1);
+}
+
+console.log('✅ Token sanity checks PASSED');
+console.log('===================================================');
+
 // Ensure cache directory exists
 const cacheDir = path.join(__dirname, 'cache');
 fs.ensureDirSync(cacheDir);

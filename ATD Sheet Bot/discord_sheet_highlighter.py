@@ -74,14 +74,21 @@ def is_command(text: str) -> bool:
     return text.startswith("!")
 
 # ==========================================================
-# THREAD → SHEET CONFIG
+# CHANNEL/THREAD → SHEET CONFIG
 # ==========================================================
 
-THREAD_CONFIG = {
-    1465444677141528666: {
+# Update the config to support both channels and threads
+CHANNEL_CONFIG = {
+    # Threads (existing)
+    934052208624930848: {
         "spreadsheet_id": "1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI",
         "worksheet_name": "ADP",
     },
+    # Add channels here. Example:
+    # 123456789012345678: {  # Channel ID
+    #     "spreadsheet_id": "your_spreadsheet_id_here",
+    #     "worksheet_name": "WorksheetName",
+    # },
 }
 
 # ==========================================================
@@ -172,30 +179,30 @@ player_cache: Dict[int, tuple] = {}
 
 HIGHLIGHT_COLOR = {"red": 0.286, "green": 0.518, "blue": 0.910}
 
-def get_state(thread_id: int):
-    if thread_id not in thread_state:
-        thread_state[thread_id] = {
+def get_state(channel_id: int):
+    if channel_id not in thread_state:
+        thread_state[channel_id] = {
             "highlighted": set(),
             "stack": [],
             "redo_stack": [],
             "pick_info": {},  # player_key -> (pick_number, picker_name)
         }
-    return thread_state[thread_id]
+    return thread_state[channel_id]
 
-def get_sheet(thread_id: int):
-    if thread_id in sheet_cache:
-        return sheet_cache[thread_id]
-    cfg = THREAD_CONFIG.get(thread_id)
+def get_sheet(channel_id: int):
+    if channel_id in sheet_cache:
+        return sheet_cache[channel_id]
+    cfg = CHANNEL_CONFIG.get(channel_id)
     if not cfg:
         return None
     sh = gc.open_by_key(cfg["spreadsheet_id"])
     ws = sh.worksheet(cfg["worksheet_name"])
-    sheet_cache[thread_id] = (sh, ws)
+    sheet_cache[channel_id] = (sh, ws)
     return sh, ws
 
-def load_players(thread_id: int, ws):
-    if thread_id in player_cache:
-        return player_cache[thread_id]
+def load_players(channel_id: int, ws):
+    if channel_id in player_cache:
+        return player_cache[channel_id]
     col = ws.col_values(NAME_COL_INDEX)
     names, row_map, keys, key_to_name = [], {}, [], {}
     for i, v in enumerate(col, start=1):
@@ -206,18 +213,30 @@ def load_players(thread_id: int, ws):
         k = normalize(v)
         keys.append(k)
         key_to_name[k] = v
-    player_cache[thread_id] = (names, row_map, keys, key_to_name)
-    log.info(f"[THREAD {thread_id}] Loaded {len(names)} players")
-    return player_cache[thread_id]
+    player_cache[channel_id] = (names, row_map, keys, key_to_name)
+    log.info(f"[CHANNEL {channel_id}] Loaded {len(names)} players")
+    return player_cache[channel_id]
 
 def find_best_match(text: str, names, row_map, keys, key_to_name):
     msg = normalize(text)
+    log.info(f"[MATCH] Normalized text: '{msg}'")
+    
+    # Check for direct substring match
     for n in names:
-        if normalize(n) in msg:
+        normalized_n = normalize(n)
+        if normalized_n in msg:
+            log.info(f"[MATCH] Direct substring match: '{n}' -> '{normalized_n}' in '{msg}'")
             return n, row_map[n]
+    
+    # Try fuzzy matching
     hit = process.extractOne(msg, keys, scorer=fuzz.token_sort_ratio)
+    if hit:
+        log.info(f"[MATCH] Fuzzy match result: '{hit[0]}' with score {hit[1]}")
+    
     if not hit or hit[1] < FUZZY_THRESHOLD:
+        log.info(f"[MATCH] No fuzzy match above threshold {FUZZY_THRESHOLD}")
         return None
+    
     name = key_to_name[hit[0]]
     return name, row_map[name]
 
@@ -227,6 +246,7 @@ def find_best_match(text: str, names, row_map, keys, key_to_name):
 
 intents = Intents.default()
 intents.message_content = True
+intents.messages = True
 client = discord.Client(intents=intents)
 
 @client.event
@@ -235,31 +255,87 @@ async def on_message(message: discord.Message):
 
     if message.author.bot:
         return
-    if message.type != MessageType.default:
+    
+    # Allow replies (remove the strict message type check)
+    # Only filter out system messages, not replies
+    if message.type not in [MessageType.default, MessageType.reply]:
         return
-    if not isinstance(message.channel, discord.Thread):
+    
+    # Check if it's a thread OR a text channel
+    channel = message.channel
+    channel_id = channel.id
+    
+    # Check if this channel/thread is configured
+    sheet = get_sheet(channel_id)
+    if not sheet:
+        log.info(f"[DEBUG] No sheet config for channel {channel_id}")
         return
+
+    # Log the message for debugging
+    log.info(f"[DEBUG] Message received in {channel_id}: '{message.content}' type={message.type} author={message.author}")
 
     # ----------------------------------------------------------
     # IGNORE GIFS / IMAGES / VIDEOS / EMBEDS / LINK-ONLY
     # ----------------------------------------------------------
-    if message.attachments:
+    # ONLY skip if message has NO TEXT CONTENT and has attachments/embeds
+    # Messages with BOTH text and attachments should be processed
+    
+    has_text = bool(message.content.strip())
+    has_only_url = re.fullmatch(r"https?://\S+", message.content.strip()) if message.content else False
+    
+    # Skip if it's ONLY a URL with no other text
+    if has_only_url:
+        log.info(f"[DEBUG] Skipping - is a URL only")
         return
-    if message.embeds:
+    
+    # Skip if it has embeds but no text (like link previews)
+    if message.embeds and not has_text:
+        log.info(f"[DEBUG] Skipping - has embeds but no text")
         return
-    if re.fullmatch(r"https?://\S+", message.content.strip()):
+    
+    # Skip if it has attachments but no text (like image-only posts)
+    if message.attachments and not has_text:
+        log.info(f"[DEBUG] Skipping - has attachments but no text")
         return
-
-    thread_id = message.channel.id
-    sheet = get_sheet(thread_id)
-    if not sheet:
-        return
+    
+    # If we get here, we have text content to process (even if there are also attachments)
 
     sh, ws = sheet
-    names, row_map, keys, key_to_name = load_players(thread_id, ws)
-    state = get_state(thread_id)
+    names, row_map, keys, key_to_name = load_players(channel_id, ws)
+    state = get_state(channel_id)
 
-    content = MENTION_RE.sub("", message.content).strip()
+    # ============ KEY FIX: Check both message content AND referenced message ============
+    content_to_check = MENTION_RE.sub("", message.content).strip()
+    
+    # Debug log original content
+    log.info(f"[DEBUG] Original content: '{content_to_check}'")
+    
+    # If message is a reply, also check the referenced message for player names
+    if message.reference:
+        log.info(f"[DEBUG] Message is a reply, reference ID: {message.reference.message_id}")
+        
+        try:
+            # Try to fetch the referenced message
+            if message.reference.resolved:
+                referenced_message = message.reference.resolved
+                log.info(f"[DEBUG] Resolved referenced message: {type(referenced_message)}")
+            else:
+                # Fetch it from the channel
+                referenced_message = await channel.fetch_message(message.reference.message_id)
+                log.info(f"[DEBUG] Fetched referenced message")
+            
+            if isinstance(referenced_message, discord.Message):
+                # Combine current message content with referenced message content
+                referenced_content = MENTION_RE.sub("", referenced_message.content).strip()
+                log.info(f"[DEBUG] Referenced content: '{referenced_content}'")
+                content_to_check = f"{content_to_check} {referenced_content}"
+        except Exception as e:
+            log.error(f"[DEBUG] Failed to get referenced message: {e}")
+    # ============ END FIX ============
+
+    log.info(f"[DEBUG] Final content to check: '{content_to_check}'")
+    
+    content = content_to_check  # Use the combined content for processing
 
     # ----------------------------------------------------------
     # ROLE LOCK — COMMANDS ONLY
@@ -272,7 +348,7 @@ async def on_message(message: discord.Message):
             )
             log.info(
                 f"[ROLE_BLOCK] user={message.author} ({message.author.id}) "
-                f"thread={thread_id} command='{content}'"
+                f"channel={channel_id} command='{content}'"
             )
             return
 
@@ -318,7 +394,7 @@ async def on_message(message: discord.Message):
         state["highlighted"].clear()
         state["stack"].clear()
         state["redo_stack"].clear()
-        log.info(f"[RESET] thread={thread_id} by={message.author}")
+        log.info(f"[RESET] channel={channel_id} by={message.author}")
         await message.reply("🧹 ATD memory reset.")
         return
 
@@ -332,7 +408,7 @@ async def on_message(message: discord.Message):
         state["pick_info"].pop(name.lower(), None)
         state["redo_stack"].append((name, row))
         await clear_highlight(sh, ws, row)
-        log.info(f"[UNDO] thread={thread_id} player='{name}' by={message.author}")
+        log.info(f"[UNDO] channel={channel_id} player='{name}' by={message.author}")
         await message.reply(f"↩️ Undid highlight for **{name}**")
         return
 
@@ -347,23 +423,70 @@ async def on_message(message: discord.Message):
         pick_number = len(state["stack"])
         state["pick_info"][name.lower()] = (pick_number, message.author.display_name)
         await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
-        log.info(f"[REDO] thread={thread_id} player='{name}' by={message.author}")
+        log.info(f"[REDO] channel={channel_id} player='{name}' by={message.author}")
         await message.reply(f"🔁 Redid highlight for **{name}**")
+        return
+
+    # ================= FORCE COMMAND =================
+    if content.startswith(CMD_FORCE):
+        if not is_commish(message.author):
+            await message.reply("❌ Only commissioners can use the force command.")
+            return
+        
+        parts = content.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply(f"Usage: `{CMD_FORCE} <player name>`")
+            return
+        
+        force_name = parts[1]
+        match = find_best_match(force_name, names, row_map, keys, key_to_name)
+        if not match:
+            await message.reply(f"❌ Could not find player matching '{force_name}'")
+            return
+        
+        name, row = match
+        key = f"{ws.title}:{name.lower()}"
+        
+        if key in state["highlighted"]:
+            pick_number, picker_name = state["pick_info"].get(key, ("?", "unknown"))
+            await message.reply(
+                f"❌ **{name}** has already been selected at pick **{pick_number}** "
+                f"by **{picker_name}**."
+            )
+            return
+        
+        pick_number = len(state["stack"]) + 1
+        picker_name = message.author.display_name
+        
+        state["highlighted"].add(key)
+        state["stack"].append((name, row))
+        state["redo_stack"].clear()
+        state["pick_info"][key] = (pick_number, picker_name)
+        
+        await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
+        await message.reply(f"✅ Force highlighted **{name}** at pick **{pick_number}**")
+        log.info(f"[FORCE] channel={channel_id} player='{name}' by={message.author}")
         return
 
     # ================= PICK FLOW =================
     match = find_best_match(content, names, row_map, keys, key_to_name)
+    
     if not match:
+        log.info(f"[DEBUG] No match found for content: '{content}'")
+        if names:
+            log.info(f"[DEBUG] Available names sample: {names[:10]}")
         return
 
     name, row = match
+    log.info(f"[DEBUG] Match found: '{name}' at row {row}")
+    
     key = f"{ws.title}:{name.lower()}"
 
     if key in state["highlighted"]:
         pick_number, picker_name = state["pick_info"].get(key, ("?", "unknown"))
 
         log.info(
-            f"[DUPLICATE] thread={thread_id} player='{name}' "
+            f"[DUPLICATE] channel={channel_id} player='{name}' "
             f"pick={pick_number} by={picker_name}"
         )
 
@@ -384,7 +507,7 @@ async def on_message(message: discord.Message):
     state["pick_info"][key] = (pick_number, picker_name)
 
     log.info(
-        f"[HIGHLIGHT] thread={thread_id} sheet={ws.title} "
+        f"[HIGHLIGHT] channel={channel_id} sheet={ws.title} "
         f"player='{name}' row={row} by={message.author}"
     )
 

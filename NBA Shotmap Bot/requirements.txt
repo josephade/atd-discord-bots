@@ -1,6 +1,0 @@
-discord.py
-nba_api
-matplotlib
-pandas
-numpy
-requests

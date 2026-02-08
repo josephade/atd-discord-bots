@@ -1,0 +1,12 @@
+app = "atd-shotmap-bot"
+primary_region = "lhr"
+
+[build]
+
+[processes]
+app = "npm start"
+
+[[vm]]
+cpu_kind = "shared"
+cpus = 1
+memory = "1gb"
