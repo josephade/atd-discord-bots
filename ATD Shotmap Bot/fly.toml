@@ -10,3 +10,7 @@ app = "npm start"
 cpu_kind = "shared"
 cpus = 1
 memory = "1gb"
+
+[[mounts]]
+source      = "cache_vol"     # <-- must match the volume name shown in `fly volumes list`
+destination = "/data/cache"   # <-- mount path inside the app container
