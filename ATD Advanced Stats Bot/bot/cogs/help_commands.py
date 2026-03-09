@@ -55,8 +55,8 @@ class HelpCommands(commands.Cog):
         """Handle command errors gracefully"""
         if isinstance(error, commands.CommandNotFound):
             prefix = await self.bot.get_prefix(ctx.message)
-            if isinstance(prefix, list):
-                prefix = prefix[0] if prefix else DEFAULT_PREFIX
+            if isinstance(error, commands.CommandNotFound):
+                return
             await ctx.send(f"❌ Command not found. Try `{prefix}helpadvanced` to see available commands.")
         elif isinstance(error, commands.MissingPermissions):
             await ctx.send("❌ You don't have permission to use this command.")

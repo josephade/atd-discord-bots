@@ -1,4 +1,296 @@
-// Working but took 11 seconds - Seems to be the one we are using now.
+require('dotenv').config();
+const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
+const Discord = require('discord.js');
+
+// ─── Cache ────────────────────────────────────────────────────────────────────
+
+const CACHE_DIR = path.join(__dirname, 'cache');
+
+function getCacheKey(playerName, year, modern) {
+  const clean = playerName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+  return `${clean}${modern ? '_modern' : ''}_${year}.png`;
+}
+
+function fromCache(key) {
+  const p = path.join(CACHE_DIR, key);
+  return fs.existsSync(p) ? fs.readFileSync(p) : null;
+}
+
+function toCache(key, buf) {
+  if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(CACHE_DIR, key), buf);
+}
+
+// ─── Browser ──────────────────────────────────────────────────────────────────
+
+let browser = null;
+
+async function getBrowser() {
+  if (!browser) {
+    browser = await puppeteer.launch({
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      defaultViewport: { width: 1400, height: 900 },
+    });
+  }
+  return browser;
+}
+
+// ─── Shotmap ──────────────────────────────────────────────────────────────────
+
+async function generateShotmap(playerName, year, modern = false) {
+  const cacheKey = getCacheKey(playerName, year, modern);
+  const cached = fromCache(cacheKey);
+  if (cached) {
+    console.log(`Cache hit: ${cacheKey}`);
+    return cached;
+  }
+
+  const seasonFormat = `${year}-${(parseInt(year) + 1).toString().slice(-2)}`;
+  console.log(`Generating: ${playerName} | ${seasonFormat}${modern ? ' | Modern' : ''}`);
+
+  const b = await getBrowser();
+  const page = await b.newPage();
+
+  try {
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
+    page.setDefaultTimeout(30000);
+
+    // ── 1. Load page ──
+    console.log('Loading page...');
+    await page.goto('https://nbavisuals.com/shotmap', {
+      waitUntil: 'networkidle2',
+      timeout: 30000,
+    });
+
+    // ── 2. Select season ──
+    console.log(`Selecting season: ${seasonFormat}`);
+    await page.waitForSelector('#season-dropdown');
+    await page.select('#season-dropdown', seasonFormat);
+    await page.waitForTimeout(800);
+
+    // ── 3. Type player name ──
+    console.log(`Typing player: "${playerName}"`);
+    await page.waitForSelector('#playerSearch');
+    await page.click('#playerSearch');
+    await page.waitForTimeout(500);
+    await page.type('#playerSearch', playerName, { delay: 80 });
+    await page.waitForTimeout(1500);
+
+    // ── 4. Select player from autocomplete ──
+    const result = await page.evaluate((target) => {
+      function normalize(s) {
+        return s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+      const norm = normalize(target);
+
+      // Collect all visible dropdown candidates (try every common autocomplete pattern)
+      const allItems = [
+        ...document.querySelectorAll('.ui-autocomplete li'),
+        ...document.querySelectorAll('.ui-autocomplete .ui-menu-item'),
+        ...document.querySelectorAll('[role="listbox"] [role="option"]'),
+        ...document.querySelectorAll('[role="option"]'),
+        ...document.querySelectorAll('.autocomplete-suggestion'),
+        ...document.querySelectorAll('.dropdown-item'),
+        ...document.querySelectorAll('#playerDropdown li'),
+        ...document.querySelectorAll('#playerDropdown div'),
+      ];
+
+      // De-duplicate
+      const seen = new Set();
+      const items = allItems.filter(el => !seen.has(el) && seen.add(el));
+
+      if (items.length > 0) {
+        // Exact match first
+        for (const el of items) {
+          if (normalize(el.textContent) === norm) {
+            el.click();
+            return { via: 'dropdown-exact', name: el.textContent.trim() };
+          }
+        }
+        // Partial match
+        for (const el of items) {
+          if (normalize(el.textContent).includes(norm)) {
+            el.click();
+            return { via: 'dropdown-partial', name: el.textContent.trim() };
+          }
+        }
+        return { via: null, dropdownCount: items.length, sample: items[0].textContent.trim() };
+      }
+
+      // Fallback: check if the hidden #players-dropdown got populated
+      const sel = document.getElementById('players-dropdown');
+      if (sel && sel.options.length > 0) {
+        for (const opt of sel.options) {
+          if (normalize(opt.text).includes(norm)) {
+            sel.value = opt.value;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            document.getElementById('playerSearch').value = opt.text;
+            return { via: 'select', name: opt.text };
+          }
+        }
+        return { via: null, selectCount: sel.options.length, sample: sel.options[0].text };
+      }
+
+      return { via: null, dropdownCount: 0, selectCount: 0 };
+    }, playerName);
+
+    if (!result.via) {
+      console.error('Player selection debug:', JSON.stringify(result));
+      throw new Error(
+        `Player "${playerName}" not found for the ${year} season. ` +
+        `(dropdown items: ${result.dropdownCount ?? 0}, select options: ${result.selectCount ?? 0}, sample: "${result.sample ?? 'none'}")`
+      );
+    }
+
+    console.log(`Selected [${result.via}]: ${result.name}`);
+    await page.waitForTimeout(500);
+
+    // ── 5. Modern mode ──
+    if (modern) {
+      await page.evaluate(() => {
+        const toggle = document.getElementById('modernModeToggle');
+        if (toggle && !toggle.checked) toggle.click();
+      });
+      await page.waitForTimeout(300);
+    }
+
+    // ── 6. Generate ──
+    console.log('Clicking generate...');
+    const clicked = await page.evaluate(() => {
+      const btn = document.getElementById('generateGraphButton');
+      if (btn && !btn.disabled) { btn.click(); return true; }
+      return false;
+    });
+    if (!clicked) throw new Error('Generate button not found or disabled');
+
+    // ── 7. Wait for graph ──
+    console.log('Waiting for graph...');
+    await page.waitForFunction(
+      () => {
+        const gc = document.getElementById('graph-container');
+        return gc && gc.querySelector('svg, canvas, img');
+      },
+      { timeout: 15000 }
+    );
+    await page.waitForTimeout(600);
+
+    // ── 8. Screenshot ──
+    const rect = await page.evaluate(() => {
+      const gc = document.getElementById('graph-container');
+      const r = gc && gc.getBoundingClientRect();
+      return r ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+    });
+
+    const clip = rect
+      ? {
+          x: Math.max(0, rect.x - 10),
+          y: Math.max(0, rect.y - 10),
+          width: Math.min(rect.width + 20, 1200),
+          height: Math.min(rect.height + 20, 800),
+        }
+      : { x: 50, y: 200, width: 1000, height: 700 };
+
+    console.log('Taking screenshot...');
+    const screenshot = await page.screenshot({ type: 'png', clip });
+    toCache(cacheKey, screenshot);
+    console.log('Done!');
+    return screenshot;
+
+  } finally {
+    await page.close();
+  }
+}
+
+// ─── Discord ──────────────────────────────────────────────────────────────────
+
+const client = new Discord.Client({
+  intents: [
+    Discord.GatewayIntentBits.Guilds,
+    Discord.GatewayIntentBits.GuildMessages,
+    Discord.GatewayIntentBits.MessageContent,
+  ],
+});
+
+client.once('clientReady', () => {
+  console.log(`Bot online: ${client.user.tag}`);
+  client.user.setActivity('!shotmap help', { type: Discord.ActivityType.Watching });
+});
+
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || !message.guild) return;
+  const content = message.content.trim();
+
+  if (content === '!shotmap help' || content === '!shotchart help') {
+    return message.reply(
+      '**Usage:** `!shotmap <player> <year> [--modern]`\n' +
+      '**Examples:**\n' +
+      '`!shotmap LeBron James 2024`\n' +
+      '`!shotmap Goran Dragic 2019`\n' +
+      '`!shotmap Steph Curry 2023 --modern`'
+    );
+  }
+
+  if (!content.startsWith('!shotmap ') && !content.startsWith('!shotchart ')) return;
+
+  const parts = content.split(/\s+/);
+  let playerParts = [], year = null, modern = false;
+
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] === '--modern') modern = true;
+    else if (/^\d{4}$/.test(parts[i])) year = parts[i];
+    else playerParts.push(parts[i]);
+  }
+
+  if (!year)
+    return message.reply('Please include a year. Example: `!shotmap LeBron James 2024`');
+  if (!playerParts.length)
+    return message.reply('Please include a player name. Example: `!shotmap LeBron James 2024`');
+
+  const playerName = playerParts.join(' ');
+  await message.react('⏳').catch(() => {});
+
+  try {
+    const img = await generateShotmap(playerName, year, modern);
+    await message.reply({
+      content: `📊 **Shotmap: ${playerName} (${year})${modern ? ' — Modern' : ''}**`,
+      files: [{ attachment: img, name: `shotmap_${playerName.replace(/\s+/g, '_')}_${year}.png` }],
+    });
+  } catch (err) {
+    console.error('Error:', err.message);
+    await message.reply(`❌ ${err.message}`);
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+  console.error('Login failed:', err.message);
+  process.exit(1);
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // 7.25 seconds below.
 
 // const puppeteer = require('puppeteer');
 // const fs = require('fs');
@@ -10,8 +302,12 @@
 //   if (!browser) {
 //     browser = await puppeteer.launch({
 //       headless: 'new',
-//       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-//       defaultViewport: { width: 1400, height: 1000 }
+//       args: [
+//         '--no-sandbox',
+//         '--disable-setuid-sandbox',
+//         '--disable-dev-shm-usage',
+//       ],
+//       defaultViewport: { width: 1400, height: 1000 },
 //     });
 //   }
 //   return browser;
@@ -23,13 +319,12 @@
 //     .replace(/[^a-z0-9]/g, '_')
 //     .replace(/_+/g, '_')
 //     .replace(/^_|_$/g, '');
-  
 //   const modernSuffix = modern ? '_modern' : '';
 //   return `${cleanName}${modernSuffix}_${year}.png`;
 // }
 
 // function checkCache(filename) {
-//   const cachePath = path.join(__dirname, '..', 'cache', filename);
+//   const cachePath = path.join('/data/cache', filename);
 //   if (fs.existsSync(cachePath)) {
 //     console.log(`📂 Loading from cache: ${filename}`);
 //     return fs.readFileSync(cachePath);
@@ -39,11 +334,7 @@
 
 // function saveToCache(filename, screenshotBuffer) {
 //   const cacheDir = '/data/cache';
-  
-//   if (!fs.existsSync(cacheDir)) {
-//     fs.mkdirSync(cacheDir, { recursive: true });
-//   }
-  
+//   if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
 //   const cachePath = path.join(cacheDir, filename);
 //   fs.writeFileSync(cachePath, screenshotBuffer);
 //   console.log(`💾 Saved to cache: ${filename}`);
@@ -52,544 +343,191 @@
 // async function generateShotmap(playerName, year, seasonType = 'RS', options = {}) {
 //   const { modern = false } = options;
 //   const cacheFilename = getCacheFilename(playerName, year, modern);
-  
-//   // Check cache first
 //   const cached = checkCache(cacheFilename);
-//   if (cached) {
-//     return cached;
-//   }
-  
+//   if (cached) return cached;
+
 //   console.log(`🎯 Generating shotmap for: ${playerName} - ${year} ${modern ? '(Modern)' : ''}`);
-  
+
 //   const browser = await getBrowser();
 //   const page = await browser.newPage();
-  
+
 //   try {
-//     page.setDefaultTimeout(30000);
-//     page.setDefaultNavigationTimeout(30000);
-    
-//     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
+//     page.setDefaultTimeout(20000);
+//     page.setDefaultNavigationTimeout(20000);
+
+//     await page.setUserAgent(
+//       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+//     );
+
 //     console.log('🔗 Navigating to nbavisuals.com/shotmap...');
-//     await page.goto('https://nbavisuals.com/shotmap', { 
+//     await page.goto('https://nbavisuals.com/shotmap', {
 //       waitUntil: 'domcontentloaded',
-//       timeout: 20000 
+//       timeout: 10000,
 //     });
-    
+
+//     await page.waitForSelector('#season-dropdown');
+//     await page.waitForSelector('#playerSearch');
 //     console.log('✅ Page loaded');
-    
-//     // Wait for form elements
-//     await page.waitForSelector('#season-dropdown', { timeout: 5000 });
-//     await page.waitForSelector('#playerSearch', { timeout: 5000 });
-    
-//     // 1) Select Season
-//     const seasonFormat = `${year}-${(parseInt(year) + 1).toString().slice(-2)}`;
+
+//     const seasonFormat = `${year}-${(parseInt(year) + 1)
+//       .toString()
+//       .slice(-2)}`;
 //     console.log(`📅 Selecting season: ${seasonFormat}`);
 //     await page.select('#season-dropdown', seasonFormat);
-//     await page.waitForTimeout(500);
-    
-//     // 2) Select Player using mouse first then arrowdown + Enter
+
 //     console.log(`👤 Selecting player: ${playerName}`);
-    
-//     // Clear any existing selections
-//     await page.evaluate(() => {
-//       const searchInput = document.getElementById('playerSearch');
-//       if (searchInput) {
-//         searchInput.value = '';
-//         searchInput.focus();
-//       }
-//     });
-    
-//     // Type player name
-//     await page.type('#playerSearch', playerName, { delay: 100 });
-//     await page.waitForTimeout(1500); // Wait for dropdown
-    
-//     // MOUSE-FIRST approach: Try to click dropdown option
-//     console.log('   Using mouse-first selection...');
-//     const mouseSelectionSuccess = await page.evaluate((targetPlayer) => {
+
+//     // Click the plain text input and type to trigger the autocomplete
+//     await page.click('#playerSearch');
+//     await page.waitForTimeout(300);
+//     await page.type('#playerSearch', playerName, { delay: 50 });
+
+//     // Wait for the autocomplete dropdown (jQuery UI: .ui-autocomplete li)
+//     console.log('   Waiting for player dropdown...');
+//     try {
+//       await page.waitForFunction(
+//         () => document.querySelectorAll('.ui-autocomplete .ui-menu-item').length > 0,
+//         { timeout: 5000 }
+//       );
+//     } catch (err) {
+//       throw new Error(`Player "${playerName}" not found - no matching players for the ${year} season`);
+//     }
+
+//     const selected = await page.evaluate((targetPlayer) => {
 //       function normalize(str) {
 //         return str
 //           .toLowerCase()
-//           .replace(/[’']/g, '')       // remove apostrophes
-//           .replace(/[^a-z0-9 ]/g, '') // remove special chars
-//           .replace(/\s+/g, ' ')       // normalize spaces
+//           .replace(/['']/g, '')
+//           .replace(/[^a-z0-9 ]/g, ' ')
+//           .replace(/\s+/g, ' ')
 //           .trim();
 //       }
-
-//       const dropdown = document.querySelector('.choices__list--dropdown');
-//       if (!dropdown) return false;
-
-//       const options = dropdown.querySelectorAll('.choices__item--choice');
-
+//       const items = document.querySelectorAll('.ui-autocomplete .ui-menu-item');
 //       const normalizedTarget = normalize(targetPlayer);
 
-//       for (const option of options) {
-//         const text = option.textContent || '';
-//         const normalizedOption = normalize(text);
-
-//         if (normalizedOption.includes(normalizedTarget)) {
-//           option.click();
-//           return true;
+//       // Try exact match first
+//       for (const item of items) {
+//         if (normalize(item.textContent) === normalizedTarget) {
+//           item.click();
+//           return item.textContent.trim();
 //         }
 //       }
 
-//       return false;
+//       // Fall back to partial match
+//       for (const item of items) {
+//         if (normalize(item.textContent).includes(normalizedTarget)) {
+//           item.click();
+//           return item.textContent.trim();
+//         }
+//       }
+
+//       return null;
 //     }, playerName);
 
-    
-//     if (!mouseSelectionSuccess) {
-//       console.log('   Mouse selection failed, using keyboard fallback...');
-//       // KEYBOARD FALLBACK: ArrowDown + Enter
-//       await page.keyboard.press('ArrowDown');
-//       await page.waitForTimeout(300);
-//       await page.keyboard.press('Enter');
+//     if (!selected) {
+//       throw new Error(`Player "${playerName}" not found in the dropdown for the ${year} season`);
 //     }
-    
-//     await page.waitForTimeout(1000);
-    
-//     // 3) Toggle Modern Shotmap (AFTER player selection)
+
+//     console.log(`✅ Selected player: ${selected}`);
+
+//     // ⚡ SHORT waits (allow quick UI update)
+//     await page.waitForTimeout(500);
+
 //     if (modern) {
 //       console.log('🔄 Toggling Modern Shotmap...');
-      
-//       const modernToggled = await page.evaluate(() => {
-//         // Look for the Modern Shotmap checkbox
-//         // It's likely a checkbox input with a label containing "Modern Shotmap"
-//         const allElements = document.querySelectorAll('*');
-        
-//         for (const el of allElements) {
-//           const text = el.textContent || '';
-          
-//           // Look for checkbox or switch
-//           if (el.tagName === 'INPUT' && el.type === 'checkbox') {
-//             // Check if associated label contains "Modern Shotmap"
-//             const labels = document.querySelectorAll('label');
-//             for (const label of labels) {
-//               if ((label.htmlFor === el.id || label.contains(el)) && 
-//                   label.textContent.includes('Modern Shotmap')) {
-//                 console.log('Found Modern Shotmap checkbox via label');
-//                 el.click();
-//                 return true;
-//               }
-//             }
-//           }
-          
-//           // Look for element with exact "Modern Shotmap" text
-//           if (text.trim() === 'Modern Shotmap') {
-//             console.log('Found element with "Modern Shotmap" text');
-            
-//             // Try to find checkbox near this element
-//             const checkbox = el.querySelector('input[type="checkbox"]');
-//             if (checkbox) {
-//               checkbox.click();
-//               return true;
-//             }
-            
-//             // Click the element itself (might be a label or span)
-//             el.click();
-//             return true;
+//       await page.evaluate(() => {
+//         const labels = document.querySelectorAll('label');
+//         for (const label of labels) {
+//           if (label.textContent.includes('Modern Shotmap')) {
+//             const input = label.querySelector('input[type="checkbox"]');
+//             if (input) input.click();
+//             break;
 //           }
 //         }
-        
-//         console.log('Modern Shotmap element not found');
-//         return false;
 //       });
-      
-//       if (modernToggled) {
-//         console.log('✅ Modern Shotmap toggled');
-//         await page.waitForTimeout(500); // Brief wait for UI update
-//       } else {
-//         console.log('⚠️ Could not toggle Modern Shotmap');
-//       }
+//       await page.waitForTimeout(300);
 //     }
-    
-//     // 4) Click Generate Button
-//     console.log('🔄 Clicking Generate Shotmap button...');
-    
-//     const generateClicked = await page.evaluate(() => {
-//       const generateButton = document.getElementById('generateGraphButton');
-//       if (generateButton) {
-//         // Check if button is enabled
-//         if (!generateButton.disabled) {
-//           generateButton.click();
-//           console.log('Generate button clicked');
-//           return true;
-//         } else {
-//           console.log('Generate button is disabled');
-//           return false;
-//         }
+
+//     console.log('🔄 Clicking Generate Shotmap...');
+//     const clicked = await page.evaluate(() => {
+//       const btn = document.getElementById('generateGraphButton');
+//       if (btn && !btn.disabled) {
+//         btn.click();
+//         return true;
 //       }
-//       console.log('Generate button not found');
 //       return false;
 //     });
-    
-//     if (!generateClicked) {
-//       throw new Error('Could not click Generate button (might be disabled)');
-//     }
-    
-//     // 5) Wait for graph and Screenshot
-//     console.log('⏳ Waiting for shotmap to generate...');
-    
-//     let graphLoaded = false;
-//     let attempts = 0;
-//     const maxAttempts = 10; // 20 seconds total (10 * 2000ms)
-    
-//     while (attempts < maxAttempts && !graphLoaded) {
-//       attempts++;
-//       await page.waitForTimeout(2000);
-      
-//       graphLoaded = await page.evaluate(() => {
-//         const graphContainer = document.getElementById('graph-container');
-//         if (!graphContainer) return false;
-        
-//         // Check for visual elements
-//         const hasVisual = graphContainer.querySelector('svg, canvas, img');
-        
-//         // Check for shotmap content
-//         const text = graphContainer.textContent || '';
-//         const hasShotmapContent = text.includes('eFG%') || text.includes('Shots:') || text.includes('Zone');
-        
-//         return hasVisual || hasShotmapContent;
-//       });
-      
-//       if (!graphLoaded) {
-//         console.log(`   Attempt ${attempts}/${maxAttempts}: Waiting...`);
-//       }
-//     }
-    
-//     if (!graphLoaded) {
-//       console.log('⚠️ Graph may not have loaded completely, capturing anyway');
-//     } else {
-//       console.log('✅ Graph loaded');
-//     }
-    
-//     // Final wait for rendering
-//     await page.waitForTimeout(1000);
-    
-//     // Get graph area for screenshot
-//     const graphContainerInfo = await page.evaluate(() => {
-//       const graphContainer = document.getElementById('graph-container');
-//       if (graphContainer && graphContainer.children.length > 0) {
-//         const rect = graphContainer.getBoundingClientRect();
-//         return {
-//           x: rect.x,
-//           y: rect.y,
-//           width: rect.width,
-//           height: rect.height
-//         };
-//       }
-      
-//       // Fallback
-//       return {
-//         x: 50,
-//         y: 200,
-//         width: 900,
-//         height: 700
-//       };
+//     if (!clicked) throw new Error('Generate button missing or disabled');
+
+//     console.log('⏳ Waiting for graph...');
+//     // replace polling loop with dynamic wait
+//     await page.waitForFunction(
+//       () => {
+//         const gc = document.getElementById('graph-container');
+//         if (!gc) return false;
+//         return gc.querySelector('svg,canvas,img');
+//       },
+//       { timeout: 10000 }
+//     );
+
+//     // short render delay
+//     await page.waitForTimeout(400);
+
+//     const graphRect = await page.evaluate(() => {
+//       const gc = document.getElementById('graph-container');
+//       const rect = gc?.getBoundingClientRect?.();
+//       return rect
+//         ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+//         : { x: 50, y: 200, width: 900, height: 700 };
 //     });
-    
-//     // Take screenshot
+
 //     console.log('📸 Taking screenshot...');
 //     const screenshot = await page.screenshot({
 //       type: 'png',
 //       clip: {
-//         x: Math.max(0, graphContainerInfo.x - 10),
-//         y: Math.max(0, graphContainerInfo.y - 10),
-//         width: Math.min(graphContainerInfo.width + 20, 1200),
-//         height: Math.min(graphContainerInfo.height + 20, 800)
+//         x: Math.max(0, graphRect.x - 10),
+//         y: Math.max(0, graphRect.y - 10),
+//         width: Math.min(graphRect.width + 20, 1200),
+//         height: Math.min(graphRect.height + 20, 800),
 //       },
-//       encoding: 'binary'
+//       encoding: 'binary',
 //     });
-    
-//     // Save to cache
+
 //     saveToCache(cacheFilename, screenshot);
-    
 //     console.log('✅ Shotmap generated successfully');
 //     return screenshot;
-    
-//   } catch (error) {
-//     console.error('❌ Error generating shotmap:', error.message);
-//     throw error;
+//   } catch (err) {
+//     console.error('❌ Error generating shotmap:', err.message);
+//     throw err;
 //   } finally {
 //     await page.close();
 //   }
 // }
 
-// // Command parsing function
 // async function handleShotmapCommand(command) {
 //   const parts = command.split(' ');
-  
-//   if (parts[0] !== '!shotmap' && parts[0] !== '!shotchart') {
+//   if (parts[0] !== '!shotmap' && parts[0] !== '!shotchart')
 //     throw new Error('Invalid command format');
-//   }
-  
+
 //   let playerNameParts = [];
 //   let year = null;
 //   let modern = false;
-  
+
 //   for (let i = 1; i < parts.length; i++) {
 //     const part = parts[i];
-    
-//     if (part === '--modern') {
-//       modern = true;
-//     } else if (/^\d{4}$/.test(part)) {
-//       year = part;
-//     } else if (part !== '!shotmap' && part !== '!shotchart') {
-//       playerNameParts.push(part);
-//     }
+//     if (part === '--modern') modern = true;
+//     else if (/^\d{4}$/.test(part)) year = part;
+//     else playerNameParts.push(part);
 //   }
-  
-//   if (!year) {
-//     throw new Error('Year not specified');
-//   }
-  
+
+//   if (!year) throw new Error('Year not specified');
 //   const playerName = playerNameParts.join(' ');
-  
-//   if (!playerName) {
-//     throw new Error('Player name not specified');
-//   }
-  
+//   if (!playerName) throw new Error('Player name not specified');
+
 //   return generateShotmap(playerName, year, 'RS', { modern });
 // }
 
-// module.exports = { 
-//   generateShotmap,
-//   handleShotmapCommand
-// };
-
-
-
-// 7.25 seconds below.
-
-const puppeteer = require('puppeteer');
-const fs = require('fs');
-const path = require('path');
-
-let browser = null;
-
-async function getBrowser() {
-  if (!browser) {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-      ],
-      defaultViewport: { width: 1400, height: 1000 },
-    });
-  }
-  return browser;
-}
-
-function getCacheFilename(playerName, year, modern = false) {
-  const cleanName = playerName
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '');
-  const modernSuffix = modern ? '_modern' : '';
-  return `${cleanName}${modernSuffix}_${year}.png`;
-}
-
-function checkCache(filename) {
-  const cachePath = path.join('/data/cache', filename);
-  if (fs.existsSync(cachePath)) {
-    console.log(`📂 Loading from cache: ${filename}`);
-    return fs.readFileSync(cachePath);
-  }
-  return null;
-}
-
-function saveToCache(filename, screenshotBuffer) {
-  const cacheDir = '/data/cache';
-  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-  const cachePath = path.join(cacheDir, filename);
-  fs.writeFileSync(cachePath, screenshotBuffer);
-  console.log(`💾 Saved to cache: ${filename}`);
-}
-
-async function generateShotmap(playerName, year, seasonType = 'RS', options = {}) {
-  const { modern = false } = options;
-  const cacheFilename = getCacheFilename(playerName, year, modern);
-  const cached = checkCache(cacheFilename);
-  if (cached) return cached;
-
-  console.log(`🎯 Generating shotmap for: ${playerName} - ${year} ${modern ? '(Modern)' : ''}`);
-
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-
-  try {
-    page.setDefaultTimeout(20000);
-    page.setDefaultNavigationTimeout(20000);
-
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    console.log('🔗 Navigating to nbavisuals.com/shotmap...');
-    await page.goto('https://nbavisuals.com/shotmap', {
-      waitUntil: 'domcontentloaded',
-      timeout: 10000,
-    });
-
-    await page.waitForSelector('#season-dropdown');
-    await page.waitForSelector('#playerSearch');
-    console.log('✅ Page loaded');
-
-    const seasonFormat = `${year}-${(parseInt(year) + 1)
-      .toString()
-      .slice(-2)}`;
-    console.log(`📅 Selecting season: ${seasonFormat}`);
-    await page.select('#season-dropdown', seasonFormat);
-
-    console.log(`👤 Selecting player: ${playerName}`);
-    await page.evaluate(() => {
-      const el = document.getElementById('playerSearch');
-      if (el) {
-        el.value = '';
-        el.focus();
-      }
-    });
-
-    await page.type('#playerSearch', playerName, { delay: 50 });
-
-    // 🔎 Wait for dropdown to be populated OR timeout quickly
-    console.log('   Waiting for player dropdown...');
-    await Promise.race([
-      page.waitForSelector('.choices__list--dropdown .choices__item--choice', {
-        visible: true,
-      }),
-      page.waitForTimeout(1200),
-    ]);
-
-    const selected = await page.evaluate((targetPlayer) => {
-      function normalize(str) {
-        return str
-          .toLowerCase()
-          .replace(/[’']/g, '')
-          .replace(/[^a-z0-9 ]/g, '')
-          .replace(/\s+/g, ' ')
-          .trim();
-      }
-      const dropdown = document.querySelector('.choices__list--dropdown');
-      if (!dropdown) return false;
-      const options = dropdown.querySelectorAll('.choices__item--choice');
-      const normalizedTarget = normalize(targetPlayer);
-      for (const option of options) {
-        const text = option.textContent || '';
-        const normalized = normalize(text);
-        if (normalized.includes(normalizedTarget)) {
-          option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          return true;
-        }
-      }
-      return false;
-    }, playerName);
-
-    if (!selected) {
-      await page.keyboard.press('ArrowDown');
-      await page.keyboard.press('Enter');
-    }
-
-    // ⚡ SHORT waits (allow quick UI update)
-    await page.waitForTimeout(500);
-
-    if (modern) {
-      console.log('🔄 Toggling Modern Shotmap...');
-      await page.evaluate(() => {
-        const labels = document.querySelectorAll('label');
-        for (const label of labels) {
-          if (label.textContent.includes('Modern Shotmap')) {
-            const input = label.querySelector('input[type="checkbox"]');
-            if (input) input.click();
-            break;
-          }
-        }
-      });
-      await page.waitForTimeout(300);
-    }
-
-    console.log('🔄 Clicking Generate Shotmap...');
-    const clicked = await page.evaluate(() => {
-      const btn = document.getElementById('generateGraphButton');
-      if (btn && !btn.disabled) {
-        btn.click();
-        return true;
-      }
-      return false;
-    });
-    if (!clicked) throw new Error('Generate button missing or disabled');
-
-    console.log('⏳ Waiting for graph...');
-    // replace polling loop with dynamic wait
-    await page.waitForFunction(
-      () => {
-        const gc = document.getElementById('graph-container');
-        if (!gc) return false;
-        return gc.querySelector('svg,canvas,img');
-      },
-      { timeout: 10000 }
-    );
-
-    // short render delay
-    await page.waitForTimeout(400);
-
-    const graphRect = await page.evaluate(() => {
-      const gc = document.getElementById('graph-container');
-      const rect = gc?.getBoundingClientRect?.();
-      return rect
-        ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-        : { x: 50, y: 200, width: 900, height: 700 };
-    });
-
-    console.log('📸 Taking screenshot...');
-    const screenshot = await page.screenshot({
-      type: 'png',
-      clip: {
-        x: Math.max(0, graphRect.x - 10),
-        y: Math.max(0, graphRect.y - 10),
-        width: Math.min(graphRect.width + 20, 1200),
-        height: Math.min(graphRect.height + 20, 800),
-      },
-      encoding: 'binary',
-    });
-
-    saveToCache(cacheFilename, screenshot);
-    console.log('✅ Shotmap generated successfully');
-    return screenshot;
-  } catch (err) {
-    console.error('❌ Error generating shotmap:', err.message);
-    throw err;
-  } finally {
-    await page.close();
-  }
-}
-
-async function handleShotmapCommand(command) {
-  const parts = command.split(' ');
-  if (parts[0] !== '!shotmap' && parts[0] !== '!shotchart')
-    throw new Error('Invalid command format');
-
-  let playerNameParts = [];
-  let year = null;
-  let modern = false;
-
-  for (let i = 1; i < parts.length; i++) {
-    const part = parts[i];
-    if (part === '--modern') modern = true;
-    else if (/^\d{4}$/.test(part)) year = part;
-    else playerNameParts.push(part);
-  }
-
-  if (!year) throw new Error('Year not specified');
-  const playerName = playerNameParts.join(' ');
-  if (!playerName) throw new Error('Player name not specified');
-
-  return generateShotmap(playerName, year, 'RS', { modern });
-}
-
-module.exports = { generateShotmap, handleShotmapCommand };
+// module.exports = { generateShotmap, handleShotmapCommand };
 
 
 

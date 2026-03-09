@@ -389,6 +389,32 @@ async def on_message(message: discord.Message):
         await message.reply(f"📊 Highlighted: {len(state['stack'])}")
         return
 
+    # ================= ENDHIGHLIGHT =================
+    if content.startswith(CMD_ENDHIGHLIGHT):
+        if not is_commish(message.author):
+            await message.reply("❌ Only commissioners can change the highlight range.")
+            return
+        
+        parts = content.split()
+        if len(parts) != 2:
+            await message.reply(f"Usage: {CMD_ENDHIGHLIGHT} <column letter>\nExample: `{CMD_ENDHIGHLIGHT} L`")
+            return
+        
+        new_end_col = parts[1].upper()
+        
+        # Validate it's a single letter A-Z
+        if not re.match(r'^[A-Z]$', new_end_col):
+            await message.reply("❌ Please provide a single column letter (A-Z).")
+            return
+        
+        # Update the global variable
+        global ROW_END_COL
+        ROW_END_COL = new_end_col
+        
+        log.info(f"[ENDHIGHLIGHT] channel={channel_id} new_end_col={new_end_col} by={message.author}")
+        await message.reply(f"✅ Highlight end column changed to **{new_end_col}**\nUse `!rehighlight` to apply this to all existing picks.")
+        return
+
     # ================= RESET =================
     if content == CMD_RESET:
         state["highlighted"].clear()
@@ -425,6 +451,26 @@ async def on_message(message: discord.Message):
         await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
         log.info(f"[REDO] channel={channel_id} player='{name}' by={message.author}")
         await message.reply(f"🔁 Redid highlight for **{name}**")
+        return
+
+    # ================= REHIGHLIGHT =================
+    if content == CMD_REHIGHLIGHT:
+        if not is_commish(message.author):
+            await message.reply("❌ Only commissioners can use the rehighlight command.")
+            return
+        
+        if not state["stack"]:
+            await message.reply("⚠️ No picks have been made yet.")
+            return
+        
+        await message.reply("🔄 Re-highlighting all picks...")
+        
+        # Re-apply highlight to all players in the stack
+        for name, row in state["stack"]:
+            await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
+        
+        log.info(f"[REHIGHLIGHT] channel={channel_id} re-highlighted {len(state['stack'])} picks by={message.author}")
+        await message.reply(f"✅ Re-highlighted **{len(state['stack'])}** picks.")
         return
 
     # ================= FORCE COMMAND =================

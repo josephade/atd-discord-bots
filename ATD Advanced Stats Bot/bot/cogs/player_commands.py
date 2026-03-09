@@ -176,12 +176,18 @@ class PlayerCommands(commands.Cog):
         )
 
         def pct(val):
-            return f"{float(val)*100:.1f}%" if val is not None else "N/A"
+            try:
+                return f"{float(val)*100:.1f}%"
+            except:
+                return "N/A"
 
         def num(val, d=1):
-            return f"{float(val):.{d}f}" if val is not None else "N/A"
+            try:
+                return f"{float(val):.{d}f}"
+            except:
+                return "N/A"
 
-        # Efficiency
+        # 🎯 Efficiency
         efficiency = (
             f"**TS%:** {pct(row.get('TS_PCT'))}\n"
             f"**eFG%:** {pct(row.get('EFG_PCT'))}\n"
@@ -190,7 +196,7 @@ class PlayerCommands(commands.Cog):
             f"**TOV%:** {pct(row.get('TOV_PCT'))}"
         )
 
-        # Impact (NBA-based)
+        # 📈 Team Impact
         impact = (
             f"**Off Rating:** {num(row.get('OFF_RATING'))}\n"
             f"**Def Rating:** {num(row.get('DEF_RATING'))}\n"
@@ -199,7 +205,7 @@ class PlayerCommands(commands.Cog):
             f"**Pace:** {num(row.get('PACE'), 1)}"
         )
 
-        # Playmaking & Rebounding
+        # 🛡 Playmaking & Rebounding
         playmaking = (
             f"**AST%:** {pct(row.get('AST_PCT'))}\n"
             f"**REB%:** {pct(row.get('REB_PCT'))}\n"
@@ -211,9 +217,27 @@ class PlayerCommands(commands.Cog):
         embed.add_field(name="📈 Team Impact", value=impact, inline=True)
         embed.add_field(name="🛡 Playmaking & Rebounding", value=playmaking, inline=False)
 
+        # 🔥 NEW SECTION — ON/OFF IMPACT
+        on_off = self.nba_helper.get_on_off_stats(row.get("PLAYER_ID"), season)
+
+        if on_off:
+            on_off_text = (
+                f"**On Court +/-:** {on_off['on_plus_minus']:.1f}\n"
+                f"**Off Court +/-:** {on_off['off_plus_minus']:.1f}\n"
+                f"**Swing:** {on_off['swing']:.1f}\n"
+                # f"**Team W% On:** {on_off['on_w_pct']:.3f}\n"
+                # f"**Team W% Off:** {on_off['off_w_pct']:.3f}"
+            )
+
+            embed.add_field(name="📊 On / Off Impact", value=on_off_text, inline=False)
+
+        # except Exception:
+        #     pass  # silently skip if endpoint fails
+
         embed.set_footer(text="NBA.com Advanced Data • 1996-97 to present")
 
         return embed
+ 
 
 
     

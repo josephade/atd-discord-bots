@@ -1,7 +1,7 @@
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from nba_api.stats.endpoints import playercareerstats, commonplayerinfo, leaguedashplayerstats
+from nba_api.stats.endpoints import playercareerstats, commonplayerinfo, leaguedashplayerstats, teamplayeronoffdetails
 from nba_api.stats.static import players
 from ..config import NBA_API_TIMEOUT, NBA_API_RETRIES, logger
 import nba_api
@@ -170,4 +170,57 @@ class NBAApiHelper:
 
         except Exception as e:
             logger.error(f"Advanced season fetch error: {e}")
+            return None
+
+    def get_on_off_stats(self, player_id: int, season: str):
+        try:
+            # Convert season like "2023" → "2023-24"
+            if len(season) == 4:
+                season = f"{season}-{str(int(season)+1)[-2:]}"
+
+            # 1️⃣ Get team from career stats
+            career = playercareerstats.PlayerCareerStats(player_id=player_id)
+            career_df = career.get_data_frames()[0]
+
+            season_row = career_df[career_df["SEASON_ID"] == season]
+
+            if season_row.empty:
+                return None
+
+            team_id = int(season_row.iloc[0]["TEAM_ID"])
+
+            # 2️⃣ Call TeamPlayerOnOffDetails
+            dashboard = teamplayeronoffdetails.TeamPlayerOnOffDetails(
+                team_id=team_id,
+                season=season,
+                season_type_all_star="Regular Season",
+                per_mode_detailed="PerGame"
+            )
+
+            on_df = dashboard.players_on_court_team_player_on_off_details.get_data_frame()
+            off_df = dashboard.players_off_court_team_player_on_off_details.get_data_frame()
+
+            on_row = on_df[on_df["VS_PLAYER_ID"] == player_id]
+            off_row = off_df[off_df["VS_PLAYER_ID"] == player_id]
+
+            if on_row.empty or off_row.empty:
+                return None
+
+            on_row = on_row.iloc[0]
+            off_row = off_row.iloc[0]
+
+            on_pm = float(on_row["PLUS_MINUS"])
+            off_pm = float(off_row["PLUS_MINUS"])
+            swing = on_pm - off_pm
+
+            return {
+                "on_plus_minus": on_pm,
+                "off_plus_minus": off_pm,
+                "swing": swing,
+                # "on_w_pct": float(on_row["W_PCT"]),
+                # "off_w_pct": float(off_row["W_PCT"])
+            }
+
+        except Exception as e:
+            print("ON/OFF ERROR:", e)
             return None

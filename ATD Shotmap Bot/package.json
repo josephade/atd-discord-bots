@@ -2,10 +2,10 @@
   "name": "nba-shotmap-bot",
   "version": "1.0.0",
   "description": "Discord bot to generate NBA shotmaps from nbavisuals.com",
-  "main": "index.js",
+  "main": "bot_v2.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node bot_v2.js",
+    "dev": "nodemon bot_v2.js"
   },
   "dependencies": {
     "axios": "^1.6.2",

@@ -332,7 +332,8 @@ async def fluxhelp(ctx):
             "`!flux 3` – Generate next round with ±3 volatility\n"
             "`!flux 4` – Generate next round with ±4 volatility\n"
             "`!flux 5` – Generate next round with ±5 volatility\n"
-            "`!fluxhelp` – Show this help message"
+            "`!fluxhelp` – Show this help message\n"
+            "`!undoflux` – Undo the most recent round (in case of mistakes)"
         ),
         inline=False
     )
