@@ -8,13 +8,20 @@ const Discord = require('discord.js');
 
 const CACHE_DIR = path.join(__dirname, 'cache');
 
-function getCacheKey(playerName, year, modern) {
+// year N → season (N-1)-N, e.g. 1998 → "1997-98"
+function yearToSeason(y) {
+  const yr = parseInt(y);
+  return `${yr - 1}-${yr.toString().slice(-2)}`;
+}
+
+function getCacheKey(playerName, yearStart, yearEnd, modern, playoff) {
   const clean = playerName
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_|_$/g, '');
-  return `${clean}${modern ? '_modern' : ''}_${year}.png`;
+  const yKey = yearEnd && yearEnd !== yearStart ? `${yearStart}-${yearEnd}` : yearStart;
+  return `${clean}${playoff ? '_ps' : ''}${modern ? '_modern' : ''}_${yKey}.png`;
 }
 
 function fromCache(key) {
@@ -54,16 +61,21 @@ function normalize(s) {
     .trim();
 }
 
-async function generateShotmap(playerName, year, modern = false) {
-  const cacheKey = getCacheKey(playerName, year, modern);
+async function generateShotmap(playerName, yearStart, yearEnd, modern = false, playoff = false) {
+  const cacheKey = getCacheKey(playerName, yearStart, yearEnd, modern, playoff);
   const cached = fromCache(cacheKey);
   if (cached) {
     console.log(`Cache hit: ${cacheKey}`);
     return cached;
   }
 
-  const seasonFormat = `${year}-${(parseInt(year) + 1).toString().slice(-2)}`;
-  console.log(`Generating: ${playerName} | ${seasonFormat}${modern ? ' | Modern' : ''}`);
+  // Build list of seasons to select
+  const start = parseInt(yearStart);
+  const end = yearEnd ? parseInt(yearEnd) : start;
+  const seasons = [];
+  for (let y = start; y <= end; y++) seasons.push(yearToSeason(y));
+  const seasonLabel = seasons.length === 1 ? seasons[0] : `${seasons[0]} - ${seasons[seasons.length - 1]}`;
+  console.log(`Generating: ${playerName} | ${seasonLabel}${modern ? ' | Modern' : ''}`);
 
   const b = await getBrowser();
   const page = await b.newPage();
@@ -72,7 +84,7 @@ async function generateShotmap(playerName, year, modern = false) {
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
-    page.setDefaultTimeout(30000);
+    page.setDefaultTimeout(90000);
 
     // ── 1. Load page ──
     console.log('Loading page...');
@@ -81,17 +93,48 @@ async function generateShotmap(playerName, year, modern = false) {
       timeout: 30000,
     });
 
-    // ── 2. Select season ──
-    console.log(`Selecting season: ${seasonFormat}`);
+    // ── 1.5. Switch to Playoffs if requested ──
+    if (playoff) {
+      console.log('Switching to Playoffs...');
+      const toggled = await page.evaluate(() => {
+        // Find the toggle by its associated label text "Regular season"
+        const labels = document.querySelectorAll('label');
+        for (const label of labels) {
+          if (label.textContent.trim().toLowerCase().includes('regular season')) {
+            const input = label.querySelector('input[type="checkbox"]') ||
+                          label.previousElementSibling?.querySelector('input') ||
+                          document.getElementById(label.htmlFor);
+            if (input) { input.click(); return true; }
+            label.click();
+            return true;
+          }
+        }
+        // Fallback: find any checkbox near text "Regular season"
+        const inputs = document.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+        for (const inp of inputs) {
+          const nearby = inp.closest('div, span, label');
+          if (nearby && nearby.textContent.toLowerCase().includes('regular season')) {
+            inp.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!toggled) console.warn('Could not find Regular season toggle - proceeding as regular season');
+      await page.waitForTimeout(500);
+    }
+
+    // ── 2. Select season(s) ──
+    console.log(`Selecting seasons: ${seasons.join(', ')}`);
     await page.waitForSelector('#season-dropdown');
-    await page.select('#season-dropdown', seasonFormat);
+    await page.select('#season-dropdown', ...seasons);
     // Wait for season data to load into the player dropdown
     await page.waitForTimeout(2000);
 
-    // ── 3. Find player via autocomplete source data ──
+    // ── 3. Resolve player name + ID from autocomplete source (no side effects) ──
     console.log(`Searching for player: "${playerName}"`);
 
-    const result = await page.evaluate((rawName, targetNorm) => {
+    const playerResolution = await page.evaluate((rawName, targetNorm) => {
       function norm(s) {
         return (s || '')
           .normalize('NFD')
@@ -101,228 +144,150 @@ async function generateShotmap(playerName, year, modern = false) {
           .replace(/\s+/g, ' ')
           .trim();
       }
-
       function findInList(players) {
         if (!players || !players.length) return null;
         for (const p of players) {
           const label = p.label || p.value || p;
-          if (norm(label) === targetNorm) return { label, value: p.value || p };
+          if (norm(label) === targetNorm) return { name: label, value: p.value || label };
         }
         for (const p of players) {
           const label = p.label || p.value || p;
-          if (norm(label).includes(targetNorm) || targetNorm.includes(norm(label))) {
-            return { label, value: p.value || p };
-          }
+          if (norm(label).includes(targetNorm) || targetNorm.includes(norm(label)))
+            return { name: label, value: p.value || label };
         }
         return null;
       }
 
-      // ── Strategy A: Call autocomplete source with the actual search term ──
       for (const inputId of ['#playerSearch', '#playerSearch1']) {
         const $el = window.$ && $(inputId);
         if (!$el || !$el.length) continue;
-
         const instance = $el.data('ui-autocomplete');
         if (!instance) continue;
-
         const source = instance.options.source;
+
+        const tryTerms = [
+          rawName,
+          rawName.split(' ')[0].replace(/[^a-zA-Z0-9]/g, ''),
+          rawName.split(' ')[0],
+          rawName.split(' ').slice(-1)[0],
+        ].filter((t, i, arr) => t && arr.indexOf(t) === i);
 
         if (Array.isArray(source)) {
           const match = findInList(source);
-          if (match) return { via: 'autocomplete-array', name: match.label, value: match.value, inputId };
-          return { via: null, source: 'array', count: source.length, sample: (source[0].label || source[0]).toString() };
-        }
-
-        if (typeof source === 'function') {
-          // Call with the actual player name — local sources return synchronously
-          let filtered = null;
-          source({ term: rawName }, (data) => { filtered = data; });
-          if (filtered && filtered.length > 0) {
-            const match = findInList(filtered);
-            if (match) return { via: 'autocomplete-fn', name: match.label, value: match.value, inputId };
-            return {
-              via: null,
-              source: 'fn-filtered',
-              count: filtered.length,
-              sample: (filtered[0].label || filtered[0].value || filtered[0]).toString(),
-              all: filtered.slice(0, 20).map(p => p.label || p.value || p),
-            };
-          }
-          // Try progressively simpler search terms to handle apostrophes/accents
-          const fallbackTerms = [
-            rawName.split(' ')[0].replace(/[^a-zA-Z0-9]/g, ''), // "Amare" from "Amar'e"
-            rawName.split(' ')[0],                                // "Amar'e"
-            rawName.split(' ').slice(-1)[0],                      // last name
-            rawName.replace(/[^a-zA-Z0-9 ]/g, '').split(' ')[0], // stripped first name
-          ].filter((t, i, arr) => t && arr.indexOf(t) === i);    // unique, non-empty
-
-          for (const term of fallbackTerms) {
-            let byTerm = null;
-            source({ term }, (data) => { byTerm = data; });
-            if (byTerm && byTerm.length > 0) {
-              const match = findInList(byTerm);
-              if (match) return { via: 'autocomplete-fn-short', name: match.label, value: match.value, inputId };
-              return {
-                via: null,
-                source: 'fn-shortterm',
-                term,
-                count: byTerm.length,
-                sample: (byTerm[0].label || byTerm[0]).toString(),
-                all: byTerm.slice(0, 20).map(p => p.label || p.value || p),
-              };
-            }
-          }
-          return { via: null, source: 'fn-empty', filteredCount: filtered ? filtered.length : 0 };
-        }
-      }
-
-      // ── Strategy B: Check all <select> elements for player data ──
-      const selects = document.querySelectorAll('select');
-      for (const sel of selects) {
-        if (sel.options.length < 5) continue;
-        for (const opt of sel.options) {
-          if (!opt.value || !opt.text) continue;
-          if (norm(opt.text) === targetNorm || norm(opt.text).includes(targetNorm)) {
-            return { via: 'select', name: opt.text, selectId: sel.id, value: opt.value };
+          if (match) return match;
+        } else if (typeof source === 'function') {
+          for (const term of tryTerms) {
+            let data = null;
+            source({ term }, (d) => { data = d; });
+            const match = findInList(data);
+            if (match) return match;
           }
         }
       }
-
-      // Debug report
-      return {
-        via: null,
-        selects: Array.from(selects).map(s => ({ id: s.id, count: s.options.length })),
-        jquery: !!window.$,
-        inputs: ['#playerSearch', '#playerSearch1'].map(id => {
-          const $el = window.$ && $(id);
-          if (!$el || !$el.length) return { id, found: false };
-          const inst = $el.data('ui-autocomplete');
-          return { id, found: true, hasAutocomplete: !!inst };
-        }),
-      };
+      return null;
     }, playerName, normalize(playerName));
 
-    console.log('Player search result:', JSON.stringify(result));
+    const typeTarget = playerResolution ? playerResolution.name : playerName;
 
-    if (!result.via) {
-      // ── Strategy C: Type into the input and use jQuery to trigger search ──
-      console.log('Trying UI interaction fallback...');
+    // Get the numeric player ID from #players-dropdown (already populated after season wait)
+    const resolvedPlayerId = await page.evaluate((name) => {
+      function norm(s) {
+        return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+      const target = norm(name);
+      const sel = document.getElementById('players-dropdown');
+      if (!sel) return null;
+      for (const opt of sel.options) {
+        if (norm(opt.text) === target) return opt.value;
+      }
+      for (const opt of sel.options) {
+        if (norm(opt.text).includes(target) || target.includes(norm(opt.text))) return opt.value;
+      }
+      return null;
+    }, typeTarget);
 
-      await page.waitForSelector('#playerSearch');
-      await page.click('#playerSearch');
-      await page.waitForTimeout(300);
-      // Clear any existing text
-      await page.keyboard.down('Control');
-      await page.keyboard.press('a');
-      await page.keyboard.up('Control');
-      await page.type('#playerSearch', playerName, { delay: 60 });
-      await page.waitForTimeout(500);
+    console.log(`Resolved player: "${typeTarget}" (ID: ${resolvedPlayerId})`);
 
-      // Trigger jQuery autocomplete search explicitly
-      await page.evaluate((name) => {
-        for (const id of ['#playerSearch', '#playerSearch1']) {
-          const $el = window.$ && $(id);
-          if ($el && $el.length && $el.data('ui-autocomplete')) {
-            $el.autocomplete('search', name);
-            return;
-          }
-        }
-      }, playerName);
-      await page.waitForTimeout(1500);
-
-      // Now try to grab items from the open dropdown
-      const fallback = await page.evaluate((target) => {
-        function norm(s) {
-          return (s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/[^a-z0-9 ]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-        }
-        const targetNorm = norm(target);
-        const items = document.querySelectorAll('.ui-autocomplete .ui-menu-item');
-        console.log('ui-menu-item count:', items.length);
-        for (const item of items) {
-          const t = item.textContent.trim();
-          if (norm(t) === targetNorm || norm(t).includes(targetNorm) || targetNorm.includes(norm(t))) {
-            item.click();
-            return { via: 'ui-click', name: t };
-          }
-        }
-        return {
-          via: null,
-          itemCount: items.length,
-          items: Array.from(items).map(i => i.textContent.trim()),
-        };
-      }, playerName);
-
-      console.log('UI fallback result:', JSON.stringify(fallback));
-
-      if (!fallback.via) {
-        throw new Error(
-          `Player "${playerName}" not found for the ${year} season. ` +
-          `Debug: ${JSON.stringify({ ...result, ...fallback })}`
-        );
+    // ── 3b. For playoffs with multiple seasons: filter seasons BEFORE selecting the player ──
+    // Selecting the player then changing seasons resets the player dropdown.
+    // So we validate seasons first, then select the player once with the final season set.
+    let effectiveSeasons = seasons;
+    if (playoff && resolvedPlayerId && seasons.length > 1) {
+      console.log('Checking valid playoff seasons...');
+      const validSeasons = [];
+      for (const season of seasons) {
+        await page.select('#season-dropdown', season);
+        await page.waitForTimeout(400);
+        const hasData = await page.evaluate((pid) => {
+          const sel = document.getElementById('players-dropdown');
+          return sel ? Array.from(sel.options).some(o => o.value === pid) : false;
+        }, resolvedPlayerId);
+        console.log(`  ${season}: ${hasData ? '✓' : '✗'}`);
+        if (hasData) validSeasons.push(season);
       }
 
-      // Successfully selected via UI click - proceed
-      await page.waitForTimeout(500);
-    } else {
-      // ── Set player via discovered data ──
-      await page.evaluate((res) => {
-        function norm(s) {
-          return (s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/[^a-z0-9 ]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-        }
+      if (validSeasons.length === 0) {
+        throw new Error(`${playerName} has no playoff data for the selected season range.`);
+      }
+      effectiveSeasons = validSeasons;
+      console.log(`Using playoff seasons: ${effectiveSeasons.join(', ')}`);
 
-        if (res.via === 'select') {
-          // Direct select manipulation
-          const sel = document.getElementById(res.selectId);
-          sel.value = res.value;
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
-          const input = document.getElementById('playerSearch') || document.getElementById('playerSearch1');
-          if (input) input.value = res.name;
-        } else {
-          // Autocomplete source - need to set it via jQuery UI
-          for (const inputId of ['#playerSearch', '#playerSearch1']) {
-            const $el = window.$ && $(inputId);
-            if (!$el || !$el.length) continue;
-            const inst = $el.data('ui-autocomplete');
-            if (!inst) continue;
-
-            // Simulate selecting via the autocomplete
-            $el.val(res.name);
-            // Trigger the select event that jQuery UI autocomplete fires
-            $el.autocomplete('option', 'select')({ type: 'autocompleteselect' }, { item: { label: res.name, value: res.value } });
-            $el.trigger('change');
-            break;
-          }
-
-          // Also try setting the hidden select directly
-          for (const selId of ['players-dropdown', 'players-dropdown1']) {
-            const sel = document.getElementById(selId);
-            if (!sel) continue;
-            for (const opt of sel.options) {
-              if (norm(opt.text) === norm(res.name) || opt.value === res.value) {
-                sel.value = opt.value;
-                sel.dispatchEvent(new Event('change', { bubbles: true }));
-                break;
-              }
-            }
-          }
-        }
-      }, result);
-
-      console.log(`Selected [${result.via}]: ${result.name}`);
-      await page.waitForTimeout(600);
+      // Set the final season selection before player selection
+      await page.select('#season-dropdown', ...effectiveSeasons);
+      await page.waitForTimeout(1500); // wait for player list to update
     }
+
+    // ── 4. Select player via real UI interaction (type → click autocomplete item) ──
+    // Done AFTER season validation so the season dropdown is in its final state.
+    console.log(`Selecting player: "${typeTarget}"`);
+
+    await page.waitForSelector('#playerSearch');
+    await page.click('#playerSearch');
+    await page.waitForTimeout(200);
+    await page.keyboard.down('Control');
+    await page.keyboard.press('a');
+    await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
+
+    await page.type('#playerSearch', typeTarget, { delay: 50 });
+    await page.evaluate((name) => {
+      for (const id of ['#playerSearch', '#playerSearch1']) {
+        const $el = window.$ && $(id);
+        if ($el && $el.length && $el.data('ui-autocomplete')) {
+          $el.autocomplete('search', name);
+          return;
+        }
+      }
+    }, typeTarget);
+    await page.waitForTimeout(1000);
+
+    const clicked = await page.evaluate((target) => {
+      function norm(s) {
+        return (s || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/[^a-z0-9 ]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+      const targetNorm = norm(target);
+      const items = document.querySelectorAll('.ui-autocomplete .ui-menu-item');
+      for (const item of items) {
+        const t = item.textContent.trim();
+        if (norm(t) === targetNorm || norm(t).includes(targetNorm) || targetNorm.includes(norm(t))) {
+          item.click();
+          return { ok: true, name: t };
+        }
+      }
+      return { ok: false, count: items.length, items: Array.from(items).map(i => i.textContent.trim()) };
+    }, typeTarget);
+
+    console.log('Autocomplete click:', JSON.stringify(clicked));
+    if (!clicked.ok) {
+      throw new Error(`Player "${playerName}" not found in autocomplete. Items: ${JSON.stringify(clicked.items)}`);
+    }
+    await page.waitForTimeout(800);
 
     // ── 4. Modern mode ──
     if (modern) {
@@ -335,23 +300,26 @@ async function generateShotmap(playerName, year, modern = false) {
 
     // ── 5. Generate ──
     console.log('Clicking generate...');
-    const clicked = await page.evaluate(() => {
+    await page.waitForSelector('#generateGraphButton', { timeout: 10000 });
+    const btnDisabled = await page.evaluate(() => {
       const btn = document.getElementById('generateGraphButton');
-      if (btn && !btn.disabled) { btn.click(); return true; }
-      return false;
+      return !btn || btn.disabled;
     });
-    if (!clicked) throw new Error('Generate button not found or disabled');
+    if (btnDisabled) throw new Error('Generate button not found or disabled');
+    await page.click('#generateGraphButton');
 
     // ── 6. Wait for graph ──
-    console.log('Waiting for graph...');
+    const graphTimeout = Math.max(45000, effectiveSeasons.length * 12000);
+    console.log(`Waiting for graph (timeout: ${graphTimeout / 1000}s)...`);
+
     await page.waitForFunction(
       () => {
         const gc = document.getElementById('graph-container');
-        return gc && gc.querySelector('svg, canvas, img');
+        return gc && gc.querySelector('img, canvas, svg');
       },
-      { timeout: 20000 }
+      { timeout: graphTimeout }
     );
-    await page.waitForTimeout(700);
+    await page.waitForTimeout(500);
 
     // ── 7. Screenshot ──
     // Hide buttons before capturing
@@ -403,7 +371,7 @@ async function generateShotmap(playerName, year, modern = false) {
   }
 }
 
-// ─── Discord ──────────────────────────────────────────────────────────────────
+// ─── Discord ───
 
 const client = new Discord.Client({
   intents: [
@@ -424,10 +392,11 @@ client.on('messageCreate', async (message) => {
 
   if (content === '!shotmap help' || content === '!shotchart help') {
     return message.reply(
-      '**Usage:** `!shotmap <player> <year> [--modern]`\n' +
+      '**Usage:** `!shotmap <player> <year> [endYear] [ps] [--modern]`\n' +
       '**Examples:**\n' +
-      '`!shotmap LeBron James 2024`\n' +
-      '`!shotmap Goran Dragic 2019`\n' +
+      '`!shotmap LeBron James 2024` — 2023-24 regular season\n' +
+      '`!shotmap LeBron James 2024 ps` — 2023-24 playoffs\n' +
+      '`!shotmap Theo Ratliff 1998 2001` — 1997-98 through 2000-01\n' +
       '`!shotmap Steph Curry 2023 --modern`'
     );
   }
@@ -435,31 +404,41 @@ client.on('messageCreate', async (message) => {
   if (!content.startsWith('!shotmap ') && !content.startsWith('!shotchart ')) return;
 
   const parts = content.split(/\s+/);
-  let playerParts = [], year = null, modern = false;
+  let playerParts = [], years = [], modern = false, playoff = false;
 
   for (let i = 1; i < parts.length; i++) {
     if (parts[i] === '--modern') modern = true;
-    else if (/^\d{4}$/.test(parts[i])) year = parts[i];
+    else if (parts[i].toLowerCase() === 'ps') playoff = true;
+    else if (/^\d{4}$/.test(parts[i])) years.push(parts[i]);
     else playerParts.push(parts[i]);
   }
 
-  if (!year)
+  if (years.length === 0)
     return message.reply('Please include a year. Example: `!shotmap LeBron James 2024`');
   if (!playerParts.length)
     return message.reply('Please include a player name. Example: `!shotmap LeBron James 2024`');
+  if (parseInt(years[0]) < 1997)
+    return message.reply('Shot data is only available from the **1996-97** season onwards. Please use a year of **1997** or later.');
 
   const playerName = playerParts.join(' ');
+  const yearStart = years[0];
+  const yearEnd = years.length > 1 ? years[years.length - 1] : null;
+  const yearLabel = yearEnd ? `${yearStart}-${yearEnd}` : yearStart;
+
   await message.react('⏳').catch(() => {});
 
   try {
-    const img = await generateShotmap(playerName, year, modern);
+    const img = await generateShotmap(playerName, yearStart, yearEnd, modern, playoff);
     await message.reply({
-      content: `Shotmap: **${playerName}** (${year})${modern ? ' - Modern' : ''}`,
-      files: [{ attachment: img, name: `shotmap_${playerName.replace(/\s+/g, '_')}_${year}.png` }],
+      content: `Shotmap: **${playerName}** (${yearLabel}${playoff ? ' Playoffs' : ''})${modern ? ' - Modern' : ''}`,
+      files: [{ attachment: img, name: `shotmap_${playerName.replace(/\s+/g, '_')}_${yearLabel}${playoff ? '_ps' : ''}.png` }],
     });
   } catch (err) {
     console.error('Error:', err.message);
-    await message.reply(`Error: ${err.message}`);
+    const msg = err.message.toLowerCase().includes('waiting failed') || err.message.toLowerCase().includes('exceeded')
+      ? 'The graph took too long to load. Try a shorter range of years.'
+      : `Error: ${err.message}`;
+    await message.reply(msg);
   }
 });
 
