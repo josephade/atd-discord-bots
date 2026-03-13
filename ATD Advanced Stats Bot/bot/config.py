@@ -1,37 +1,24 @@
-import os
+"""
+Bot configuration — loads .env and exposes shared constants/logger.
+"""
+
 import logging
+import os
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Discord Configuration
-DISCORD_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-DEFAULT_PREFIX = os.getenv('BOT_PREFIX', '!')
-ACTIVITY_TYPE = os.getenv('BOT_ACTIVITY_TYPE', 'watching')
-ACTIVITY_NAME = os.getenv('BOT_ACTIVITY_NAME', 'NBA | {prefix}helpadvanced')
+# ── Discord ────────────────────────────────────────────────────────────────────
+DISCORD_TOKEN: str | None = os.getenv("DISCORD_TOKEN")
 
-# Logging Configuration
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+# ── NBA ────────────────────────────────────────────────────────────────────────
+DEFAULT_SEASON = "2024-25"
+NBA_RATE_DELAY  = 0.6          # seconds between NBA API calls to avoid rate limits
 
-# Cache Configuration
-CACHE_ENABLED = os.getenv('CACHE_ENABLED', 'true').lower() == 'true'
-CACHE_TIMEOUT = int(os.getenv('CACHE_TIMEOUT', '3600'))
-
-# NBA API Configuration
-NBA_API_TIMEOUT = int(os.getenv('NBA_API_TIMEOUT', '30'))
-NBA_API_RETRIES = int(os.getenv('NBA_API_RETRIES', '3'))
-
-# File paths
-CONFIG_FILE = 'data/guild_configs.json'
-
-# Validate required environment variables
-if not DISCORD_TOKEN:
-    raise ValueError("DISCORD_BOT_TOKEN not found in .env file!")
-
-# Set up logging
+# ── Logger ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nba-bot")

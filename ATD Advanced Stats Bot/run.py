@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """
-NBA Stats Bot - Main entry point
+ATD Advanced Stats Bot - Entry point.
+Runs the Node.js bot (bot.js) via subprocess.
 """
 
-from bot.bot_instance import StatsBot
-from bot.config import DISCORD_TOKEN, logger
+import subprocess
+import sys
+import os
 
-def main():
-    """Main function to run the bot"""
-    if not DISCORD_TOKEN:
-        logger.error("No Discord token found! Please check your .env file.")
-        return
-    
-    logger.info("Starting NBA Stats Bot...")
-    bot = StatsBot()
-    bot.run(DISCORD_TOKEN)
-
-if __name__ == "__main__":
-    main()
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+result = subprocess.run(["node", "bot.js"], check=False)
+sys.exit(result.returncode)
