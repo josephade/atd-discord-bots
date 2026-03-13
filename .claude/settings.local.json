@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import nba_api.stats.endpoints as e; print\\([x for x in dir\\(e\\) if ''dashboard'' in x.lower\\(\\) or ''gamelog'' in x.lower\\(\\) or ''standing'' in x.lower\\(\\) or ''onoff'' in x.lower\\(\\) or ''wowy'' in x.lower\\(\\) or ''vsvs'' in x.lower\\(\\) or ''vsplayer'' in x.lower\\(\\)]\\)\")",
+      "Bash(python -c \"import nba_api.stats.endpoints as e; print\\([x for x in dir\\(e\\) if ''leaguedash'' in x.lower\\(\\) or ''career'' in x.lower\\(\\)]\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(find \"ATD Advanced Stats Bot\" -name \"*.pyc\" -path \"*/models/*\" -delete)",
+      "Bash(find \"ATD Advanced Stats Bot\" -name \"*.pyc\" -path \"*/cogs/*\" -delete)",
+      "Bash(find \"ATD Advanced Stats Bot\" -name \"*.pyc\" -delete)",
+      "WebFetch(domain:databallr.com)",
+      "WebSearch",
+      "Bash(python -c \"import playwright; print\\(''playwright available''\\)\")",
+      "Bash(python -c \"from nba_api.stats.static import players, teams; p = next\\(x for x in players.get_players\\(\\) if x[''full_name'']==''LeBron James''\\); print\\(''LeBron id:'', p[''id'']\\)\")",
+      "Bash(npm install:*)",
+      "Bash(python generate-data.py)",
+      "Bash(node -e \":*)",
+      "Bash(ls -lh \"C:\\\\Users\\\\josep\\\\OneDrive\\\\Desktop\\\\atd-discord-bots\\\\ATD Advanced Stats Bot\"/*.js \"C:\\\\Users\\\\josep\\\\OneDrive\\\\Desktop\\\\atd-discord-bots\\\\ATD Advanced Stats Bot\"/*.py \"C:\\\\Users\\\\josep\\\\OneDrive\\\\Desktop\\\\atd-discord-bots\\\\ATD Advanced Stats Bot\"/*.json)",
+      "Bash(node -e \"process.chdir\\(''ATD Advanced Stats Bot''\\); const { findPlayer, parseSeason, parsePlayerArgs, parseWowyArgs } = require\\(''./lookup.js''\\); console.log\\(''LeBron:'', JSON.stringify\\(findPlayer\\(''lebron james''\\)\\)\\); console.log\\(''Kobe:'', JSON.stringify\\(findPlayer\\(''kobe bryant''\\)\\)\\); console.log\\(''parsePlayerArgs:'', JSON.stringify\\(parsePlayerArgs\\(''Stephen Curry 2016''\\)\\)\\); console.log\\(''parseWowyArgs:'', JSON.stringify\\(parseWowyArgs\\(''LeBron James | Anthony Davis 2020''\\)\\)\\);\")",
+      "Bash(node -e \"process.chdir\\(''C:/Users/josep/OneDrive/Desktop/atd-discord-bots/ATD Advanced Stats Bot''\\); const { findPlayer, parseSeason, parsePlayerArgs, parseWowyArgs } = require\\(''./lookup.js''\\); console.log\\(''LeBron:'', JSON.stringify\\(findPlayer\\(''lebron james''\\)\\)\\); console.log\\(''Kobe:'', JSON.stringify\\(findPlayer\\(''kobe bryant''\\)\\)\\); console.log\\(''parsePlayerArgs:'', JSON.stringify\\(parsePlayerArgs\\(''Stephen Curry 2016''\\)\\)\\); console.log\\(''parseWowyArgs:'', JSON.stringify\\(parseWowyArgs\\(''LeBron James | Anthony Davis 2020''\\)\\)\\);\")",
+      "Bash(node --check \"ATD Advanced Stats Bot/bot.js\")",
+      "Bash(node --check \"C:/Users/josep/OneDrive/Desktop/atd-discord-bots/ATD Advanced Stats Bot/bot.js\")",
+      "WebFetch(domain:nbavisuals.com)",
+      "Read(//c/Users/jong/OneDrive/Desktop/atd-discord-bots/**)",
+      "Bash(node --check bot.js)",
+      "Bash(node test.js)"
+    ]
+  }
+}
