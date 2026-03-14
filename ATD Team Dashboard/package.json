@@ -1,0 +1,15 @@
+{
+  "name": "atd-team-dashboard-bot",
+  "version": "1.0.0",
+  "description": "NBA team dashboard bot using nbavisuals.com",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "puppeteer": "^21.5.2"
+  }
+}
