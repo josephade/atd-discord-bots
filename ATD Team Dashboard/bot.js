@@ -143,6 +143,25 @@ async function waitForTabCharts(page, tab, timeout = 30000) {
   throw new Error(`Charts for "${tab}" tab did not render within ${timeout / 1000}s`);
 }
 
+// ── Persistent browser ────────────────────────────────────────────────────────
+let _browser = null;
+
+async function getBrowser() {
+  if (!_browser || !_browser.isConnected()) {
+    _browser = await puppeteer.launch({
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ],
+      headless: 'new',
+    });
+    log('INFO', 'Browser launched');
+  }
+  return _browser;
+}
+
 // ── Main chart generation ─────────────────────────────────────────────────────
 async function generateTeamCharts(team, season, tab, seasonType) {
   const t0 = Date.now();
@@ -158,18 +177,10 @@ async function generateTeamCharts(team, season, tab, seasonType) {
 
   log('INFO', `Starting   [${team} / ${season} / ${tab} / ${seasonType}]`);
 
-  const browser = await puppeteer.launch({
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-    ],
-    headless: 'new',
-  });
+  const browser = await getBrowser();
+  const page = await browser.newPage();
 
   try {
-    const page = await browser.newPage();
     await page.setViewport({ width: 1600, height: 900 });
 
     // ── 1. Load the page ─────────────────────────────────────────────────────
@@ -249,7 +260,7 @@ async function generateTeamCharts(team, season, tab, seasonType) {
     return screenshots;
 
   } finally {
-    await browser.close();
+    await page.close();
   }
 }
 
@@ -322,18 +333,25 @@ client.on('messageCreate', async (message) => {
     await thinking.edit({
       content: `**${tabDef.label}** — **${team}** (${seasonLabel})`,
       files,
-    });
+    }).catch(() => message.reply({
+      content: `**${tabDef.label}** — **${team}** (${seasonLabel})`,
+      files,
+    }));
     log('INFO', `Delivered  !team ${team} ${tab} → ${message.author.tag} (${files.length} charts)`);
   } catch (err) {
     log('ERROR', `!team ${team} ${tab} — ${err.message}`);
-    await thinking.edit(`Error: ${err.message}`);
+    await thinking.edit(`Error: ${err.message}`).catch(() => message.reply(`Error: ${err.message}`));
   }
 });
+
+client.on('error', err => log('ERROR', `Discord client error: ${err.message}`));
 
 client.once('ready', () => {
   log('INFO', `Online     ${client.user.tag}`);
   log('INFO', `Commands   !team <TEAM> [year] <tab>   |   !team help`);
   log('INFO', `Tabs       offense  defense  shooting  lineups`);
+  // Pre-launch browser so the first request doesn't pay the startup cost
+  getBrowser().catch(err => log('ERROR', `Browser pre-launch failed: ${err.message}`));
 });
 
 if (!process.env.DISCORD_BOT_TOKEN) {
