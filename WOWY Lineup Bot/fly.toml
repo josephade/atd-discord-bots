@@ -1,0 +1,18 @@
+app = 'wowy-lineup-bot'
+primary_region = 'lhr'
+kill_signal = 'SIGINT'
+kill_timeout = '30s'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[build.args]
+  BUILDKIT_INLINE_CACHE = "1"
+
+[[mounts]]
+  source = 'wowy_cache'
+  destination = '/cache'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1024'
