@@ -285,15 +285,21 @@ class DraftManager:
                 if not positions:
                     positions = POSITION_ORDER   # fallback: try all positions
                 placed = False
+                # Prefer an open starter slot across all positions before any bench slot.
+                # e.g. Havlicek (SG/SF) with SG starter taken → goes to SF starter, not SG bench.
                 for pos in positions:
-                    for slot_type in ('starter', 'bench'):
-                        key = (slot_type, pos)
+                    key = ('starter', pos)
+                    if key not in slots:
+                        slots[key] = player
+                        placed = True
+                        break
+                if not placed:
+                    for pos in positions:
+                        key = ('bench', pos)
                         if key not in slots:
                             slots[key] = player
                             placed = True
                             break
-                    if placed:
-                        break
                 if not placed:
                     unplaced.append(player)
 

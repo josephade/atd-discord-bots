@@ -493,6 +493,50 @@ BALL_DOMINANT: set[str] = {
     "Dwyane Wade", "Tiny Archibald", "Ja Morant", "John Wall", "Derrick Rose",
     "Giannis Antetokounmpo", "Tracy McGrady", "Penny Hardaway",
     "Gilbert Arenas", "Baron Davis",
+    # Isolation-first wings who need the ball to generate offense
+    "Dominique Wilkins", "Elgin Baylor", "Tracy McGrady",
+    # High-usage guards who dominate the ball — can't easily share with another ball-dominant PG
+    "Darius Garland", "De'Aaron Fox", "Kyrie Irving", "LaMelo Ball",
+    "Tyrese Maxey", "Kemba Walker", "Stephen Curry",
+    "Shai Gilgeous-Alexander", "Cade Cunningham", "Zach LaVine",
+}
+
+# ── Shot creators / go-to scorers ────────────────────────────────────────────
+# Players who can reliably create their own shot and score at a high clip —
+# the "go-to guy" concept. Every team needs at least one.
+# Broader than BALL_DOMINANT: includes prolific wing/big scorers who aren't
+# necessarily full-time ball-handlers (Gervin, Kawhi, Dirk, Carmelo, etc.).
+SHOT_CREATORS: set[str] = {
+    # Elite ball-dominant creators (Tier 1-2)
+    "Michael Jordan", "Kobe Bryant", "LeBron James", "Magic Johnson",
+    "Oscar Robertson", "Allen Iverson", "Russell Westbrook", "James Harden",
+    "Carmelo Anthony", "Isiah Thomas", "Damian Lillard", "Trae Young",
+    "Luka Doncic", "Dwyane Wade", "Ja Morant", "John Wall", "Derrick Rose",
+    "Giannis Antetokounmpo", "Tracy McGrady", "Penny Hardaway",
+    "Gilbert Arenas", "Tiny Archibald",
+    "Kevin Durant", "Kawhi Leonard", "Stephen Curry", "Dirk Nowitzki",
+    "Charles Barkley", "Karl Malone", "Hakeem Olajuwon", "Shaquille O'Neal",
+    "Kareem Abdul-Jabbar", "Wilt Chamberlain",
+    "Julius Erving", "Elgin Baylor", "Rick Barry", "George Gervin",
+    "Dominique Wilkins", "Clyde Drexler", "Paul Pierce", "Vince Carter", "Jerry West",
+    "Shai Gilgeous-Alexander", "Anthony Davis", "Joel Embiid", "Nikola Jokic",
+    "Jayson Tatum", "Anthony Edwards", "Devin Booker", "Donovan Mitchell",
+    "Bradley Beal", "Mitch Richmond", "Kyrie Irving",
+    "Bob McAdoo", "Alex English", "Bernard King", "David Thompson",
+    "Moses Malone", "David Robinson", "Patrick Ewing",
+    "LaMarcus Aldridge", "Kevin Johnson", "Brandon Roy", "Jalen Williams",
+    "Deron Williams", "Shawn Kemp", "Kemba Walker", "Jamal Murray", "Jaylen Brown", "Manu Ginobili",
+    "Paul George", "Jimmy Butler", "Cade Cunningham",
+    "Pascal Siakam", "Brandon Ingram", "Zion Williamson", "James Worthy",
+    "Rashard Lewis", "Joe Johnson", "Jamal Mashburn", "Reggie Lewis", "Reggie Miller", "Ray Allen",
+    # Tier 3+ self-creators — break down defense off the dribble / post
+    "Marques Johnson", "Victor Oladipo", "Jalen Brunson",
+    "Danny Granger", "Chris Webber", "Desmond Bane", "Michael Finley",
+    "Blake Griffin", "Chet Walker", "Kiki VanDeWeghe", "Connie Hawkins",
+    "Walter Davis", "Steve Smith", "Michael Redd", "Billy Cunningham",
+    "Glen Rice", "Tony Parker", "Dale Ellis", "Detlef Schrempf",
+    "Isaiah Thomas", "Jason Terry", "Zach LaVine", "LaMelo Ball",
+    "Hedo Turkoglu",
 }
 
 # ── Three-point / spot-up shooters ──────────────────────────────────────────
@@ -542,15 +586,27 @@ HIGH_PORTABILITY: set[str] = {
     "Nikola Jokic", "Pascal Siakam"
 }
 
-# ── Non-scoring bigs ─────────────────────────────────────────────────────────
-# Players whose value comes from defense/rebounding/passing — not scoring.
-# Drafting two of these creates a frontcourt that can't generate offense.
+# ── Non-scoring / defensive specialists ──────────────────────────────────────
+# Players whose value is primarily defense/rebounding/passing — not scoring.
+# Drafting two of these (regardless of position) leaves the bench without a
+# scoring punch. The AI penalises a second non-scorer on the same team.
 NON_SCORING_BIGS: set[str] = {
+    # Defensive bigs
     "Draymond Green", "Ben Wallace", "Dennis Rodman", "Dikembe Mutombo",
     "Rudy Gobert", "Joakim Noah", "Horace Grant", "Bill Walton", "Evan Mobley",
     "Marc Gasol", "Al Horford", "Robert Parish", "Dave Cowens", "Jaren Jackson Jr.",
-    "Chet Holmgren", "Bobby Jones", "Paul Millsap", "Bam Adebayo", "Artis Gilmore" ,
-    "Andrew Bogut", "Sam Lacey", "Arvydas Sabonis", "Bo Outlaw", "Brook Lopez", "Robert Williams"
+    "Chet Holmgren", "Bobby Jones", "Paul Millsap", "Bam Adebayo", "Artis Gilmore",
+    "Andrew Bogut", "Sam Lacey", "Arvydas Sabonis", "Bo Outlaw", "Brook Lopez",
+    "Robert Williams", "Tyson Chandler", "Andrew Bogut", "Jarrett Allen",
+    # Non-scoring wings/forwards
+    "Shawn Marion",
+    # Defensive wing / guard specialists (non-scorers)
+    "Ron Artest", "Alex Caruso", "Marcus Smart", "André Iguodala",
+    "Michael Cooper", "Shane Battier", "Danny Green", "Herb Jones",
+    "Mikal Bridges", "OG Anunoby", "Jaden McDaniels",
+    "Derek Harper", "Jerome Kersey", "Tayshaun Prince", "Bruce Bowen",
+    "Luol Deng", "Tony Allen", "Patrick Beverley", "Alec Burks",
+    "Rodney McCray", "Paul Pressey", "Quinn Buckner", "Maurice Cheeks",
 }
 
 # ── Soft bigs ─────────────────────────────────────────────────────────────────
@@ -576,8 +632,8 @@ IMMOBILE_CENTERS: set[str] = {
     "Antawn Jamison", "Chris Webber", "Larry Kenon", "Shaquille O'Neal", "Nikola Jokic",
     "Moses Malone", "Bob Lanier", "Kevin Love", "Lauri Markkanen", "David West", "Blake Griffin",
     "Brad Daugherty", "Bob Pettit", "Vlade Divac", "Yao Ming", "Brad Miller", 
-    "Shaquille O'Neal", "George Mikan", "Dwight Howard","Artis Gilmore",
-    "Bob Lanier", "Wayne Embry",
+    "Shaquille O'Neal", "Dwight Howard","Artis Gilmore",
+    "Bob Lanier"
 }
 
 # ── Versatile defenders ───────────────────────────────────────────────────────
@@ -593,6 +649,35 @@ VERSATILE_DEFENDERS: set[str] = {
     "Ben Wallace", "Victor Wembanyama", "Tim Duncan",
 }
 
+# ── Good-to-elite perimeter defenders ────────────────────────────────────────
+# Guards and wings who can credibly guard the perimeter.
+# Used to detect weak defensive backcourts: if 2+ of the starting PG/SG/SF
+# are NOT on this list, the team needs defensive compensation via the frontcourt
+# and bench.
+PERIMETER_DEFENDERS: set[str] = {
+    # Elite guard defenders
+    "Michael Jordan", "Jerry West", "Kobe Bryant", "Dwyane Wade",
+    "Shai Gilgeous-Alexander", "Chris Paul", "Oscar Robertson",
+    "Walt Frazier", "Manu Ginobili", "Chauncey Billups",
+    "Sidney Moncrief", "Terry Porter", "Kyle Lowry", "Jason Kidd",
+    "Russell Westbrook", "Joe Dumars", "Gary Payton", "Victor Oladipo",
+    "John Stockton", "Mike Conley", "Jrue Holiday", "Michael Cooper",
+    "Derek Harper", "Paul Pressey", "Derrick White", "Baron Davis",
+    "Gus Williams", "Dennis Johnson", "Ron Harper", "Cade Cunningham",
+    "George Hill", "Lonzo Ball", "John Wall", "Maurice Cheeks",
+    "Kirk Hinrich", "Marcus Smart", "Alex Caruso", "Mookie Blaylock",
+    "Nate McMillan", "Brian Taylor", "Phil Smith", "Amen Thompson",
+    # Wing and forward perimeter defenders
+    "Kawhi Leonard", "Paul George", "Jimmy Butler", "Paul Pierce",
+    "John Havlicek", "Vince Carter", "Klay Thompson", "Eddie Jones",
+    "Jaylen Brown", "Andre Iguodala", "Dan Majerle", "Jalen Williams",
+    "Mikal Bridges", "Doug Christie", "Danny Green", "Reggie Lewis",
+    "Nicolas Batum", "Latrell Sprewell", "Wesley Matthews", "Bobby Phills",
+    "Andrew Wiggins", "Josh Howard", "Scott Wedman", "Gary Harris",
+    "Herb Jones", "Jerry Sloan", "Caron Butler", "Dorian Finney-Smith",
+    "Trey Murphy",
+}
+
 # ── Elite rim protectors ──────────────────────────────────────────────────────
 # Shot-blockers and defensive anchors who protect the paint.
 # Every team needs at least one — if none are on the roster by round 5,
@@ -602,10 +687,12 @@ ELITE_RIM_PROTECTORS: set[str] = {
     "Dikembe Mutombo", "Rudy Gobert", "Anthony Davis", "Victor Wembanyama",
     "Ben Wallace", "David Robinson", "Alonzo Mourning", "Joel Embiid",
     "Patrick Ewing", "Nate Thurmond", "Wes Unseld", "Artis Gilmore",
-    "Dwight Howard", "Joakim Noah", "Evan Mobley", "Giannis Antetokounmpo", "Kareem Abdul-Jabbar",
-    "Wilt Chamberlain", "Bill Walton", "Joel Embiid", "Shawn Kemp", "Willis Reed", "Jaren Jackson Jr.", 
-    "Chet Holmgren", "Jack Sikma", "Tyson Chandler", "Jarrett Allen", "Andrew Bogut", "Jermaine O'Neal",
-    "Brook Lopez", "Robert Williams", "Serge Ibaka", "Nicolas Claxton", 
+    "Dwight Howard", "Joakim Noah", "Evan Mobley", "Giannis Antetokounmpo",
+    "Kareem Abdul-Jabbar",
+    "Wilt Chamberlain", "Bill Walton", "Shawn Kemp", "Willis Reed",
+    "Jaren Jackson Jr.", "Chet Holmgren", "Jack Sikma", "Tyson Chandler",
+    "Jarrett Allen", "Andrew Bogut", "Jermaine O'Neal",
+    "Robert Williams", "Serge Ibaka", 
 }
 
 
@@ -646,7 +733,36 @@ DO_NOT_DRAFT: set[str] = {
     "Rik Smits", "Brian Winters", "JoJo White", "Mychal Thompson",
     "Rudy Tomjanovich", "Jay Vincent", "Vin Baker", "Andrew Toney",
     "Lucius Allen", "Paul Arizin", "Wally Szczerbiak", "Doug Collins",
-    "Tom Gola",
+    "Tom Gola", "Thabo Sefolosha",
+}
+
+
+# ── Elite playmakers / floor generals ────────────────────────────────────────
+# Players who elevate the offense and make good offensive players around them better.
+# Some are pass-first (Nash, Stockton, Kidd), others are ball-dominant (LeBron, Magic).
+# The common thread: elite court vision, decision-making, and ability to organise an offense.
+ELITE_PLAYMAKERS: set[str] = {
+    "Magic Johnson", "Chris Paul", "Steve Nash", "John Stockton",
+    "Jason Kidd", "Oscar Robertson", "Isiah Thomas", "LeBron James",
+    "Nikola Jokic",
+}
+
+# ── PnR creators ─────────────────────────────────────────────────────────────
+# Guards and wings who use pick-and-roll as a primary weapon.
+# These players need a C/PF who can screen and finish at the rim or pop for a
+# jumper. Without a scoring big, this part of their offense is neutralised.
+PNR_CREATORS: set[str] = {
+    # Pass-first playmakers — ran deadly PnR systems
+    "Magic Johnson", "Chris Paul", "Steve Nash", "John Stockton",
+    "Jason Kidd", "Oscar Robertson", "Isiah Thomas",
+    "James Harden", "Luka Doncic", "Damian Lillard",
+    "Shai Gilgeous-Alexander", "Russell Westbrook",
+    "Allen Iverson", "Dwyane Wade", "Trae Young", "Ja Morant",
+    "Penny Hardaway", "Gilbert Arenas", "Baron Davis",
+    "Deron Williams", "Gary Payton", "Derrick Rose",
+    "John Wall", "Kemba Walker", "LeBron James", "Giannis Antetokounmpo","Chauncey Billups",
+    "Mark Price", "Tyrese Haliburton", "Jalen Brunson", "Mike Conley", "Kyle Lowry", "Fred VanVleet",
+     "Jamal Murray", "Goran Dragic", "Darius Garland", "Isaiah Thomas", "Sleepy Floyd", "Sam Cassell", "Terry Porter",
 }
 
 
@@ -675,6 +791,10 @@ def is_ball_dominant(player: str) -> bool:
     return any(p.lower() == player.lower() for p in BALL_DOMINANT)
 
 
+def is_shot_creator(player: str) -> bool:
+    return any(p.lower() == player.lower() for p in SHOT_CREATORS)
+
+
 def is_high_portability(player: str) -> bool:
     return any(p.lower() == player.lower() for p in HIGH_PORTABILITY)
 
@@ -695,8 +815,20 @@ def is_versatile_defender(player: str) -> bool:
     return any(p.lower() == player.lower() for p in VERSATILE_DEFENDERS)
 
 
+def is_perimeter_defender(player: str) -> bool:
+    return any(p.lower() == player.lower() for p in PERIMETER_DEFENDERS)
+
+
 def is_elite_rim_protector(player: str) -> bool:
     return any(p.lower() == player.lower() for p in ELITE_RIM_PROTECTORS)
+
+
+def is_elite_playmaker(player: str) -> bool:
+    return any(p.lower() == player.lower() for p in ELITE_PLAYMAKERS)
+
+
+def is_pnr_creator(player: str) -> bool:
+    return any(p.lower() == player.lower() for p in PNR_CREATORS)
 
 
 def is_do_not_draft(player: str) -> bool:

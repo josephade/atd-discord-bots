@@ -703,7 +703,7 @@ PLAYER_POSITIONS = {
     "Bradley Beal":              "SG",
     "Klay Thompson":             "SG",
     "Andrew Wiggins":            "SF/SG",
-    "Franz Wagner":              "SF/SG",
+    "Franz Wagner":              "SF/PF",
     "Mikal Bridges":             "SF/SG",
     "OG Anunoby":                "SF/SG",
     "Lu Dort":                   "SG/SF",
@@ -739,4 +739,5 @@ PLAYER_POSITIONS = {
     "Ron Artest":                "SF",
     "Tony Parker":                "PG",
     "John Collins":              "PF",
+    "Richard Hamilton":        "SG/SF",
 }

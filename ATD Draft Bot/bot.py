@@ -52,8 +52,39 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# One draft at a time
-_draft: DraftManager = DraftManager()
+# One DraftManager per channel/thread — keyed by channel ID.
+# Cleaned up when a draft finishes or is cancelled.
+_drafts: dict[int, DraftManager] = {}
+_draft_tasks: dict[int, asyncio.Task] = {}
+
+
+# ── Channel guard ─────────────────────────────────────────────────────────────
+
+def _is_draft_channel(channel: discord.abc.MessageableChannel) -> bool:
+    """
+    Returns True if the channel is allowed to run drafts:
+      - the main DRAFT_CHANNEL_ID channel, OR
+      - any thread whose parent channel is DRAFT_CHANNEL_ID.
+    """
+    if channel.id == DRAFT_CHANNEL_ID:
+        return True
+    if isinstance(channel, discord.Thread) and channel.parent_id == DRAFT_CHANNEL_ID:
+        return True
+    return False
+
+
+def _get_draft(channel_id: int) -> DraftManager:
+    """Return the DraftManager for this channel, creating one if needed."""
+    if channel_id not in _drafts:
+        _drafts[channel_id] = DraftManager()
+    return _drafts[channel_id]
+
+
+def _remove_draft(channel_id: int) -> None:
+    _drafts.pop(channel_id, None)
+    task = _draft_tasks.pop(channel_id, None)
+    if task and not task.done():
+        task.cancel()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -114,11 +145,11 @@ async def _announce_pick(channel, pick_num: int, team, player: str, auto: bool =
     await channel.send(f"**{pick_num}.** {team.emoji} {player}{suffix}")
 
 
-async def _run_draft(channel: discord.TextChannel):
+async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
     """
     Core draft loop.  Runs until all picks are complete, then writes results.
+    Each thread/channel gets its own DraftManager passed in directly.
     """
-    dm = _draft
     total = dm.total_picks
 
     while not dm.is_complete():
@@ -143,14 +174,16 @@ async def _run_draft(channel: discord.TextChannel):
                 team.picks, available,
                 player_adp=dm.player_adp,
                 pool_size=len(dm.player_pool),
+                overall_pick=dm.pick_number,
+                num_teams=dm.total_teams,
             )
             dm.record_pick(player)
-            print(f"[Draft] Pick #{pick_num:>3} | AI   | {team.name:<28} | {player}")
+            print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | AI   | {team.name:<28} | {player}")
             await _announce_pick(channel, pick_num, team, player)
             continue
 
         # ── Human pick ───────────────────────────────────────────────────
-        print(f"[Draft] Pick #{pick_num:>3} | Human | {team.name:<28} | waiting…")
+        print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | Human | {team.name:<28} | waiting…")
         await channel.send(
             f"🎯 Pick **#{pick_num}** — {team.emoji} **{team.name}** "
             f"(<@{team.owner_id}>)\n"
@@ -165,8 +198,6 @@ async def _run_draft(channel: discord.TextChannel):
             )
 
         # Retry loop — user gets unlimited retries within the timeout window.
-        # Each bad pick resets the per-message timer, but the overall deadline
-        # is fixed from when the pick prompt was sent.
         player = None
         deadline = asyncio.get_event_loop().time() + PICK_TIMEOUT_SECONDS
 
@@ -203,12 +234,12 @@ async def _run_draft(channel: discord.TextChannel):
 
         if player:
             dm.record_pick(player)
-            print(f"[Draft] Pick #{pick_num:>3} | Human | {team.name:<28} | {player}")
+            print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | Human | {team.name:<28} | {player}")
             await _announce_pick(channel, pick_num, team, player)
         else:
-            player = ai_drafter.pick(team.picks, available, player_adp=dm.player_adp, pool_size=len(dm.player_pool))
+            player = ai_drafter.pick(team.picks, available, player_adp=dm.player_adp, pool_size=len(dm.player_pool), overall_pick=dm.pick_number, num_teams=dm.total_teams)
             dm.record_pick(player)
-            print(f"[Draft] Pick #{pick_num:>3} | Auto  | {team.name:<28} | {player} (timeout)")
+            print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | Auto  | {team.name:<28} | {player} (timeout)")
             await _announce_pick(channel, pick_num, team, player, auto=True)
 
     # ── Draft complete ────────────────────────────────────────────────────
@@ -233,19 +264,71 @@ async def _run_draft(channel: discord.TextChannel):
             embed.add_field(name=f"Pick {i}", value=p, inline=True)
         await channel.send(embed=embed)
 
-    dm.state = DraftState.IDLE
+    # Clean up — free the slot so a new draft can start in this thread
+    _remove_draft(channel.id)
+
+
+async def _run_draft_sim(channel: discord.TextChannel, dm: DraftManager):
+    """
+    Fast-sim all remaining picks to the end.
+    Every team is treated as AI — no delays, no waiting for human input.
+    """
+    while not dm.is_complete():
+        team     = dm.current_team
+        pick_num = dm.pick_number
+        rnd      = dm.round_number
+
+        if (pick_num - 1) % dm.total_teams == 0:
+            await channel.send(
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏀 **Round {rnd} of {ROUNDS}**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+
+        available = dm.available_players
+        player = ai_drafter.pick(
+            team.picks, available,
+            player_adp=dm.player_adp,
+            pool_size=len(dm.player_pool),
+            overall_pick=dm.pick_number,
+            num_teams=dm.total_teams,
+        )
+        dm.record_pick(player)
+        print(f"[Sim:{channel.id}] Pick #{pick_num:>3} | {team.name:<28} | {player}")
+        await _announce_pick(channel, pick_num, team, player)
+
+    dm.state = DraftState.COMPLETE
+    await channel.send("✅ **Sim complete!** Writing results to Google Sheets…")
+
+    try:
+        tab = dm.write_results()
+        await channel.send(f"📋 Results saved to tab **`{tab}`**.")
+    except Exception as e:
+        await channel.send(f"❌ Failed to write results: {e}")
+
+    for team in dm.teams:
+        embed = discord.Embed(title=f"{team.emoji} {team.name}", color=0x2ecc71)
+        owner_tag = "🤖 AI" if team.is_ai else f"<@{team.owner_id}>"
+        embed.set_author(name=owner_tag)
+        for i, p in enumerate(team.picks, 1):
+            embed.add_field(name=f"Pick {i}", value=p, inline=True)
+        await channel.send(embed=embed)
+
+    _remove_draft(channel.id)
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 @bot.command(name='draft')
 async def draft_cmd(ctx: commands.Context):
-    """Start an ATD draft session."""
-    if ctx.channel.id != DRAFT_CHANNEL_ID:
+    """Start an ATD draft session in this channel or thread."""
+    if not _is_draft_channel(ctx.channel):
         return
 
-    if _draft.state != DraftState.IDLE:
-        await ctx.send("⚠️ A draft is already in progress. Use `!draftcancel` to cancel it.")
+    dm = _get_draft(ctx.channel.id)
+
+    if dm.state != DraftState.IDLE:
+        await ctx.send("⚠️ A draft is already in progress here. Use `!draftcancel` to cancel it.")
         return
 
     def _same_author(m: discord.Message) -> bool:
@@ -263,6 +346,7 @@ async def draft_cmd(ctx: commands.Context):
             raise ValueError
     except (asyncio.TimeoutError, ValueError):
         await ctx.send("❌ Invalid input — draft cancelled.")
+        _remove_draft(ctx.channel.id)
         return
 
     # ── Step 2: Human players ─────────────────────────────────────────────
@@ -277,6 +361,7 @@ async def draft_cmd(ctx: commands.Context):
             raise ValueError
     except (asyncio.TimeoutError, ValueError):
         await ctx.send("❌ Invalid input — draft cancelled.")
+        _remove_draft(ctx.channel.id)
         return
 
     # ── Step 3: Collect human player mentions ────────────────────────────
@@ -295,32 +380,33 @@ async def draft_cmd(ctx: commands.Context):
                     f"❌ Expected {human_count} mentions, got {len(human_ids)}. "
                     "Draft cancelled."
                 )
+                _remove_draft(ctx.channel.id)
                 return
         except asyncio.TimeoutError:
             await ctx.send("❌ Timed out — draft cancelled.")
+            _remove_draft(ctx.channel.id)
             return
 
     # ── Step 4: Load player pool ─────────────────────────────────────────
     await ctx.send("⏳ Loading player pool from Google Sheets…")
     try:
-        count = _draft.load_player_pool()
+        count = dm.load_player_pool()
         if count == 0:
             await ctx.send("❌ Player pool is empty — check the spreadsheet tab name.")
+            _remove_draft(ctx.channel.id)
             return
         await ctx.send(f"✅ Loaded **{count} players** from the pool.")
     except Exception as e:
         await ctx.send(f"❌ Failed to load player pool: {e}")
+        _remove_draft(ctx.channel.id)
         return
 
     # ── Step 5: Assign teams, resolve guild emojis, display draft board ──
-    _draft.setup(total_teams, human_ids)
+    dm.setup(total_teams, human_ids)
 
-    # Resolve server custom emojis for each team.
-    # Tries each candidate name (case-insensitive) and uses the first match.
-    # Falls back to 🏀 if no custom emoji exists in the server for that team.
     guild_emojis_by_name = {e.name.lower(): e for e in ctx.guild.emojis}
 
-    for team in _draft.teams:
+    for team in dm.teams:
         candidates = _TEAM_EMOJI_CANDIDATES.get(team.name, [])
         found = next(
             (str(guild_emojis_by_name[c.lower()])
@@ -328,10 +414,10 @@ async def draft_cmd(ctx: commands.Context):
             None
         )
         team.emoji = found if found else '🏀'
-        print(f"[Setup] Team: {team.name:<28} emoji={team.emoji} owner={team.owner_id or 'AI'}")
+        print(f"[Setup:{ctx.channel.id}] Team: {team.name:<28} emoji={team.emoji} owner={team.owner_id or 'AI'}")
 
     lines = ["**🏀 Draft Order:**"]
-    for i, team in enumerate(_draft.teams, 1):
+    for i, team in enumerate(dm.teams, 1):
         lines.append(f"{i}. {team.display()}")
     await ctx.send("\n".join(lines))
 
@@ -344,44 +430,102 @@ async def draft_cmd(ctx: commands.Context):
     await asyncio.sleep(5)
 
     # ── Step 6: Run the draft ─────────────────────────────────────────────
-    bot.loop.create_task(_run_draft(ctx.channel))
+    async def _run_draft_safe():
+        try:
+            await _run_draft(ctx.channel, dm)
+        except asyncio.CancelledError:
+            pass  # clean cancel via !draftcancel — no message needed
+        except Exception as exc:
+            print(f"[Draft:{ctx.channel.id}] FATAL ERROR: {exc}")
+            import traceback
+            traceback.print_exc()
+            _remove_draft(ctx.channel.id)
+            try:
+                await ctx.channel.send(
+                    f"❌ **Draft crashed** — `{exc}`\n"
+                    "Check the terminal for the full traceback. Use `!draft` to start a new draft."
+                )
+            except Exception:
+                pass
+
+    task = bot.loop.create_task(_run_draft_safe())
+    _draft_tasks[ctx.channel.id] = task
 
 
 @bot.command(name='draftcancel')
 async def draft_cancel(ctx: commands.Context):
-    """Cancel the current draft."""
-    if ctx.channel.id != DRAFT_CHANNEL_ID:
+    """Cancel the current draft in this channel/thread."""
+    if not _is_draft_channel(ctx.channel):
         return
-    if _draft.state == DraftState.IDLE:
-        await ctx.send("No draft is currently running.")
+    dm = _drafts.get(ctx.channel.id)
+    if dm is None or dm.state == DraftState.IDLE:
+        await ctx.send("No draft is currently running here.")
         return
-    _draft.state = DraftState.IDLE
-    _draft.__init__()   # reset all state
+    _remove_draft(ctx.channel.id)
     await ctx.send("🛑 Draft cancelled.")
+
+
+@bot.command(name='draftskip')
+async def draft_skip(ctx: commands.Context):
+    """Sim all remaining picks to the end with AI — no delays."""
+    if not _is_draft_channel(ctx.channel):
+        return
+    dm = _drafts.get(ctx.channel.id)
+    if dm is None or dm.state != DraftState.ACTIVE:
+        await ctx.send("No active draft here to skip.")
+        return
+
+    # Cancel the running task (may be mid-wait for a human pick) without
+    # removing the DraftManager — we want to continue from current pick.
+    task = _draft_tasks.pop(ctx.channel.id, None)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.sleep(0)   # yield so the cancelled task can clean up
+
+    await ctx.send("⏩ **Skipping to end** — simming all remaining picks with AI…")
+
+    async def _run_sim_safe():
+        try:
+            await _run_draft_sim(ctx.channel, dm)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[Sim:{ctx.channel.id}] FATAL ERROR: {exc}")
+            import traceback
+            traceback.print_exc()
+            _remove_draft(ctx.channel.id)
+            try:
+                await ctx.channel.send(f"❌ **Sim crashed** — `{exc}`")
+            except Exception:
+                pass
+
+    task = bot.loop.create_task(_run_sim_safe())
+    _draft_tasks[ctx.channel.id] = task
 
 
 @bot.command(name='draftboard')
 async def draft_board(ctx: commands.Context):
     """Show current rosters mid-draft."""
-    if ctx.channel.id != DRAFT_CHANNEL_ID:
+    if not _is_draft_channel(ctx.channel):
         return
-    if _draft.state != DraftState.ACTIVE:
-        await ctx.send("No active draft.")
+    dm = _drafts.get(ctx.channel.id)
+    if dm is None or dm.state != DraftState.ACTIVE:
+        await ctx.send("No active draft here.")
         return
-    for team in _draft.teams:
-        await ctx.send(embed=_team_roster_embed(team, _draft.pick_number, _draft.total_picks))
+    for team in dm.teams:
+        await ctx.send(embed=_team_roster_embed(team, dm.pick_number, dm.total_picks))
 
 
 @bot.command(name='draftpool')
 async def draft_pool(ctx: commands.Context):
     """Show remaining available players."""
-    if ctx.channel.id != DRAFT_CHANNEL_ID:
+    if not _is_draft_channel(ctx.channel):
         return
-    if _draft.state != DraftState.ACTIVE:
-        await ctx.send("No active draft.")
+    dm = _drafts.get(ctx.channel.id)
+    if dm is None or dm.state != DraftState.ACTIVE:
+        await ctx.send("No active draft here.")
         return
-    available = _draft.available_players
-    # Split into pages of 30
+    available = dm.available_players
     pages = [available[i:i+30] for i in range(0, len(available), 30)]
     for idx, page in enumerate(pages, 1):
         embed = discord.Embed(
@@ -395,8 +539,6 @@ async def draft_pool(ctx: commands.Context):
 @bot.command(name='drafthelp')
 async def draft_help(ctx: commands.Context):
     """Show all ATD Draft Bot commands and how the draft works."""
-    if ctx.channel.id != DRAFT_CHANNEL_ID:
-        return
 
     e = discord.Embed(
         title="🏀 ATD Draft Bot — Command Guide",
@@ -410,21 +552,27 @@ async def draft_help(ctx: commands.Context):
             "1. How many total teams? *(2–30)*\n"
             "2. How many are human players?\n"
             "3. Tag the human players (if more than 1)\n\n"
-            "Teams and NBA logos are assigned automatically. "
-            "Draft order is randomised, then uses a **snake format**."
+            "Works in the main draft channel **or any thread** created from it. "
+            "Multiple drafts can run simultaneously - one per thread."
         ),
         inline=False,
     )
 
     e.add_field(
         name="🛑 `!draftcancel`",
-        value="Cancel the current draft at any time. Clears all state.",
+        value="Cancel the draft running in **this** channel or thread.",
+        inline=False,
+    )
+
+    e.add_field(
+        name="⏩ `!draftskip`",
+        value="Sim the rest of the draft instantly — all remaining picks are made by AI with no delays. Useful for testing or finishing a draft fast.",
         inline=False,
     )
 
     e.add_field(
         name="📋 `!draftboard`",
-        value="Shows every team's current roster mid-draft — useful for checking fit before your pick.",
+        value="Shows every team's current roster mid-draft - useful for checking fit before your pick.",
         inline=False,
     )
 
@@ -441,48 +589,30 @@ async def draft_help(ctx: commands.Context):
     )
 
     e.add_field(
-        name="🎯 How to Make a Pick",
+        name="How to Make a Pick",
         value=(
             "When it's your turn the bot will tag you and give you **30 seconds**.\n"
             "Type your pick in this format:\n"
             "```\n<pick#>. <team-emoji> Player Name\n```\n"
             "**Example:** `5. 🗽 LeBron James`\n\n"
-            "• You can include a year at the end and it will be ignored — name is all that matters\n"
-            "• If you spell a name slightly wrong the bot will fuzzy-match it\n"
-            "• If the player is already drafted you'll be told and can pick again\n"
-            "• If you run out of time the bot auto-picks the best available player for your team"
         ),
         inline=False,
     )
 
     e.add_field(
-        name="🤖 How the AI Drafts",
+        name="🤖 How the AI Picks — Point System",
         value=(
-            "AI teams use the spreadsheet **ADP** (Average Draft Position) as their base value.\n"
-            "Lower ADP = picked earlier. On top of that the AI factors in:\n\n"
-            "• **Fit** — avoids stacking 3+ ball-dominant players\n"
-            "• **Positional need** — fills empty roster slots as rounds progress\n"
-            "• **Shooting** — prioritises adding a shooter if the team has none\n"
-            "• **Portability** — prefers players that work alongside any star in later rounds\n"
-            "• **Position limits** — never drafts a 3rd player at a position (2 slots max per spot)"
+            "Each player gets an **Effective ADP** - lower = picked sooner.\n\n"
+            "**~55% Base ADP** - players go roughly in ADP order.\n"
+            "**~20% Positional need** - starter slots fill before bench (+100 bench penalty).\n"
+            "**~15% Team fit** - penalises bad combos (ball-dominant stack, 2 non-scoring bigs, soft big duos) and rewards covering weaknesses.\n"
+            "**~6% Scoring** - every team needs 2-3 shot creators in the starting 5.\n"
+            "**~4% Tier/needs** - 1 player from each of the 10 tiers; rim protection; spacing."
         ),
         inline=False,
     )
 
-    e.add_field(
-        name="🗂️ Draft Format",
-        value=(
-            "**10 rounds**, snake order.\n"
-            "Round 1: picks go 1 → N\n"
-            "Round 2: picks go N → 1\n"
-            "Round 3: picks go 1 → N … and so on.\n\n"
-            "Each team ends up with **10 players** — 5 starters + 5 bench (one per position: PG SG SF PF C).\n"
-            "When the draft ends results are saved to Google Sheets automatically."
-        ),
-        inline=False,
-    )
-
-    e.set_footer(text="ATD Draft Bot • all commands only work in this channel")
+    e.set_footer(text="ATD Draft Bot • works in this channel and any thread off it")
     await ctx.send(embed=e)
 
 
@@ -495,6 +625,10 @@ async def on_ready():
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         pass
+    else:
+        print(f"[CommandError] {ctx.command}: {error}")
+        import traceback
+        traceback.print_exception(type(error), error, error.__traceback__)
 
 
 # ── Run ──────────────────────────────────────────────────────────────────────
