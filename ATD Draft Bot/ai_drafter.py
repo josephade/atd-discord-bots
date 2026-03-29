@@ -17,6 +17,8 @@
 #   5. Get a backup C — and if the starter C is a defensive liability, make
 #      the backup a strong defender.
 
+import json
+import os
 import random
 from config import ROUNDS
 from player_data import (
@@ -39,6 +41,22 @@ from player_data import (
 
 POSITIONS = ['PG', 'SG', 'SF', 'PF', 'C']
 _UNKNOWN_ADP = 9999.0
+
+# ── Weight loader ─────────────────────────────────────────────────────────────
+# All tunable penalty/bonus values live in weights.json.
+# Call reload_weights() after confirming a weight change proposal.
+_WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "weights.json")
+
+def _load_weights() -> dict:
+    with open(_WEIGHTS_PATH) as f:
+        return {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+W = _load_weights()
+
+def reload_weights() -> None:
+    """Reload weights from disk — call after writing a confirmed proposal."""
+    global W
+    W = _load_weights()
 
 
 # ── Team-state helpers ────────────────────────────────────────────────────────
@@ -171,9 +189,9 @@ def _effective_adp(
 
     if player_is_bench_only and open_starters:
         if round_num <= 5 and this_adp > 8.0:
-            adp += 100.0   # essentially remove from consideration
+            adp += W["bench_only_starter_phase"]
         elif round_num <= 7 and this_adp > 15.0:
-            adp += 50.0    # still strongly discouraged
+            adp += W["bench_only_early_bench"]
 
     # ── Scorer distribution: 2-3 in starting 5, 1-2 on bench ────────────────
     # Rounds 1-5 (starter phase): target 2-3 shot creators.
@@ -184,14 +202,14 @@ def _effective_adp(
         if starter_scorers == 0:
             # No scorer yet — strong escalating pull
             if is_shot_creator(player):
-                pull = min(20 + (round_num - 2) * 8, 55)
+                pull = min(W["scorer_pull_0scorers_base"] + (round_num - 2) * 8, W["scorer_pull_0scorers_max"])
                 adp -= pull
             elif round_num >= 4:
-                adp += min((round_num - 3) * 6, 30)  # non-scorers penalized when empty
+                adp += min((round_num - 3) * 6, W["non_scorer_penalty_max"])
         elif starter_scorers == 1:
             # One starter scorer — need a second
             if is_shot_creator(player):
-                pull = min(14 + (round_num - 2) * 4, 30)
+                pull = min(W["scorer_pull_1scorer_base"] + (round_num - 2) * 4, W["scorer_pull_1scorer_max"])
                 adp -= pull
         # starter_scorers >= 2: starter scoring covered; 3rd scorer still welcome via ADP
     else:
@@ -199,36 +217,36 @@ def _effective_adp(
         if bench_scorers == 0:
             # Bench has no scorer — pull toward one, escalating with urgency
             if is_shot_creator(player):
-                pull = min(18 + (round_num - 6) * 6, 35)
+                pull = min(W["bench_scorer_pull_0_base"] + (round_num - 6) * 6, W["bench_scorer_pull_0_max"])
                 adp -= pull
             elif round_num >= 8:
-                adp += min((round_num - 7) * 8, 20)  # penalize non-scorers late
+                adp += min((round_num - 7) * 8, W["bench_non_scorer_penalty"])
         elif bench_scorers == 1:
             # One bench scorer secured — small pull for a second
             if is_shot_creator(player):
-                adp -= 10.0
+                adp -= W["bench_scorer_pull_1"]
 
     # ── Ball-dominance conflict — active from round 2 ────────────────────────
     # Stronger penalties: teams can't function with 2+ isolation-first players.
     if is_ball_dominant(player):
         if bd_count >= 2:
-            adp += 120.0
+            adp += W["ball_dominant_double"]
         elif bd_count == 1 and round_num >= 2:
-            adp += 40.0
+            adp += W["ball_dominant_single"]
 
     # ── Non-scoring big redundancy — always active ───────────────────────────
     if is_non_scoring_big(player):
         if nsb_count >= 2:
-            adp += 80.0
+            adp += W["nsb_redundancy_double"]
         elif nsb_count == 1:
-            adp += 40.0
+            adp += W["nsb_redundancy_single"]
 
     # ── Frontcourt compatibility — always active ──────────────────────────────
     if is_soft_big(player):
         if soft_big_ct >= 1:
-            adp += 50.0
+            adp += W["soft_big_stack"]
         if has_immob_c:
-            adp += 50.0
+            adp += W["soft_big_immob_c"]
 
     # ── Elite starter redundancy — active from round 2 ───────────────────────
     # Don't waste a high-ADP pick on bench depth behind an elite starter.
@@ -238,7 +256,7 @@ def _effective_adp(
             if slots.get(pos, 0) == 1:
                 starter = _starter_at(pos, team_picks)
                 if starter and player_adp.get(starter, _UNKNOWN_ADP) <= 30.0:
-                    adp += 40.0
+                    adp += W["elite_starter_redundancy"]
                     break
 
     # ── Position-priority pull — rounds 2-3 ──────────────────────────────────
@@ -247,11 +265,11 @@ def _effective_adp(
     # already has a ball-dominant creator (e.g. Harden covers PG duties).
     if round_num in (2, 3) and not player_is_bench_only:
         if 'C' in positions and slots.get('C', 0) == 0:
-            adp -= 16.0   # strongest pull — C is hardest to fill later
+            adp -= W["c_priority_pull"]
         elif 'SF' in positions and slots.get('SF', 0) == 0:
-            adp -= 9.0    # wing defense/scoring is high priority
+            adp -= W["sf_priority_pull"]
         elif any(slots.get(p, 0) == 0 for p in positions):
-            adp -= 5.0    # any other open starter slot
+            adp -= W["other_pos_priority_pull"]
 
     # PG is less urgent when team already has a ball-dominant creator.
     # After drafting Harden/Kobe/Westbrook, filling frontcourt is far more important
@@ -265,18 +283,18 @@ def _effective_adp(
                     slots.get('SF', 0) == 0
                 )
                 if open_frontcourt:
-                    adp += 40.0   # strong penalty — fill frontcourt first
+                    adp += W["guard_frontcourt_penalty"]
                 else:
-                    adp += 12.0   # mild — PG is the only open slot remaining
+                    adp += W["guard_pg_only_penalty"]
 
     # ── RULE 2: C + PG synergy — rounds 2-5 ──────────────────────────────────
     # Every center needs an elite PG to run pick-and-roll with.
     # If the team has a C but no PG starter, push pure bigs back and pull PGs.
     if slots.get('C', 0) >= 1 and slots.get('PG', 0) == 0:
         if 'PG' in positions and is_ball_dominant(player):
-            adp -= 20.0   # strong pull toward elite PGs
+            adp -= W["pg_pull_with_c"]
         elif all(p in ('PF', 'C') for p in positions) and round_num <= 5:
-            adp += 35.0   # push pure-frontcourt additions until PG is secured
+            adp += W["pure_frontcourt_pg_needed"]
 
     # ── Versatile defender urgency — active from round 2 ─────────────────────
     # When the team's frontcourt has a soft big or immobile center (e.g. Jokic),
@@ -285,39 +303,31 @@ def _effective_adp(
     has_vd = any(is_versatile_defender(p) for p in team_picks)
     if (soft_big_ct >= 1 or has_immob_c) and is_versatile_defender(player) and not has_vd:
         if round_num >= 2:
-            adp -= 22.0   # strong pull — cater to the defensive weakness immediately
+            adp -= W["vd_pull_soft_c"]
 
     # ── Elite playmaker need — when team has a dominant non-scoring big ───────
     # Bigs like Shaq, Gobert, Dwight, and Mobley need an elite floor general to
     # maximize their impact. Generic guards (Jrue, Frazier) won't do — pull toward
     # elite pass-first creators when the PG slot is still open.
     if nsb_count >= 1 and slots.get('PG', 0) == 0 and 'PG' in positions:
-        pull = 20 if nsb_count >= 2 else 15
+        pull = W["elite_playmaker_pull_2nsb"] if nsb_count >= 2 else W["elite_playmaker_pull_1nsb"]
         if is_elite_playmaker(player):
             adp -= pull
 
     # ── PnR creator needs a scoring big ──────────────────────────────────────
-    # Guards and wings who thrive off pick-and-roll (Harden, Nash, CP3, Luka,
-    # LeBron, etc.) need a C/PF who can screen and finish at the rim or pop
-    # for a jumper. Without one, a huge dimension of their offense is missing.
-    # Trigger: team has a PnR creator, no scoring big yet, rounds 2-5.
     if 2 <= round_num <= 5 and any(is_pnr_creator(p) for p in team_picks):
         if not any(_is_pnr_big(p) for p in team_picks) and _is_pnr_big(player):
-            pull = 22 if round_num <= 3 else 14
+            pull = W["pnr_big_pull_early"] if round_num <= 3 else W["pnr_big_pull_late"]
             adp -= pull
 
     # ── Elite distributor needs scoring wings ─────────────────────────────────
-    # Elite playmakers who drive and kick (LeBron, Magic, Oscar, CP3) need wings
-    # who can hit open 3s AND self-create when defenders rotate. Pure spot-up
-    # shooters aren't enough — they need shot creators who also space the floor.
-    # Trigger: team has elite playmaker, fewer than 2 scoring wings, rounds 2-6.
     if 2 <= round_num <= 6 and any(is_elite_playmaker(p) for p in team_picks):
         if _is_scoring_wing(player):
             scoring_wings = sum(1 for p in team_picks if _is_scoring_wing(p))
             if scoring_wings == 0:
-                adp -= 20.0   # urgently need at least one
+                adp -= W["scoring_wing_pull_0"]
             elif scoring_wings == 1:
-                adp -= 9.0    # second scoring wing rounds out the offense
+                adp -= W["scoring_wing_pull_1"]
 
     # ── Creative fit adjustments — rounds 4+ only ────────────────────────────
     if round_num >= 4:
@@ -325,33 +335,30 @@ def _effective_adp(
         # Starter-slot need → pull the player earlier (starter slots only).
         starter_needed = {pos for pos, n in slots.items() if n == 0}
         if any(p in starter_needed for p in positions):
-            pull = min((round_num - 3) * 2, 15)
+            pull = min((round_num - 3) * 2, W["starter_slot_pull_max"])
             adp -= pull
 
         # Rim protector urgency — every team needs a defensive anchor in the paint.
-        # If no elite shot-blocker on the roster, strongly pull toward one.
-        # Escalates each round so the AI can't keep ignoring this need.
         has_rim_protector = any(is_elite_rim_protector(p) for p in team_picks)
         if not has_rim_protector and is_elite_rim_protector(player):
-            pull = min(10 + (round_num - 4) * 5, 30)   # −10 at r4, −20 at r6, max −30
+            pull = min(W["rim_protector_urgency_base"] + (round_num - 4) * 5, W["rim_protector_urgency_max"])
             adp -= pull
 
         # Portability bonus (round 6+)
         if round_num >= 6 and is_high_portability(player):
-            adp -= 8.0
+            adp -= W["portability_bonus"]
 
         # Missing-shooter pull — team needs at least 2 shooters for spacing.
-        # First shooter: strong pull. Second shooter: moderate pull (round 4-7).
         if shooter_count == 0 and is_shooter(player):
-            pull = 15 + max(0, (round_num - 4) * 5)
-            adp -= min(pull, 35)
+            pull = W["shooter_pull_0_base"] + max(0, (round_num - 4) * 5)
+            adp -= min(pull, W["shooter_pull_0_max"])
         elif shooter_count == 1 and is_shooter(player) and round_num <= 7:
-            pull = 8 + max(0, (round_num - 4) * 3)
-            adp -= min(pull, 20)
+            pull = W["shooter_pull_1_base"] + max(0, (round_num - 4) * 3)
+            adp -= min(pull, W["shooter_pull_1_max"])
 
         # Spacing urgency push — non-shooters penalised when no spacing (round 5+).
         if shooter_count == 0 and not is_shooter(player) and round_num >= 5:
-            adp += min(8 + (round_num - 5) * 4, 24)
+            adp += min(8 + (round_num - 5) * 4, W["spacing_urgency_penalty_max"])
 
     # ── Non-scoring C compensation — rounds 2-5 ──────────────────────────────
     # If the starter C is a non-scorer (rim protector only, like Gobert/Ben Wallace),
@@ -362,21 +369,17 @@ def _effective_adp(
             if is_shot_creator(player) and any(
                 p in positions for p in ('PG', 'SG', 'SF', 'PF')
             ):
-                adp -= 18.0   # we NEED scoring elsewhere to compensate
+                adp -= W["non_scoring_c_compensation"]
 
     # ── RULE 3: Backup center — rounds 6-9 ───────────────────────────────────
-    # Big man depth goes fast. If starter C is set but bench C is empty,
-    # actively pull toward backup Cs.
     if slots.get('C', 0) == 1 and 6 <= round_num <= 9:
         if 'C' in positions:
-            adp -= 15.0   # pull any available C for bench
+            adp -= W["backup_c_pull"]
 
-        # If starter C is a defensive liability (soft big or immobile),
-        # the backup MUST be a strong defender — extra pull for versatile defenders.
         c_starter = _starter_at('C', team_picks)
         if c_starter and (is_soft_big(c_starter) or is_immobile_center(c_starter)):
             if 'C' in positions and is_versatile_defender(player):
-                adp -= 20.0   # additional pull for defensive C backup
+                adp -= W["backup_c_defensive_pull"]
 
     # ── Weak perimeter defense compensation ──────────────────────────────────
     # If 2+ of the starting PG/SG/SF are not versatile defenders (e.g. Curry/Allen/Peja),
@@ -387,29 +390,25 @@ def _effective_adp(
         1 for _pos in ('PG', 'SG', 'SF')
         if (_s := _starter_at(_pos, team_picks)) and not is_perimeter_defender(_s)
     )
-    if weak_perimeter_ct >= 2:
+    if weak_perimeter_ct >= W["weak_perimeter_threshold"]:
         # (a) Defensive frontcourt starter pull — rounds 2-5
-        # Versatile forward-type defenders (KG, Draymond, Pippen) to anchor the interior
         if round_num <= 5:
             if slots.get('C', 0) == 0 and 'C' in positions and is_versatile_defender(player):
-                adp -= 18.0   # defensive C is the highest priority to cover weak perimeter
+                adp -= W["defensive_c_pull"]
             if slots.get('PF', 0) == 0 and 'PF' in positions and is_versatile_defender(player):
-                adp -= 14.0   # defensive PF as the second safety net
+                adp -= W["defensive_pf_pull"]
         # (b) Bench perimeter/wing defenders — rounds 6-9
-        # Pull good-to-elite perimeter defenders to sub in vs strong offensive guards/wings
         if 6 <= round_num <= 9:
             if is_perimeter_defender(player):
-                adp -= 16.0   # sub-in defenders to matchup vs strong offensive 1-3
+                adp -= W["bench_perimeter_pull"]
 
     # ── Round 6-7: avoid stacking bench at R1/R2 star positions ──────────────
-    # The R1/R2 picks will play the most minutes. In early bench rounds,
-    # fill other positions first — don't add a backup at the same spot as the stars.
     if 6 <= round_num <= 7 and len(team_picks) >= 2:
         star_positions: set[str] = set()
         for _p in team_picks[:2]:
             star_positions.update(get_positions(_p))
         if positions and all(pos in star_positions for pos in positions):
-            adp += 25.0   # prefer filling other positions' bench slots first
+            adp += W["r6_r7_duplicate_penalty"]
 
     # ── Fall protection floor ──────────────────────────────────────────────────
     # No player should fall too far past their raw ADP due to fit penalties.
@@ -430,7 +429,9 @@ def _effective_adp(
         if round_num == 1:
             max_fall = 3
         elif round_num == 2:
-            max_fall = 5
+            # Tier 1-2 players are too valuable to fall far — 2-pick max in R2.
+            # Tier 3+ gets the normal 5-pick window.
+            max_fall = 2 if player_tier <= 2 else 5
         elif round_num <= 5:
             max_fall = 7
         else:
@@ -514,8 +515,15 @@ def pick(
             if p_bench_only and open_s:
                 continue
             player_tier = get_tier(player)
-            # Tier-based deadline: tier N player should be drafted by end of round N
-            tier_deadline = player_tier * num_teams
+            # Tier-based deadline: by what overall pick should this tier be gone?
+            # Tier 1 → end of R1 (pick 30). Tier 2 → early R2 (pick ~35).
+            # Tier 3+ → end of round N (pick N * num_teams).
+            if player_tier == 1:
+                tier_deadline = num_teams
+            elif player_tier == 2:
+                tier_deadline = num_teams + 5   # gone by pick 35 in a 30-team draft
+            else:
+                tier_deadline = player_tier * num_teams
             if player_tier <= 5 and overall_pick > tier_deadline:
                 # Tier-overdue — decisive pull: must beat any competition even with jitter
                 eff[player] = raw - 50.0

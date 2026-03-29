@@ -740,4 +740,5 @@ PLAYER_POSITIONS = {
     "Tony Parker":                "PG",
     "John Collins":              "PF",
     "Richard Hamilton":        "SG/SF",
+    "Brandon Roy":               "SG",
 }

@@ -79,6 +79,8 @@ NBA_TEAMS = [
     ("Toronto Raptors",         "🦕"),
     ("Utah Jazz",               "🎷"),
     ("Washington Wizards",      "🧙"),
+    ("Las Vegas Aces",          "🎰"),
+    ("Seattle SuperSonics",     "⚡🟢"),
 ]
 
 
@@ -113,6 +115,7 @@ class DraftManager:
         self.teams:  list[TeamSlot] = []
         self.total_teams  = 0
         self.human_count  = 0
+        self.started_by:  str | None = None   # Discord username of who ran !draft
         self.pick_order:  list[int] = []   # team indices (snake)
         self.current_pick = 0              # index into pick_order
         self.player_pool: list[str]       = []   # all available players
@@ -141,10 +144,13 @@ class DraftManager:
         return [p for p in self.player_pool if p not in self.drafted]
 
     # ── Setup helpers ────────────────────────────────────────────────────────
-    def setup(self, total_teams: int, human_ids: list[int]):
+    def setup(self, total_teams: int, human_ids: list[int],
+              human_positions: list[int] | None = None):
         """
         Assign teams, logos, and owners.  Call after collecting all inputs.
         human_ids: Discord user IDs for human players (in draft order).
+        human_positions: optional 1-based slot indices for each human ID.
+                         If None, positions are randomly shuffled.
         """
         self.total_teams = total_teams
         self.human_count = len(human_ids)
@@ -154,9 +160,15 @@ class DraftManager:
         while len(pool) < total_teams:
             pool.append((f"Team {len(pool)+1}", "🏀"))
 
-        # Assign human owners to the first N slots, rest are AI
-        owners = human_ids + [None] * (total_teams - len(human_ids))
-        random.shuffle(owners)
+        if human_positions:
+            # Place each human at their chosen slot; AI fills the rest
+            owners: list = [None] * total_teams
+            for uid, pos in zip(human_ids, human_positions):
+                owners[pos - 1] = uid  # 1-based → 0-based
+        else:
+            # Random lottery — shuffle all owners
+            owners = human_ids + [None] * (total_teams - len(human_ids))
+            random.shuffle(owners)
 
         self.teams = [
             TeamSlot(name=pool[i][0], emoji=pool[i][1], owner_id=owners[i])

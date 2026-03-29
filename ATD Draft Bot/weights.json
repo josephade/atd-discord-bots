@@ -1,0 +1,78 @@
+{
+  "_version": 1,
+  "_last_updated": "2026-03-27",
+  "_note": "All tunable penalty/bonus values for the AI drafter. Edit via !confirmweights after a draft review. Do not rename keys — they are referenced directly in ai_drafter.py.",
+
+  "ball_dominant_single":        40,
+  "ball_dominant_double":       120,
+
+  "nsb_redundancy_single":       40,
+  "nsb_redundancy_double":       80,
+
+  "soft_big_stack":              50,
+  "soft_big_immob_c":            50,
+
+  "elite_starter_redundancy":    40,
+
+  "bench_only_starter_phase":   100,
+  "bench_only_early_bench":      50,
+
+  "guard_frontcourt_penalty":    40,
+  "guard_pg_only_penalty":       12,
+  "pure_frontcourt_pg_needed":   35,
+
+  "r6_r7_duplicate_penalty":     25,
+
+  "scorer_pull_0scorers_base":   20,
+  "scorer_pull_0scorers_max":    55,
+  "scorer_pull_1scorer_base":    14,
+  "scorer_pull_1scorer_max":     30,
+  "non_scorer_penalty_max":      30,
+
+  "bench_scorer_pull_0_base":    18,
+  "bench_scorer_pull_0_max":     35,
+  "bench_scorer_pull_1":         10,
+  "bench_non_scorer_penalty":    20,
+
+  "c_priority_pull":             16,
+  "sf_priority_pull":             9,
+  "other_pos_priority_pull":      5,
+
+  "pg_pull_with_c":              20,
+  "pure_frontcourt_pg_push":     35,
+
+  "vd_pull_soft_c":              22,
+
+  "elite_playmaker_pull_1nsb":   15,
+  "elite_playmaker_pull_2nsb":   20,
+
+  "pnr_big_pull_early":          22,
+  "pnr_big_pull_late":           14,
+
+  "scoring_wing_pull_0":         20,
+  "scoring_wing_pull_1":          9,
+
+  "starter_slot_pull_max":       15,
+
+  "rim_protector_urgency_base":  10,
+  "rim_protector_urgency_max":   30,
+
+  "portability_bonus":            8,
+
+  "shooter_pull_0_base":         15,
+  "shooter_pull_0_max":          35,
+  "shooter_pull_1_base":          8,
+  "shooter_pull_1_max":          20,
+  "spacing_urgency_penalty_max": 24,
+
+  "non_scoring_c_compensation":  18,
+
+  "backup_c_pull":               15,
+  "backup_c_defensive_pull":     20,
+
+  "defensive_c_pull":            18,
+  "defensive_pf_pull":           14,
+  "bench_perimeter_pull":        16,
+
+  "weak_perimeter_threshold":     2
+}
