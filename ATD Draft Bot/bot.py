@@ -32,21 +32,27 @@ _TEAM_EMOJI_CANDIDATES: dict[str, list[str]] = {
     "Los Angeles Clippers":    ["Clippers", "LAC"],
     "Los Angeles Lakers":      ["Lakers", "LAL"],
     "Memphis Grizzlies":       ["Grizzlies", "Memphis"],
-    "Miami Heat":              ["Heat", "Miami", "heat"],
-    "Milwaukee Bucks":         ["Bucks", "Milwaukee", "Milwaukee_Bucks"],
+    "Miami Heat":              ["Heat", "Miami", "heat", "heat2"],
+    "Milwaukee Bucks":         ["Bucks", "Milwaukee", "Milwaukee_Bucks", "MIL2"],
     "Minnesota Timberwolves":  ["Minn", "Timberwolves", "Minnesota", "min", "MIN"],
     "New Orleans Pelicans":    ["Pelicans", "NewOrleans", "pelicans"],
     "New York Knicks":         ["Knicks", "NYK", "NewYork"],
     "Oklahoma City Thunder":   ["OKC", "Thunder", "Oklahoma"],
     "Orlando Magic":           ["Magic", "Orlando"],
-    "Philadelphia 76ers":      ["76ers", "Sixers", "Philadelphia"],
-    "Phoenix Suns":            ["Suns", "Phoenix"],
+    "Philadelphia 76ers":      ["76ers", "Sixers", "Philadelphia", "76ers_Old", "PHL2"],
+    "Phoenix Suns":            ["Suns", "Phoenix", "OGSuns"],
     "Portland Trail Blazers":  ["Blazers", "TrailBlazers", "Portland", "trailblazers"],
     "Sacramento Kings":        ["Kings", "Sacramento", "kings"],
     "San Antonio Spurs":       ["Spurs", "SanAntonio", "San_Antonio_Spurs"],
     "Toronto Raptors":         ["Raptors", "Toronto"],
     "Utah Jazz":               ["Jazz", "Utah"],
     "Washington Wizards":      ["Wizards", "Washington"],
+    "Seattle SuperSonics":     ["Sonics", "Seattle", "SuperSonics", "sonics"],
+    "Vancouver Grizzlies":     ["VAN"],
+    "New Orleans Hornets":     ["NOH"],
+    "Cincinnati Royals":       ["Royals", "Cincinnati", "cincinnati_royals", "CIN"],
+    "Providence Steamrollers": ["Steamrollers", "Providence", "providence_steamrollers", "PSR"],
+    "New Jersey Nets":         ["NJN"],
 }
 
 # ── Bot setup ────────────────────────────────────────────────────────────────
@@ -378,9 +384,9 @@ async def draft_cmd(ctx: commands.Context):
     await ctx.send(
         "🏀 **ATD Draft Setup**\n"
         "Choose a mode:\n"
-        "`1` — **Standard** — each human controls 1 team\n"
-        "`2` — **Multi-team** — you control multiple teams and compete vs AI\n"
-        "`3` — **Watch** — fully AI draft, no human teams"
+        "`1` - **Standard** - each human controls 1 team\n"
+        "`2` - **Multi-team** - you control multiple teams and compete vs AI\n"
+        "`3` - **Watch** - fully AI draft, no human teams"
     )
     try:
         msg = await bot.wait_for('message', check=_same_author, timeout=120)
@@ -388,7 +394,7 @@ async def draft_cmd(ctx: commands.Context):
         if mode not in (1, 2, 3):
             raise ValueError
     except (asyncio.TimeoutError, ValueError):
-        await ctx.send("❌ Invalid input — draft cancelled.")
+        await ctx.send("❌ Invalid input - draft cancelled.")
         _remove_draft(ctx.channel.id)
         return
 
@@ -400,7 +406,7 @@ async def draft_cmd(ctx: commands.Context):
         if not 2 <= total_teams <= 32:
             raise ValueError
     except (asyncio.TimeoutError, ValueError):
-        await ctx.send("❌ Invalid input — draft cancelled.")
+        await ctx.send("❌ Invalid input - draft cancelled.")
         _remove_draft(ctx.channel.id)
         return
 
@@ -412,7 +418,7 @@ async def draft_cmd(ctx: commands.Context):
     elif mode == 2:
         # Multi-team — one human controls multiple teams
         await ctx.send(
-            f"Got it — **{total_teams} teams**!\n"
+            f"Got it - **{total_teams} teams**!\n"
             f"How many teams do **you** want to control? *(1–{total_teams - 1})*"
         )
         try:
@@ -421,7 +427,7 @@ async def draft_cmd(ctx: commands.Context):
             if not 1 <= my_team_count <= total_teams - 1:
                 raise ValueError
         except (asyncio.TimeoutError, ValueError):
-            await ctx.send("❌ Invalid input — draft cancelled.")
+            await ctx.send("❌ Invalid input - draft cancelled.")
             _remove_draft(ctx.channel.id)
             return
         human_ids = [ctx.author.id] * my_team_count
@@ -429,7 +435,7 @@ async def draft_cmd(ctx: commands.Context):
     else:
         # Standard mode — one ID per human player
         await ctx.send(
-            f"Got it — **{total_teams} teams**!\n"
+            f"Got it - **{total_teams} teams**!\n"
             f"How many will be **human players**? *(0–{total_teams})*"
         )
         try:
@@ -438,7 +444,7 @@ async def draft_cmd(ctx: commands.Context):
             if not 0 <= human_count <= total_teams:
                 raise ValueError
         except (asyncio.TimeoutError, ValueError):
-            await ctx.send("❌ Invalid input — draft cancelled.")
+            await ctx.send("❌ Invalid input - draft cancelled.")
             _remove_draft(ctx.channel.id)
             return
 
@@ -471,8 +477,8 @@ async def draft_cmd(ctx: commands.Context):
     if human_ids:
         await ctx.send(
             "🎰 **Draft Position**\n"
-            "`1` — Random lottery (bot assigns your slot)\n"
-            "`2` — Choose your spot"
+            "`1` - Random lottery (bot assigns your slot)\n"
+            "`2`- Choose your spot"
         )
         try:
             msg = await bot.wait_for('message', check=_same_author, timeout=60)
@@ -480,7 +486,7 @@ async def draft_cmd(ctx: commands.Context):
             if lotto_choice not in (1, 2):
                 raise ValueError
         except (asyncio.TimeoutError, ValueError):
-            await ctx.send("❌ Invalid input — draft cancelled.")
+            await ctx.send("❌ Invalid input - draft cancelled.")
             _remove_draft(ctx.channel.id)
             return
 
@@ -539,10 +545,21 @@ async def draft_cmd(ctx: commands.Context):
         team.emoji = found if found else '🏀'
         print(f"[Setup:{ctx.channel.id}] Team: {team.name:<28} emoji={team.emoji} owner={team.owner_id or 'AI'}")
 
-    lines = ["**🏀 Draft Order:**"]
+    draft_order_lines = ["**🏀 Draft Order:**"]
     for i, team in enumerate(dm.teams, 1):
-        lines.append(f"{i}. {team.display()}")
-    await ctx.send("\n".join(lines))
+        draft_order_lines.append(f"{i}. {team.display()}")
+
+    # Split into chunks to stay under Discord's 2000 character limit
+    chunk = ""
+    for line in draft_order_lines:
+        addition = line + "\n"
+        if len(chunk) + len(addition) > 1900:
+            await ctx.send(chunk.rstrip())
+            chunk = addition
+        else:
+            chunk += addition
+    if chunk:
+        await ctx.send(chunk.rstrip())
 
     human_count = len(human_ids)
     ai_count = total_teams - len(set(human_ids))  # unique humans = human-controlled teams

@@ -22,6 +22,8 @@
   "pure_frontcourt_pg_needed":   35,
 
   "r6_r7_duplicate_penalty":     25,
+  "bench_guard_redundancy":      35,
+  "defense_saturation_penalty":  30,
 
   "scorer_pull_0scorers_base":   20,
   "scorer_pull_0scorers_max":    55,
@@ -34,9 +36,11 @@
   "bench_scorer_pull_1":         10,
   "bench_non_scorer_penalty":    20,
 
-  "c_priority_pull":             16,
+  "c_priority_pull":             24,
+  "pg_priority_pull":            14,
   "sf_priority_pull":             9,
   "other_pos_priority_pull":      5,
+  "both_frontcourt_empty_penalty": 30,
 
   "pg_pull_with_c":              20,
   "pure_frontcourt_pg_push":     35,
@@ -69,6 +73,8 @@
 
   "backup_c_pull":               15,
   "backup_c_defensive_pull":     20,
+  "backup_position_pull":        10,
+  "bench_playmaker_pull":        22,
 
   "defensive_c_pull":            18,
   "defensive_pf_pull":           14,

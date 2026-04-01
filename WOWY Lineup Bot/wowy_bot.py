@@ -205,12 +205,36 @@ def season_label(start_year: int, end_year: int) -> str:
 CACHE_DIR = os.environ.get("CACHE_DIR", "/cache")
 
 
+def _current_season_end_year() -> int:
+    """
+    Returns the end year of the current NBA season.
+    WOWY uses end year: 2026 = the 2025-26 season.
+    Oct–Dec 2025 → end year 2026 (season just started).
+    Jan–Sep 2026 → end year 2026 (season ongoing).
+    """
+    from datetime import date
+    today = date.today()
+    return today.year + 1 if today.month >= 10 else today.year
+
+
+def _is_current_season(start_year: int, end_year: int) -> bool:
+    """
+    Returns True if the request touches the ongoing season.
+    A range query (e.g. 2022-2026) also counts as live if end_year
+    reaches the current season, since the final year's data is still updating.
+    """
+    return end_year >= _current_season_end_year()
+
+
 def _cache_path(team: str, player_ids: list, start_year: int, end_year: int) -> str:
     key = f"{team}_{'_'.join(str(p) for p in player_ids)}_{start_year}_{end_year}"
     return os.path.join(CACHE_DIR, f"{key}.png")
 
 
 def _cache_get(team, player_ids, start_year, end_year):
+    if _is_current_season(start_year, end_year):
+        log.info(f"[CACHE] Live season ({start_year}-{end_year}) — skipping cache read")
+        return None
     path = _cache_path(team, player_ids, start_year, end_year)
     if os.path.exists(path):
         log.info(f"[CACHE] Hit: {path}")
@@ -220,6 +244,9 @@ def _cache_get(team, player_ids, start_year, end_year):
 
 
 def _cache_put(team, player_ids, start_year, end_year, data: bytes):
+    if _is_current_season(start_year, end_year):
+        log.info(f"[CACHE] Live season ({start_year}-{end_year}) — screenshot not cached")
+        return
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         path = _cache_path(team, player_ids, start_year, end_year)

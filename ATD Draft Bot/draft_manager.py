@@ -49,6 +49,12 @@ POSITION_ORDER = ['PG', 'SG', 'SF', 'PF', 'C']   # starter then bench
 
 
 NBA_TEAMS = [
+    ("Seattle SuperSonics",     "⚡🟢"),
+    ("Vancouver Grizzlies",       "🐻🟢"),
+    ("New Orleans Hornets",       "🐝🟢"),
+    ("Cincinnati Royals",          "👑🟢"),
+    ("Providence Steamrollers",      "🚂🟢"),
+    ("New Jersey Nets",              "🏀🟢"),
     ("Atlanta Hawks",           "🦅"),
     ("Boston Celtics",          "🍀"),
     ("Brooklyn Nets",           "🕷️"),
@@ -79,8 +85,6 @@ NBA_TEAMS = [
     ("Toronto Raptors",         "🦕"),
     ("Utah Jazz",               "🎷"),
     ("Washington Wizards",      "🧙"),
-    ("Las Vegas Aces",          "🎰"),
-    ("Seattle SuperSonics",     "⚡🟢"),
 ]
 
 

@@ -349,7 +349,7 @@ PLAYER_POSITIONS = {
     "Buck Williams":             "PF/C",
     "Terry Cummings":            "PF/SF",
     "Bob Pettit":                "PF",
-    "Sam Perkins":               "PF/C",
+    "Sam Perkins":               "PF",
     "PJ Brown":                  "PF/C",
     "Antonio McDyess":           "PF",
     "Elton Brand":               "PF/C",

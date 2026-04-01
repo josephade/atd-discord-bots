@@ -8,6 +8,27 @@ const Discord = require('discord.js');
 
 const CACHE_DIR = path.join(__dirname, 'cache');
 
+/**
+ * Returns the start year of the current NBA season.
+ * The season that begins in October is keyed by its start year:
+ *   Oct–Dec 2025 → season start year 2025 (2025-26)
+ *   Jan–Sep 2026 → season start year 2025 (still 2025-26)
+ */
+function currentSeasonStartYear() {
+  const now = new Date();
+  const m = now.getMonth() + 1; // 1-based
+  const y = now.getFullYear();
+  return m >= 10 ? y : y - 1;
+}
+
+/**
+ * Shotmap uses the season START year (2025 = "2025-26").
+ * Do not cache if the requested year is the ongoing season.
+ */
+function isCurrentSeason(year) {
+  return parseInt(year) === currentSeasonStartYear();
+}
+
 function getCacheKey(playerName, year, modern) {
   const clean = playerName
     .toLowerCase()
@@ -56,10 +77,15 @@ function normalize(s) {
 
 async function generateShotmap(playerName, year, modern = false) {
   const cacheKey = getCacheKey(playerName, year, modern);
-  const cached = fromCache(cacheKey);
-  if (cached) {
-    console.log(`Cache hit: ${cacheKey}`);
-    return cached;
+  const live = isCurrentSeason(year);
+  if (!live) {
+    const cached = fromCache(cacheKey);
+    if (cached) {
+      console.log(`Cache hit: ${cacheKey}`);
+      return cached;
+    }
+  } else {
+    console.log(`Live season (${year}) — skipping cache read`);
   }
 
   const seasonFormat = `${year}-${(parseInt(year) + 1).toString().slice(-2)}`;
@@ -394,7 +420,11 @@ async function generateShotmap(playerName, year, modern = false) {
 
     console.log('Taking screenshot...');
     const screenshot = await page.screenshot({ type: 'png', clip });
-    toCache(cacheKey, screenshot);
+    if (!live) {
+      toCache(cacheKey, screenshot);
+    } else {
+      console.log(`Live season — screenshot not cached`);
+    }
     console.log('Done!');
     return screenshot;
 
