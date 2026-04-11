@@ -1,0 +1,9 @@
+.env
+service_account.json
+__pycache__/
+*.pyc
+*.pyo
+setup.bat
+fly.toml
+Dockerfile
+.dockerignore

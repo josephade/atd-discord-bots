@@ -27,6 +27,7 @@ EMOJI_TEAM_MAP = {
     # ─────────────────────────────────────────────────────────────────────────
     "San_Antonio_Spurs": "San Antonio Spurs",
     "Spurs": "San Antonio Spurs",
+    "Spurs~1": "San Antonio Spurs",
     "Milwaukee_Bucks": "Milwaukee Bucks",
     "Warriors": "Golden State Warriors",
     "Pacers": "Indiana Pacers",
@@ -81,6 +82,7 @@ EMOJI_TEAM_MAP = {
     "Knicks": "New York Knicks",
     "Suns": "Phoenix Suns",
     "WashingtonHuskies": "Washington Huskies",
+    "WashingtonHuskies~1": "Washington Huskies",
     "Piston": "Detroit Pistons",
     "Syracuse": "Syracuse Orange",
     "Hoosiers": "Indiana Hoosiers",
@@ -95,5 +97,20 @@ EMOJI_TEAM_MAP = {
     "TOR": "Toronto Huskies",
     "arkansasrazorbacks": "Arkansas Razorbacks",
     "Celtics~1": "Boston Celtics",
-
+    "heat2": "Miami Heat",          # :heat2: in lotto
+    "Northwestern~1": "Northwestern Wildcats",
+    "IOWncaa": "Iowa Hawkeyes",
+    "NOH": "New Orleans Hornets",
+    "Clippers~1": "Los Angeles Clippers",
+    "MichiganWolverines~1": "Michigan Wolverines",
+    "TOR2~1": "Toronto Huskies",
+    "TulaneGreenWave~1": "Tulane Green Wave",
+    "ravens": "Baltimore Ravens",
+    "UConn": "UConn Huskies",
+    "Knicks~1": "New York Knicks",
+    "76ers_Old": "Philadelphia 76ers",
+    "MIN~7": "Minnesota Timberwolves",
+    "pistons~2": "Detroit Pistons",
+    "0Clemson~2": "Clemson Tigers",
+    "0Clemson": "Clemson Tigers",
 }

@@ -1,0 +1,170 @@
+{
+  "teams": [
+    {
+      "user_ids": [
+        681833601830354944
+      ],
+      "name": "JSoapz",
+      "picks": [],
+      "skip_count": 1
+    },
+    {
+      "user_ids": [
+        1365403622912823336
+      ],
+      "name": "Bad Mario Gamer",
+      "picks": [],
+      "skip_count": 1
+    },
+    {
+      "user_ids": [
+        756136026426048522
+      ],
+      "name": "Elpolocke",
+      "picks": [
+        "Lebron James"
+      ],
+      "skip_count": 1
+    },
+    {
+      "user_ids": [
+        831090375832764428
+      ],
+      "name": "caliph \u266c",
+      "picks": [
+        "Stephen Curry"
+      ],
+      "skip_count": 1
+    },
+    {
+      "user_ids": [
+        635039183689351168
+      ],
+      "name": "Axyr",
+      "picks": [
+        "Kevin Garnett"
+      ],
+      "skip_count": 1
+    },
+    {
+      "user_ids": [
+        741559675345960991
+      ],
+      "name": "ASoapz \ud83d\udcab",
+      "picks": [
+        "James Harden"
+      ],
+      "skip_count": 1
+    },
+    {
+      "user_ids": [
+        896190833697636384
+      ],
+      "name": "accursed roller",
+      "picks": [
+        "Michael Jordan"
+      ],
+      "skip_count": 1
+    }
+  ],
+  "pick_order": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    [
+      6,
+      5,
+      4,
+      3,
+      2,
+      1,
+      0
+    ],
+    [
+      6,
+      5,
+      4,
+      3,
+      2,
+      1,
+      0
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    [
+      6,
+      5,
+      4,
+      3,
+      2,
+      1,
+      0
+    ],
+    [
+      5,
+      4,
+      3,
+      1,
+      0,
+      6,
+      2
+    ],
+    [
+      0,
+      1,
+      3,
+      4,
+      5,
+      2,
+      6
+    ],
+    [
+      5,
+      4,
+      3,
+      1,
+      0,
+      6,
+      2
+    ],
+    [
+      0,
+      1,
+      3,
+      4,
+      5,
+      2,
+      6
+    ],
+    [
+      5,
+      4,
+      3,
+      1,
+      0,
+      6,
+      2
+    ]
+  ],
+  "current_round": 1,
+  "current_in_round": 5,
+  "penalty_teams": [
+    2,
+    6
+  ],
+  "timer_start": "2026-04-01T16:12:15.865443+00:00",
+  "state": "active"
+}

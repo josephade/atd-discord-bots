@@ -1,0 +1,16 @@
+app = "atd-timer-bot"
+primary_region = "ewr"
+
+[build]
+
+[env]
+  STATE_DIR = "/data"
+
+[[mounts]]
+  source      = "atd_timer_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

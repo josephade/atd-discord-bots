@@ -353,7 +353,7 @@ sheet_manager = SheetManager(worksheet) if worksheet else None
 # =============================================================================
 
 _CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):(\d+)>')
-_YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b")
+_YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b|\b(\d{2})'")
 _PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?)\)?')
 _PICK_RE         = re.compile(r'^\s*\d+\.\s*')
 _BENCH_POS_RE    = re.compile(r'\bBench\s+(PG|SG|SF|PF|C)\b', re.IGNORECASE)
@@ -372,7 +372,14 @@ def _normalize_year(raw):
     Years 46–99 are treated as 1946–1999; 00–45 as 2000–2045.
     """
     raw = raw.strip()
-    # Apostrophe short form "'23" → treat as end-year → "2022-23"
+    # Trailing apostrophe "13'" → treat as end-year → "2012-13"
+    m = re.match(r"^(\d{2})'$", raw)
+    if m:
+        end = int(m.group(1))
+        century = 2000 if end <= 45 else 1900
+        full_end = century + end
+        return f"{full_end - 1}-{m.group(1)}"
+    # Leading apostrophe "'23" → treat as end-year → "2022-23"
     m = re.match(r"^'(\d{2})$", raw)
     if m:
         end = int(m.group(1))
@@ -528,7 +535,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
+    if message.author.bot:
         return
 
     # Always process commands regardless of channel
@@ -577,7 +584,9 @@ async def on_message(message):
         if data['price']:
             embed.add_field(name="Price", value=data['price'], inline=True)
         embed.set_footer(text=f"{result}  •  Added by {message.author.display_name}")
-        await message.channel.send(embed=embed)
+        bot_msg = await message.channel.send(embed=embed)
+        await asyncio.sleep(600)
+        await bot_msg.delete()
     else:
         await message.add_reaction('❌')
         await message.channel.send(f"❌ {result}")

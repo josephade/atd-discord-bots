@@ -127,38 +127,40 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
     }
     console.log(`Found: "${foundName}" (ID: ${playerId})`);
 
-    // ── 4. POST directly to /shotmap — no button click needed ──
-    // The generate button submits a form via AJAX and returns { image: "base64..." }.
-    // We replicate that request from Node.js to avoid Puppeteer protocol timeouts.
+    // ── 4. POST to /shotmap through the browser ──
+    // Must use page.evaluate() so the request goes through the browser session
+    // (with Cloudflare clearance cookies) rather than raw Node fetch from Fly.io's IP.
     console.log('Submitting API request...');
-    const body = new URLSearchParams();
-    body.append('csrf_token', csrfToken);
-    body.append('graphtype', 'shotmap');
-    seasons.forEach(s => body.append('seasons[]', s));
-    body.append('player', playerId);
-    if (playoff) body.append('season_type', 'playoffs');
-    if (dark) body.append('darkmode', 'on');
-    body.append('assistmode', 'on');
-    if (modern) body.append('modernmode', 'on');
+    const result = await page.evaluate(async (params) => {
+      const body = new URLSearchParams();
+      body.append('csrf_token', params.csrfToken);
+      body.append('graphtype', 'shotmap');
+      params.seasons.forEach(s => body.append('seasons[]', s));
+      body.append('player', params.playerId);
+      if (params.playoff) body.append('season_type', 'playoffs');
+      if (params.dark) body.append('darkmode', 'on');
+      body.append('assistmode', 'on');
+      if (params.modern) body.append('modernmode', 'on');
 
-    const apiRes = await fetch('https://nbavisuals.com/shotmap', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Cookie': cookieStr,
-        'Referer': 'https://nbavisuals.com/shotmap',
-      },
-      body: body.toString(),
-      signal: AbortSignal.timeout(180000),
-    });
+      const res = await fetch('/shotmap', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: body.toString(),
+      });
 
-    if (!apiRes.ok) {
-      const text = await apiRes.text().catch(() => '');
-      throw new Error(`Server error ${apiRes.status}: ${text.slice(0, 200)}`);
-    }
+      const text = await res.text();
+      if (!res.ok) return { _error: `Server error ${res.status}: ${text.slice(0, 200)}` };
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        return { _error: `Invalid JSON response: ${text.slice(0, 200)}` };
+      }
+    }, { csrfToken, seasons, playerId, playoff, dark, modern });
 
-    const result = await apiRes.json();
+    if (result._error) throw new Error(result._error);
     if (result.error) throw new Error(result.error);
     if (!result.image) throw new Error('No image returned from server');
 

@@ -428,6 +428,14 @@ async function generateShotmap(playerName, year, modern = false) {
     console.log('Done!');
     return screenshot;
 
+  } catch (err) {
+    // Dump the page HTML to the console so we can see if the site returned
+    // a bot-detection page, Cloudflare challenge, or a changed layout.
+    try {
+      const html = await page.content();
+      console.error('Page HTML on failure (first 2000 chars):\n', html.slice(0, 2000));
+    } catch (_) {}
+    throw err;
   } finally {
     await page.close();
   }

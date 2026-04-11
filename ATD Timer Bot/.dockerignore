@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+draft_state.json
+fly.toml
+Dockerfile
+.dockerignore
