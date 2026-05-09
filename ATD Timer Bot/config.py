@@ -3,9 +3,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
-DRAFT_CHANNEL_ID = int(os.getenv("DRAFT_CHANNEL_ID", 0))
-LOTTO_CHANNEL_ID = int(os.getenv("LOTTO_CHANNEL_ID", 934052115821764718))
+DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
+DRAFT_CHANNEL_ID   = int(os.getenv("DRAFT_CHANNEL_ID", 0))
+LOTTO_CHANNEL_ID   = int(os.getenv("LOTTO_CHANNEL_ID", 934052115821764718))
+ATD_CHAT_CHANNEL_ID = int(os.getenv("ATD_CHAT_CHANNEL_ID", 934052158532378634))
 
 ROUNDS = 10
 

@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from config import ROUNDS
 
 _state_dir = os.environ.get("STATE_DIR", os.path.dirname(__file__))
-STATE_FILE = os.path.join(_state_dir, "draft_state.json")
+STATE_FILE   = os.path.join(_state_dir, "draft_state.json")
+HISTORY_FILE = os.path.join(_state_dir, "skip_history.json")
 
 # ATD snake direction per round (0-indexed).
 # True = reversed (picks N→1), False = forward (picks 1→N).
@@ -56,6 +57,9 @@ class DraftState:
         self.timer_start:        str | None = None # ISO-8601 UTC
         self.paused_remaining:   int | None = None # seconds left when paused
         self.state:              str = "idle"      # idle | setup | lotto | active | complete | paused
+        self.draft_label:        str | None = None  # e.g. "ATD 101"
+        self.draft_started:      str | None = None  # ISO-8601 UTC when !timerstart ran
+        self.last_skip:          dict | None = None # undo state: {round, in_round, team_idx, prev_skip_count}
 
     # ── Convenience properties ────────────────────────────────────────────────
 
@@ -130,6 +134,9 @@ class DraftState:
                 "timer_start":       self.timer_start,
                 "paused_remaining":  self.paused_remaining,
                 "state":             self.state,
+                "draft_label":       self.draft_label,
+                "draft_started":     self.draft_started,
+                "last_skip":         self.last_skip,
             }, f, indent=2)
 
     @classmethod
@@ -147,4 +154,7 @@ class DraftState:
         ds.timer_start       = d.get("timer_start")
         ds.paused_remaining  = d.get("paused_remaining")
         ds.state             = d.get("state", "idle")
+        ds.draft_label       = d.get("draft_label")
+        ds.draft_started     = d.get("draft_started")
+        ds.last_skip         = d.get("last_skip")
         return ds

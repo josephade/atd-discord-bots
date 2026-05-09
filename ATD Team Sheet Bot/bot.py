@@ -5,27 +5,47 @@ from oauth2client.service_account import ServiceAccountCredentials
 import re
 import asyncio
 import time
+import json
+import os
 from datetime import datetime
 import requests.exceptions
 from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME
 from player_positions import PLAYER_POSITIONS
 from emoji_map import EMOJI_TEAM_MAP
 
+# ── Persistent sheet config ───────────────────────────────────────────────────
+_CONFIG_FILE = "/data/sheet_config.json"
+
+def _load_sheet_name() -> str:
+    try:
+        with open(_CONFIG_FILE) as f:
+            return json.load(f).get("worksheet_name") or WORKSHEET_NAME
+    except (FileNotFoundError, json.JSONDecodeError):
+        return WORKSHEET_NAME
+
+def _save_sheet_name(name: str):
+    os.makedirs(os.path.dirname(_CONFIG_FILE), exist_ok=True)
+    with open(_CONFIG_FILE, "w") as f:
+        json.dump({"worksheet_name": name}, f)
+
+_current_sheet_name = _load_sheet_name()
+
 
 # =============================================================================
 # GOOGLE SHEETS
 # =============================================================================
 
-def connect_sheets():
+def connect_sheets(sheet_name: str = None):
     scope = [
         'https://spreadsheets.google.com/feeds',
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
     ]
+    name = sheet_name or _current_sheet_name
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
     client = gspread.authorize(creds)
-    ws = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
-    print(f"✅ Connected to worksheet: '{WORKSHEET_NAME}'")
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(name)
+    print(f"✅ Connected to worksheet: '{name}'")
     return ws
 
 
@@ -352,7 +372,7 @@ sheet_manager = SheetManager(worksheet) if worksheet else None
 # MESSAGE PARSER
 # =============================================================================
 
-_CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):(\d+)>')
+_CUSTOM_EMOJI_RE = re.compile(r'<a?:([\w~]+):(\d+)>')
 _YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b|\b(\d{2})'")
 _PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?)\)?')
 _PICK_RE         = re.compile(r'^\s*\d+\.\s*')
@@ -415,6 +435,9 @@ def parse_message(content):
     """
     text = content.strip()
 
+    # Normalize curly/smart apostrophes → straight apostrophe so year regex matches
+    text = text.replace('\u2018', "'").replace('\u2019', "'").replace('\u02bc', "'")
+
     # Remove leading pick number e.g. "61. "
     text = _PICK_RE.sub('', text).strip()
 
@@ -475,6 +498,7 @@ def parse_message(content):
     player = re.sub(r'\s*-\s*', ' ', player)                 # collapse stray dashes
     player = player.strip('.,;: ')                            # strip trailing punctuation
     player = re.sub(r'\s+', ' ', player).strip()
+    player = player.title()
 
     if not player:
         return None, "Could not find a player name in the message."
@@ -556,22 +580,27 @@ async def on_message(message):
 
     if error:
         print(f"[Parse] ❌ {error}")
-        err_msg = await message.channel.send(f"❌ {error}")
-        await asyncio.sleep(10)
-        await err_msg.delete()
+        await message.add_reaction('❌')
+        await message.channel.send(f"❌ {error}")
         return
 
     print(f"[Parse] ✅ emoji={data['emoji_name']} team={data['team']} player={data['player']} year={data['year']} price={data['price']} bench_only={data['bench_only']}")
 
-    async with message.channel.typing():
-        success, result = sheet_manager.add_player(
-            data['team'],
-            data['player'],
-            year=data['year'],
-            price=data['price'],
-            position_override=data['position_override'],
-            bench_only=data['bench_only'],
-        )
+    try:
+        async with message.channel.typing():
+            success, result = sheet_manager.add_player(
+                data['team'],
+                data['player'],
+                year=data['year'],
+                price=data['price'],
+                position_override=data['position_override'],
+                bench_only=data['bench_only'],
+            )
+    except Exception as exc:
+        print(f"[Pick] ❌ Exception in add_player: {exc}")
+        await message.add_reaction('❌')
+        await message.channel.send(f"❌ Sheet error: {exc}")
+        return
 
     if success:
         await message.add_reaction('✅')
@@ -585,7 +614,7 @@ async def on_message(message):
             embed.add_field(name="Price", value=data['price'], inline=True)
         embed.set_footer(text=f"{result}  •  Added by {message.author.display_name}")
         bot_msg = await message.channel.send(embed=embed)
-        await asyncio.sleep(600)
+        await asyncio.sleep(60)
         await bot_msg.delete()
     else:
         await message.add_reaction('❌')
@@ -606,6 +635,22 @@ async def cmd_reload(ctx):
         await ctx.send("✅ Reconnected to Google Sheets.")
     except Exception as e:
         await ctx.send(f"❌ Reconnect failed: {e}")
+
+
+@bot.command(name='setsheet')
+async def cmd_setsheet(ctx, *, name: str):
+    """Switch to a different worksheet tab. Usage: !setsheet ATD 102 - Flux"""
+    global worksheet, sheet_manager, _current_sheet_name
+    try:
+        worksheet = connect_sheets(sheet_name=name)
+        sheet_manager = SheetManager(worksheet)
+        _current_sheet_name = name
+        _save_sheet_name(name)
+        await ctx.send(f"✅ Switched to worksheet **{name}**.")
+    except gspread.exceptions.WorksheetNotFound:
+        await ctx.send(f"❌ No worksheet tab named **{name}** found. Check the spelling.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to switch sheet: {e}")
 
 
 @bot.command(name='sheetundo')
