@@ -312,9 +312,14 @@ class SheetManager:
                 'values': [[year]],
             })
         if price:
+            # Strip "$" and write as a number so SUM formulas work in Sheets
+            try:
+                price_num = int(float(re.sub(r'[^\d.]', '', price)))
+            except (ValueError, TypeError):
+                price_num = price
             updates.append({
                 'range': gspread.utils.rowcol_to_a1(target_row, price_col),
-                'values': [[price]],
+                'values': [[price_num]],
             })
 
         print(f"[Pick] Writing to sheet: row={target_row} col={team_col} → '{player_name}' | year={year} price={price}")
@@ -373,8 +378,8 @@ sheet_manager = SheetManager(worksheet) if worksheet else None
 # =============================================================================
 
 _CUSTOM_EMOJI_RE = re.compile(r'<a?:([\w~]+):(\d+)>')
-_YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b|\b(\d{2})'")
-_PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?)\)?')
+_YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b|\b(\d{2})'|\b(\d{2})\b")
+_PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?)\)?|\((\d+(?:\.\d+)?)\)|\b(\d+(?:\.\d+)?)\$')
 _PICK_RE         = re.compile(r'^\s*\d+\.\s*')
 _BENCH_POS_RE    = re.compile(r'\bBench\s+(PG|SG|SF|PF|C)\b', re.IGNORECASE)
 _BENCH_RE        = re.compile(r'\bBench\b', re.IGNORECASE)
@@ -421,6 +426,13 @@ def _normalize_year(raw):
         start = int(m.group(1))
         century = 1900 if start >= 46 else 2000
         return f"{century + start}-{m.group(2)}"
+    # Bare 2-digit year "23" → "2022-23", "87" → "1986-87"
+    m = re.match(r'^(\d{2})$', raw)
+    if m:
+        end = int(m.group(1))
+        century = 2000 if end <= 45 else 1900
+        full_end = century + end
+        return f"{full_end - 1}-{m.group(1)}"
     return raw
 
 
@@ -479,11 +491,17 @@ def parse_message(content):
         if pos_match:
             text = (text[:pos_match.start()] + text[pos_match.end():]).strip()
 
+    # --- TBD year placeholder (strip silently, don't write to sheet) ---
+    text = re.sub(r'\btbd\b', '', text, flags=re.IGNORECASE).strip()
+
     # --- Price (optional) ---
     price_match = _PRICE_RE.search(text)
-    price = price_match.group(1) if price_match else None  # already includes $ and optional -
     if price_match:
+        # group(1) = "$42", group(2) = "(42)", group(3) = "42$"
+        price = price_match.group(1) or f"${price_match.group(2) or price_match.group(3)}"
         text = (text[:price_match.start()] + text[price_match.end():]).strip()
+    else:
+        price = None
 
     # --- Year (optional) ---
     year_match = _YEAR_RE.search(text)
@@ -580,8 +598,12 @@ async def on_message(message):
 
     if error:
         print(f"[Parse] ❌ {error}")
-        await message.add_reaction('❌')
-        await message.channel.send(f"❌ {error}")
+        # Only surface errors if the message looks like an attempted pick
+        # (contains a custom emoji). Skip notifications and other messages
+        # have no emoji and should be silently ignored.
+        if _CUSTOM_EMOJI_RE.search(message.content):
+            await message.add_reaction('❌')
+            await message.channel.send(f"❌ {error}")
         return
 
     print(f"[Parse] ✅ emoji={data['emoji_name']} team={data['team']} player={data['player']} year={data['year']} price={data['price']} bench_only={data['bench_only']}")

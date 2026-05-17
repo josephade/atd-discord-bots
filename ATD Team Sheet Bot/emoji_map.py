@@ -127,4 +127,12 @@ EMOJI_TEAM_MAP = {
     "SAS~5": "San Antonio Spurs",
     "titans": "Tennessee Titans",
     "nuggets~3": "Denver Nuggets",
+    "ucf_knights": "UCF Knights",
+    "miami": "Miami Hurricanes",
+    "Maine_Black_Bears": "Maine Black Bears",
+    "trailblazers": "Portland Trail Blazers",
+    "rockets": "Houston Rockets",
+    "VAN": "Vancouver Grizzlies",
+    "Celtics2": "Boston Celtics",
+    "CIN": "Cincinnati Royals",
 }

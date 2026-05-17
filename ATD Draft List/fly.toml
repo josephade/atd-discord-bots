@@ -1,0 +1,16 @@
+app = "atd-draft-list-bot"
+primary_region = "ewr"
+
+[build]
+
+[env]
+  STATE_DIR = "/data"
+
+[[mounts]]
+  source      = "atd_draft_list_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

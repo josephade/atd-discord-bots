@@ -521,6 +521,7 @@ PLAYER_POSITIONS = {
     "De'Aaron Fox":              "PG",
     "Darius Garland":            "PG",
     "Karl-Anthony Towns":        "C/PF",
+    "Karl Anthony Towns":        "C/PF",
     "Victor Wembanyama":         "C/PF",
     "Paolo Banchero":            "PF/SF",
     "Jalen Williams":            "SG/PG",

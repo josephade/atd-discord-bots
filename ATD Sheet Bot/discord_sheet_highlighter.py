@@ -41,6 +41,10 @@ ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
 
+# User ID of the ATD Draft List Bot — its picks are processed like regular user picks.
+# Set: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-sheet-bot
+DRAFT_LIST_BOT_ID = int(os.getenv("DRAFT_LIST_BOT_ID", 0)) or None
+
 # ==========================================================
 # COMMANDS
 # ==========================================================
@@ -308,9 +312,11 @@ client = discord.Client(intents=intents)
 async def on_message(message: discord.Message):
     global ROW_END_COL
 
-    if message.author.bot:
+    # Let the Draft List Bot's picks through; ignore all other bot messages.
+    _from_draft_list = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
+    if message.author.bot and not _from_draft_list:
         return
-    
+
     # Allow replies (remove the strict message type check)
     # Only filter out system messages, not replies
     if message.type not in [MessageType.default, MessageType.reply]:
@@ -677,16 +683,12 @@ async def on_message(message: discord.Message):
 
     if key in state["highlighted"]:
         pick_number, picker_name = state["pick_info"].get(key, ("?", "unknown"))
-
         log.info(
             f"[DUPLICATE] channel={channel_id} player='{name}' "
             f"pick={pick_number} by={picker_name}"
         )
-
-        await message.reply(
-            f"❌ **{name}** has already been selected at pick **{pick_number}** "
-            f"by **{picker_name}**. Please check #atd-sheet"
-        )
+        # Team Sheet Bot handles the duplicate message — just react here
+        await message.add_reaction('❌')
         return
 
 

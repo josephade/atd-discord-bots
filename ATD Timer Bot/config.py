@@ -19,9 +19,15 @@ ROUND_TIMERS = {
 
 SKIP_PENALTY = 600   # 10 minutes deducted per skip
 
+ROUNDLESS_TIMER = 2700  # 45 minutes per pick in roundless (money-based) mode
+
 # Active Skip: teams with this many skips or more are skipped immediately
 # when it's their turn — no timer given.
 AS_THRESHOLD = 3
 
 # Players that trigger the "pick at the end of rounds 6-10" penalty
 PENALTY_PLAYERS = {"lebron james", "michael jordan"}
+
+# User ID of the ATD Draft List Bot — its picks are trusted (treated like a commissioner pick).
+# Set this as a Fly.io secret: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-timer-bot
+DRAFT_LIST_BOT_ID = int(os.getenv("DRAFT_LIST_BOT_ID", 0)) or None

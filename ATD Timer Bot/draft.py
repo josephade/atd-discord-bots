@@ -1,10 +1,10 @@
 """
 draft.py — Draft state machine for ATD Timer Bot.
 Handles snake order, lotto, pick recording, and LeBron/MJ end-of-round penalty.
+Also supports roundless (money-based dynamic pick order) mode.
 """
 import json
 import os
-import random
 from datetime import datetime, timezone
 
 from config import ROUNDS
@@ -49,17 +49,20 @@ def build_snake_order(num_teams: int, penalty_teams: list[int] = None) -> list[l
 
 class DraftState:
     def __init__(self):
-        self.teams:              list[dict] = []   # {user_ids: list[int], name, picks, skip_count}
+        self.teams:              list[dict] = []   # {user_ids, name, picks, skip_count, money_spent, last_pick_number}
         self.pick_order:         list[list[int]] = []
-        self.current_round:      int = 0           # 0-indexed
-        self.current_in_round:   int = 0           # 0-indexed within round
+        self.current_round:      int = 0           # 0-indexed round (snake) or overall pick counter (roundless)
+        self.current_in_round:   int = 0           # 0-indexed within round (snake only; always 0 in roundless)
         self.penalty_teams:      list[int] = []    # team indices (LeBron / MJ owners)
         self.timer_start:        str | None = None # ISO-8601 UTC
         self.paused_remaining:   int | None = None # seconds left when paused
-        self.state:              str = "idle"      # idle | setup | lotto | active | complete | paused
+        self.state:              str = "idle"      # idle | setup | lotto | active | complete | paused | window_paused
         self.draft_label:        str | None = None  # e.g. "ATD 101"
         self.draft_started:      str | None = None  # ISO-8601 UTC when !timerstart ran
-        self.last_skip:          dict | None = None # undo state: {round, in_round, team_idx, prev_skip_count}
+        self.last_skip:          dict | None = None # undo state
+        self.mode:               str = "snake"      # "snake" | "roundless"
+        self.timer_override:     int | None = None  # override all round timers (seconds); None = use config
+        self.next_team_override: int | None = None  # force a specific team idx to be current for one pick
 
     # ── Convenience properties ────────────────────────────────────────────────
 
@@ -67,8 +70,40 @@ class DraftState:
     def num_teams(self) -> int:
         return len(self.teams)
 
+    PICKS_TO_COMPLETE = 10  # teams with this many picks are done and excluded from the queue
+
+    def _roundless_sorted_order(self) -> list[int]:
+        """Return team indices sorted by roundless pick order.
+
+        Teams with 10+ picks are complete and excluded entirely.
+        Teams with pending_makeup=True sort last regardless of stats.
+        For everyone else, tiebreaker priority:
+          1. money_spent ASC   (less spent → picks sooner)
+          2. picks_made ASC    (fewer picks → picks sooner)
+          3. last_pick_number ASC  (earlier last pick → more time has passed → picks sooner)
+          4. lotto slot ASC    (lotto position as final tiebreaker)
+        """
+        def key(idx):
+            t = self.teams[idx]
+            pending = 1 if t.get("pending_makeup") else 0
+            return (
+                pending,
+                t.get("money_spent", 0),
+                len(t.get("picks", [])),
+                t.get("last_pick_number", 0),
+                idx,
+            )
+        active = [i for i in range(self.num_teams)
+                  if len(self.teams[i].get("picks", [])) < self.PICKS_TO_COMPLETE]
+        return sorted(active, key=key)
+
     @property
     def current_team_idx(self) -> int | None:
+        if self.next_team_override is not None:
+            return self.next_team_override
+        if self.mode == "roundless":
+            order = self._roundless_sorted_order()
+            return order[0] if order else None
         if (not self.pick_order
                 or self.current_round >= ROUNDS
                 or self.current_round >= len(self.pick_order)):
@@ -82,6 +117,8 @@ class DraftState:
 
     @property
     def overall_pick(self) -> int:
+        if self.mode == "roundless":
+            return self.current_round + 1   # current_round doubles as pick counter
         return self.current_round * self.num_teams + self.current_in_round + 1
 
     @property
@@ -95,7 +132,12 @@ class DraftState:
     # ── Mutation ──────────────────────────────────────────────────────────────
 
     def advance(self):
-        """Move to the next pick; set state = 'complete' when done."""
+        """Move to the next pick.  In roundless mode, just increments the counter."""
+        self.next_team_override = None  # always clear after a pick is made
+        if self.mode == "roundless":
+            self.current_round += 1
+            return
+        # Snake mode
         self.current_in_round += 1
         if self.current_in_round >= self.num_teams:
             self.current_in_round = 0
@@ -110,9 +152,16 @@ class DraftState:
         self.pick_order = build_snake_order(self.num_teams, self.penalty_teams)
 
     def effective_timer(self, round_num: int, team_idx: int) -> int:
-        """Base timer for this round minus accumulated skip penalties. Can reach 0."""
-        from config import ROUND_TIMERS, SKIP_PENALTY
-        base       = ROUND_TIMERS.get(round_num, 1800)
+        """Base timer for this pick minus accumulated skip penalties (min 0)."""
+        from config import SKIP_PENALTY
+        if self.timer_override is not None:
+            base = self.timer_override
+        elif self.mode == "roundless":
+            from config import ROUNDLESS_TIMER
+            base = ROUNDLESS_TIMER
+        else:
+            from config import ROUND_TIMERS
+            base = ROUND_TIMERS.get(round_num, 1800)
         deductions = self.teams[team_idx].get("skip_count", 0) * SKIP_PENALTY
         return max(base - deductions, 0)
 
@@ -126,17 +175,20 @@ class DraftState:
     def save(self):
         with open(STATE_FILE, "w") as f:
             json.dump({
-                "teams":           self.teams,
-                "pick_order":      self.pick_order,
-                "current_round":   self.current_round,
+                "teams":            self.teams,
+                "pick_order":       self.pick_order,
+                "current_round":    self.current_round,
                 "current_in_round": self.current_in_round,
-                "penalty_teams":   self.penalty_teams,
-                "timer_start":       self.timer_start,
-                "paused_remaining":  self.paused_remaining,
-                "state":             self.state,
-                "draft_label":       self.draft_label,
-                "draft_started":     self.draft_started,
-                "last_skip":         self.last_skip,
+                "penalty_teams":    self.penalty_teams,
+                "timer_start":      self.timer_start,
+                "paused_remaining": self.paused_remaining,
+                "state":            self.state,
+                "draft_label":      self.draft_label,
+                "draft_started":    self.draft_started,
+                "last_skip":        self.last_skip,
+                "mode":             self.mode,
+                "timer_override":     self.timer_override,
+                "next_team_override": self.next_team_override,
             }, f, indent=2)
 
     @classmethod
@@ -151,10 +203,13 @@ class DraftState:
         ds.current_round    = d.get("current_round", 0)
         ds.current_in_round = d.get("current_in_round", 0)
         ds.penalty_teams    = d.get("penalty_teams", [])
-        ds.timer_start       = d.get("timer_start")
-        ds.paused_remaining  = d.get("paused_remaining")
-        ds.state             = d.get("state", "idle")
-        ds.draft_label       = d.get("draft_label")
-        ds.draft_started     = d.get("draft_started")
-        ds.last_skip         = d.get("last_skip")
+        ds.timer_start      = d.get("timer_start")
+        ds.paused_remaining = d.get("paused_remaining")
+        ds.state            = d.get("state", "idle")
+        ds.draft_label      = d.get("draft_label")
+        ds.draft_started    = d.get("draft_started")
+        ds.last_skip        = d.get("last_skip")
+        ds.mode             = d.get("mode", "snake")
+        ds.timer_override     = d.get("timer_override")
+        ds.next_team_override = d.get("next_team_override")
         return ds

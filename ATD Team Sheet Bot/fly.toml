@@ -3,6 +3,10 @@ primary_region = "ewr"
 
 [build]
 
+[mounts]
+  source = "atd_sheet_data"
+  destination = "/data"
+
 [[vm]]
   memory = "256mb"
   cpu_kind = "shared"

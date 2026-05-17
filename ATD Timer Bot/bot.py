@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands
 
-from config import AS_THRESHOLD, ATD_CHAT_CHANNEL_ID, DISCORD_TOKEN, DRAFT_CHANNEL_ID, LOTTO_CHANNEL_ID, PENALTY_PLAYERS, ROUNDS
+from config import AS_THRESHOLD, ATD_CHAT_CHANNEL_ID, DISCORD_TOKEN, DRAFT_CHANNEL_ID, DRAFT_LIST_BOT_ID, LOTTO_CHANNEL_ID, PENALTY_PLAYERS, ROUNDS
 from draft import DraftState, HISTORY_FILE, build_snake_order
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -151,6 +151,13 @@ _LOTTO_LINE_RE = re.compile(
     r'((?:<@!?\d+>\s*)+)$', # one or more Discord mentions
 )
 
+# Matches prices in roundless pick messages: $42, ($42), (42), 42$
+_PRICE_RE = re.compile(
+    r'\(?(-?\$\d+(?:\.\d+)?)\)?'
+    r'|\((\d+(?:\.\d+)?)\)'
+    r'|\b(\d+(?:\.\d+)?)\$'
+)
+
 
 def _extract_player_name(raw: str) -> str:
     text = re.sub(r'<:[^:]+:\d+>', '', raw).strip()
@@ -162,6 +169,15 @@ def _extract_player_name(raw: str) -> str:
     return text
 
 
+def _pick_name_key(raw: str) -> str:
+    """Normalize a raw pick string to a comparable player-name key.
+    Strips emoji, year, and price so 'LeBron James 1996-97 $0' == 'LeBron James'.
+    """
+    name = _extract_player_name(raw)
+    name = _PRICE_RE.sub('', name).strip()   # remove price
+    return name.lower()
+
+
 def _team_mentions(team: dict) -> str:
     """Return mention string for all co-owners of a team slot."""
     return " ".join(f"<@{uid}>" for uid in team["user_ids"])
@@ -169,6 +185,18 @@ def _team_mentions(team: dict) -> str:
 
 def _is_team_owner(user_id: int, team: dict) -> bool:
     return user_id in team["user_ids"]
+
+
+def _pick_title() -> str:
+    if draft.mode == "roundless":
+        return f"Pick {draft.overall_pick}"
+    return f"Round {draft.round_number} of {ROUNDS}  -  Pick {draft.overall_pick}"
+
+
+def _pick_format(pick_num: int) -> str:
+    if draft.mode == "roundless":
+        return f"`{pick_num}. :YourEmoji: Player Name $Price Year`"
+    return f"`{pick_num}. :YourEmoji: Player Name Year`"
 
 
 def _parse_lotto_message(content: str, guild: discord.Guild) -> list[dict] | None:
@@ -216,10 +244,10 @@ def _parse_lotto_message(content: str, guild: discord.Guild) -> list[dict] | Non
 
 # ── Timer helpers ─────────────────────────────────────────────────────────────
 
-async def _ping_current(channel: discord.TextChannel):
+async def _ping_current(channel: discord.TextChannel, remaining: int = None):
     global _active_ping, _ping_time, _challenge_count, _challenged_msg_ids
     team     = draft.current_team
-    duration = draft.effective_timer(draft.round_number, draft.current_team_idx)
+    duration = remaining if remaining is not None else draft.effective_timer(draft.round_number, draft.current_team_idx)
 
     log.info(
         "PING | Round %d Pick %d (overall #%d) | Team: %s | Timer: %d min",
@@ -230,12 +258,12 @@ async def _ping_current(channel: discord.TextChannel):
     deadline_ts = int(datetime.now(timezone.utc).timestamp()) + duration
 
     embed = discord.Embed(
-        title=f"Round {draft.round_number} of {ROUNDS}  -  Pick {draft.overall_pick}",
+        title=_pick_title(),
         description=(
             f"{_team_mentions(team)} it's your turn!\n\n"
             f"⏱️ Pick deadline: <t:{deadline_ts}:R>\n\n"
             f"Type your pick in this channel:\n"
-            f"`{draft.overall_pick}. :YourEmoji: Player Name Year`"
+            f"{_pick_format(draft.overall_pick)}"
         ),
         color=discord.Color.green(),
     )
@@ -285,12 +313,12 @@ async def _auto_pause_for_window(remaining: float, next_up: bool = False):
 
     if next_up:
         embed = discord.Embed(
-            title=f"Round {draft.round_number} of {ROUNDS}  —  Pick {draft.overall_pick}",
+            title=_pick_title(),
             description=(
                 f"{_team_mentions(team)} it's your turn!\n\n"
                 f"🌙 Draft window is closed — your **{mins}m {s}s** timer starts at **10:00 AM ET**.\n\n"
                 f"Type your pick in this channel:\n"
-                f"`{draft.overall_pick}. :YourEmoji: Player Name Year`"
+                f"{_pick_format(draft.overall_pick)}"
             ),
             color=discord.Color.dark_gray(),
         )
@@ -330,12 +358,12 @@ async def _window_resume_task(sleep_secs: float):
     deadline_ts = int(datetime.now(timezone.utc).timestamp()) + remaining
 
     embed = discord.Embed(
-        title=f"Round {draft.round_number} of {ROUNDS}  —  Pick {draft.overall_pick}",
+        title=_pick_title(),
         description=(
             f"{_team_mentions(team)} it's your turn!\n\n"
             f"⏱️ Pick deadline: <t:{deadline_ts}:R>\n\n"
             f"Type your pick in this channel:\n"
-            f"`{draft.overall_pick}. :YourEmoji: Player Name Year`"
+            f"{_pick_format(draft.overall_pick)}"
         ),
         color=discord.Color.green(),
     )
@@ -444,13 +472,13 @@ async def _process_challenge(challenger_mention: str, challenger_name: str):
     deadline_ts  = int(datetime.now(timezone.utc).timestamp()) + new_duration
 
     embed = discord.Embed(
-        title=f"Round {draft.round_number} of {ROUNDS}  -  Pick {draft.overall_pick}",
+        title=_pick_title(),
         description=(
             f"⚡ **Challenge #{_challenge_count}!** {challenger_mention} challenged "
             f"{_team_mentions(team)}!\n\n"
             f"⏱️ Pick deadline: <t:{deadline_ts}:R>\n\n"
             f"Type your pick in this channel:\n"
-            f"`{draft.overall_pick}. :YourEmoji: Player Name Year`"
+            f"{_pick_format(draft.overall_pick)}"
         ),
         color=discord.Color.red(),
     )
@@ -474,9 +502,13 @@ async def _start_timer():
 
     team = draft.current_team
     if not team or draft.state != "active":
+        log.warning("_start_timer: early return — team=%s state=%s", team["name"] if team else None, draft.state)
         return
 
     channel = bot.get_channel(DRAFT_CHANNEL_ID)
+    if not channel:
+        log.error("_start_timer: draft channel %d not found in cache", DRAFT_CHANNEL_ID)
+        return
 
     # Outside draft window — notify next picker and pause until 10am
     if not _in_window():
@@ -484,8 +516,8 @@ async def _start_timer():
         await _auto_pause_for_window(duration, next_up=True)
         return
 
-    # Pending makeup — team was skipped last turn and hasn't submitted a makeup pick
-    if team.get("pending_makeup"):
+    # Pending makeup — only for snake drafts; roundless uses queue reordering instead
+    if draft.mode != "roundless" and team.get("pending_makeup"):
         log.info("PENDING MAKEUP SKIP | Round %d | Pick %d | Team: %s",
                  draft.round_number, draft.overall_pick, team["name"])
         await channel.send(
@@ -540,25 +572,35 @@ async def _do_skip(auto: bool = False):
         return
 
     pick_num   = draft.overall_pick
+    team_idx   = draft.current_team_idx          # capture before any mutations
     mentions   = _team_mentions(team)
     prev_skip  = team.get("skip_count", 0)
     skip_count = prev_skip + 1
+    prev_last_pick = team.get("last_pick_number", 0)
+
     team["skip_count"] = skip_count
     team["pending_makeup"] = True
+    if draft.mode == "roundless":
+        # Also record the pick number so their position within the pending group is ordered
+        team["last_pick_number"] = pick_num
 
-    # Save undo state before we advance (persisted to disk via draft.save below)
+    # Save undo state before we advance
     draft.last_skip = {
-        "round":           draft.current_round,
-        "in_round":        draft.current_in_round,
-        "team_idx":        draft.current_team_idx,
-        "prev_skip_count": prev_skip,
+        "round":                 draft.current_round,
+        "in_round":              draft.current_in_round,
+        "team_idx":              team_idx,
+        "prev_skip_count":       prev_skip,
+        "prev_last_pick_number": prev_last_pick,
     }
 
-    # Calculate timer remaining for the next round (post-skip penalty)
-    next_base   = draft.effective_timer(draft.round_number, draft.current_team_idx)
-    penalty_min = (skip_count * 10)
-    from config import ROUND_TIMERS
-    next_timer_min = max((ROUND_TIMERS.get(draft.round_number, 1800) - skip_count * 600) // 60, 0)
+    # Calculate remaining timer after this skip
+    from config import SKIP_PENALTY
+    if draft.mode == "roundless":
+        from config import ROUNDLESS_TIMER
+        next_timer_min = max((ROUNDLESS_TIMER - skip_count * SKIP_PENALTY) // 60, 0)
+    else:
+        from config import ROUND_TIMERS
+        next_timer_min = max((ROUND_TIMERS.get(draft.round_number, 1800) - skip_count * SKIP_PENALTY) // 60, 0)
 
     log.info(
         "SKIP | %s | Team: %s | Total skips: %d",
@@ -575,6 +617,7 @@ async def _do_skip(auto: bool = False):
         "pick_num":      pick_num,
         "round_num":     draft.round_number,
         "auto":          auto,
+        "mode":          draft.mode,
         "timestamp":     datetime.now(timezone.utc).isoformat(),
     })
 
@@ -625,7 +668,7 @@ async def on_ready():
                 f"(**{mins}m {s}s** remaining)."
             )
             _timer_task = asyncio.create_task(_timer_loop(remaining, team["user_ids"]))
-            await _ping_current(channel)
+            await _ping_current(channel, remaining=remaining)
         else:
             # Bot restarted while window is closed — wait for 10 AM
             log.info("RESTART | Window-paused | Team: %s | Remaining: %dm %ds", team["name"], mins, s)
@@ -647,8 +690,8 @@ async def on_ready():
             await channel.send(f"🔄 Bot restarted - {mentions}'s time had already expired. Auto-skipping…")
             await _do_skip(auto=True)
         else:
-            await channel.send(f"🔄 Bot restarted - {mentions} has **{int(remaining // 60)} min** remaining.")
             _timer_task = asyncio.create_task(_timer_loop(int(remaining), team["user_ids"]))
+            await _ping_current(channel, remaining=int(remaining))
 
     # Start the missed-pick scanner
     asyncio.create_task(_missed_pick_scanner())
@@ -700,17 +743,21 @@ async def _missed_pick_scanner():
                 await _try_process_pick(msg)
                 break
 
-            # ── Watchdog: active draft but no timer running ────────────────
-            # If draft is active, window is open, but the timer task is dead
-            # (e.g. _start_timer() threw an exception inside _do_skip), nobody
-            # will ever be pinged. Detect and recover automatically.
+            # ── Watchdog: active draft but no ping showing ─────────────────
+            # Catches two failure modes:
+            #   (a) timer task is dead (crashed or never started)
+            #   (b) timer task is running but _ping_current() silently failed
+            #       so nobody got a visible pick prompt
             if (draft.state == "active"
                     and _in_window()
                     and draft.current_team
-                    and (_timer_task is None or _timer_task.done())):
+                    and (_timer_task is None or _timer_task.done() or _active_ping is None)):
                 log.warning(
-                    "WATCHDOG | Timer task dead but draft is active | Pick #%d | Team: %s — restarting",
+                    "WATCHDOG | No active ping / dead timer | Pick #%d | Team: %s | "
+                    "timer_done=%s active_ping=%s — restarting",
                     draft.overall_pick, draft.current_team["name"],
+                    _timer_task is None or _timer_task.done(),
+                    _active_ping is None,
                 )
                 await _start_timer()
 
@@ -722,7 +769,9 @@ async def _missed_pick_scanner():
 async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
-    if message.author.bot:
+    # Let the Draft List Bot's picks through; ignore all other bot messages.
+    _from_draft_list = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
+    if message.author.bot and not _from_draft_list:
         return
 
     # ── Challenge detection (atd-chat only) ──────────────────────────────────
@@ -774,9 +823,81 @@ async def on_message(message: discord.Message):
     # ── Pick detection (draft channel only) ──────────────────────────────────
     if message.channel.id == DRAFT_CHANNEL_ID:
         await _try_process_pick(message)
+        # In roundless mode, also detect makeup picks from pending teams
+        if draft.mode == "roundless" and draft.state in ("active", "paused", "window_paused"):
+            await _try_process_roundless_makeup(message)
+
+        # Format error: current GM posted something that looks like a pick attempt
+        # but doesn't match the required format — tell them what to use.
+        # Triggers on: starts with digit, has custom emoji, or has a price ($N).
+        if (not message.content.startswith('!')
+                and draft.state in ("active", "paused", "window_paused")
+                and draft.current_team
+                and _is_team_owner(message.author.id, draft.current_team)):
+            content = message.content.strip()
+            looks_like_pick = (
+                bool(re.match(r'^\d', content))                        # starts with pick number
+                or bool(re.search(r'<:[^:]+:\d+>', content))           # custom emoji
+                or bool(_PRICE_RE.search(content))                     # price like $1
+            )
+            if looks_like_pick and not _PICK_RE.match(content):
+                await message.channel.send(
+                    f"❌ {message.author.mention} — wrong format. Use:\n"
+                    f"{_pick_format(draft.overall_pick)}"
+                )
 
 
-async def _try_process_pick(message: discord.Message):
+async def _try_process_roundless_makeup(message: discord.Message):
+    """Roundless mode only: process a makeup pick submitted by a pending team.
+    Handles picks with past pick numbers AND out-of-turn posts using the current pick number.
+    Updates money_spent, picks, last_pick_number, and clears pending_makeup."""
+    match = _PICK_RE.match(message.content.strip())
+    if not match:
+        return
+
+    pick_num_in_msg = int(match.group(1))
+    if pick_num_in_msg > draft.overall_pick:
+        return  # future pick number — ignore
+
+    # Find the team by author
+    team = next((t for t in draft.teams if message.author.id in t["user_ids"]), None)
+    if not team:
+        return
+
+    if not team.get("pending_makeup"):
+        return  # not a pending team
+
+    # If this IS the team's official turn, let _try_process_pick handle it (advances the draft)
+    if pick_num_in_msg == draft.overall_pick and draft.current_team is team:
+        return
+
+    # Skip if bot already reacted ✅ (already processed)
+    already_done = any(r.emoji == "✅" and r.me for r in message.reactions)
+    if already_done:
+        return
+
+    pick_raw = match.group(2).strip()
+
+    # Extract price and update money_spent
+    price_m = _PRICE_RE.search(pick_raw)
+    if price_m:
+        raw = (price_m.group(1) or price_m.group(2) or price_m.group(3) or "0")
+        try:
+            dollars = int(float(raw.lstrip("$")))
+            team["money_spent"] = team.get("money_spent", 0) + dollars
+        except ValueError:
+            pass
+
+    team["last_pick_number"] = pick_num_in_msg
+    team["pending_makeup"]   = False
+    team["picks"].append(pick_raw)
+    draft.save()
+
+    log.info("MAKEUP PICK | Team: %s | Pick #%d | %s", team["name"], pick_num_in_msg, pick_raw)
+    await message.add_reaction("✅")
+
+
+async def _try_process_pick(message: discord.Message, is_edit: bool = False):
     """Attempt to process a draft pick from a message. Called on both new and edited messages."""
     global _processing_picks, _timer_task, _window_task
 
@@ -805,16 +926,29 @@ async def _try_process_pick(message: discord.Message):
         team = draft.current_team
 
         is_commissioner_pick = (
-            message.author.guild_permissions.administrator
+            bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
+            or message.author.guild_permissions.administrator
             or any(r.name == COMMISSIONER_ROLE for r in message.author.roles)
         )
         if not _is_team_owner(message.author.id, team) and not is_commissioner_pick:
-            await message.reply(f"❌ It's not your turn — waiting on {_team_mentions(team)}.")
             return
 
         # Re-validate pick number hasn't changed since the check above
         if pick_num != draft.overall_pick:
             return
+
+        # Duplicate check — reject before touching the timer
+        player_name = _extract_player_name(pick_raw)
+        player_key  = _pick_name_key(pick_raw)
+        for t in draft.teams:
+            for p in t.get("picks", []):
+                if _pick_name_key(p) == player_key:
+                    log.info(
+                        "DUPLICATE PICK | Player: %s | Already on team: %s | Rejecting",
+                        player_name, t["name"],
+                    )
+                    await message.add_reaction('❌')
+                    return  # timer keeps running; Team Sheet Bot sends the "already on X" message
 
         # ── Valid pick ────────────────────────────────────────────────────────────
         log.info(
@@ -834,7 +968,18 @@ async def _try_process_pick(message: discord.Message):
         team["picks"].append(pick_raw)
         team["pending_makeup"] = False
 
-        player_name  = _extract_player_name(pick_raw)
+        if draft.mode == "roundless":
+            # Extract price to track money spent, and record pick position for queue ordering
+            price_m = _PRICE_RE.search(pick_raw)
+            if price_m:
+                raw = (price_m.group(1) or price_m.group(2) or price_m.group(3) or "0")
+                try:
+                    dollars = int(float(raw.lstrip("$")))
+                    team["money_spent"] = team.get("money_spent", 0) + dollars
+                except ValueError:
+                    pass
+            team["last_pick_number"] = pick_num
+
         penalty_note = ""
         if player_name.lower() in PENALTY_PLAYERS:
             team_idx = draft.current_team_idx
@@ -858,8 +1003,6 @@ async def _try_process_pick(message: discord.Message):
             await message.channel.send("🏆 **Draft complete! Great picks everyone.**")
             return
 
-        await _start_timer()
-
     except Exception as exc:
         log.error("Error processing pick #%d: %s", pick_num, exc, exc_info=True)
         if not success:
@@ -872,6 +1015,19 @@ async def _try_process_pick(message: discord.Message):
     finally:
         _processing_picks.discard(pick_num)
 
+    # Start the next timer OUTSIDE the main try block so failures are always surfaced
+    if success and draft.state not in ("complete", None):
+        try:
+            await _start_timer()
+        except Exception as exc:
+            log.error("Timer start failed after pick #%d: %s", pick_num, exc, exc_info=True)
+            channel = bot.get_channel(DRAFT_CHANNEL_ID)
+            if channel:
+                await channel.send(
+                    f"⚠️ Pick recorded but the next timer failed to start: `{exc}`\n"
+                    f"Use `!timerjumpto {draft.overall_pick}` to recover."
+                )
+
 
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
@@ -883,7 +1039,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     # Only process if the content actually changed to something new
     if before.content == after.content:
         return
-    await _try_process_pick(after)
+    await _try_process_pick(after, is_edit=True)
 
 
 @bot.event
@@ -1103,23 +1259,67 @@ async def timerorder(ctx, *positions):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="timermode")
+@is_commissioner()
+async def timermode(ctx, mode: str = ""):
+    """!timermode roundless | !timermode snake — switch draft mode (can be called before or during the draft)."""
+    mode = mode.lower()
+    if mode not in ("roundless", "snake"):
+        await ctx.send(
+            "❌ Usage: `!timermode roundless` or `!timermode snake`\n"
+            "**roundless** — dynamic pick order based on money spent\n"
+            "**snake** — fixed round-based snake order (default)"
+        )
+        return
+
+    if draft.state == "idle":
+        await ctx.send("❌ Load a lotto first with `!timerloadlotto`.")
+        return
+
+    old_mode = draft.mode
+    draft.mode = mode
+    draft.save()
+
+    if mode == "roundless":
+        await ctx.send(
+            f"✅ Switched to **roundless mode**. Pick order now computed dynamically:\n"
+            f"1. Less money spent → picks sooner\n"
+            f"2. Fewer picks made → picks sooner\n"
+            f"3. More time since last pick → picks sooner\n\n"
+            f"Picks must include price: `{draft.overall_pick}. :Emoji: Player Name $42 Year`"
+        )
+    else:
+        await ctx.send(
+            f"✅ Switched to **snake mode**. Fixed round-based order resumes from pick #{draft.overall_pick}."
+        )
+
+
 @bot.command(name="timerstart")
 @is_commissioner()
 async def timerstart(ctx, *label_parts):
-    """!timerstart [label] — begin the draft. Optional label (e.g. ATD 101) is stored for skip history."""
+    """!timerstart [roundless] [label] — begin the draft.
+    Add 'roundless' for dynamic money-based pick order instead of snake rounds."""
     if draft.state != "lotto":
         await ctx.send("❌ Load a lotto first with `!timerloadlotto` or `!timerlotto`.")
         return
+
+    parts = list(label_parts)
+    if parts and parts[0].lower() == "roundless":
+        draft.mode = "roundless"
+        parts = parts[1:]
+    else:
+        draft.mode = "snake"
 
     draft.state            = "active"
     draft.current_round    = 0
     draft.current_in_round = 0
     draft.draft_started    = datetime.now(timezone.utc).isoformat()
-    draft.draft_label      = " ".join(label_parts) if label_parts else None
+    draft.draft_label      = " ".join(parts) if parts else None
     draft.save()
 
+    mode_note  = "\n🔄 **Roundless mode** — pick order determined by money spent, picks made, and time since last pick." if draft.mode == "roundless" else ""
     label_note = f" (**{draft.draft_label}**)" if draft.draft_label else ""
-    await ctx.send(f"🏀 **The draft has started!**{label_note}")
+    await ctx.send(f"🏀 **The draft has started!**{label_note}{mode_note}")
     await _start_timer()
 
 
@@ -1134,15 +1334,20 @@ async def timerjumpto(ctx, pick_number: int):
         await ctx.send("❌ Load a lotto first with `!timerloadlotto`.")
         return
 
-    total_picks = draft.num_teams * ROUNDS
-    if pick_number < 1 or pick_number > total_picks:
-        await ctx.send(f"❌ Pick number must be between 1 and {total_picks}.")
-        return
-
-    # Convert overall pick number to round + position within round
-    zero_pick      = pick_number - 1
-    new_round      = zero_pick // draft.num_teams
-    new_in_round   = zero_pick % draft.num_teams
+    if draft.mode == "roundless":
+        if pick_number < 1:
+            await ctx.send("❌ Pick number must be at least 1.")
+            return
+        new_round    = pick_number - 1   # current_round is the pick counter in roundless
+        new_in_round = 0
+    else:
+        total_picks = draft.num_teams * ROUNDS
+        if pick_number < 1 or pick_number > total_picks:
+            await ctx.send(f"❌ Pick number must be between 1 and {total_picks}.")
+            return
+        zero_pick    = pick_number - 1
+        new_round    = zero_pick // draft.num_teams
+        new_in_round = zero_pick % draft.num_teams
 
     # Cancel any existing timer/window tasks and delete the stale ping embed
     global _timer_task, _window_task
@@ -1162,9 +1367,66 @@ async def timerjumpto(ctx, pick_number: int):
     team = draft.current_team
     log.info("JUMP | To pick %d | Round %d | In-round %d | Team: %s",
              pick_number, draft.round_number, draft.pick_in_round, team["name"] if team else "?")
+    if draft.mode == "roundless":
+        loc_str = f"pick #{pick_number}"
+    else:
+        loc_str = f"pick #{pick_number} (Round {draft.round_number}, pick {draft.pick_in_round})"
     await ctx.send(
-        f"⏩ Jumped to **pick #{pick_number}** (Round {draft.round_number}, pick {draft.pick_in_round}).\n"
+        f"⏩ Jumped to **{loc_str}**.\n"
         f"Up now: {_team_mentions(team) if team else '?'}\nStarting timer…"
+    )
+    await _start_timer()
+
+
+@bot.command(name="timersetpick")
+@is_commissioner()
+async def timersetpick(ctx, pick_number: int, member: discord.Member):
+    """!timersetpick <pick_number> @GM — set the current pick number AND force a specific GM to be next."""
+    if draft.state not in ("lotto", "active", "paused", "window_paused"):
+        await ctx.send("❌ Load a lotto first with `!timerloadlotto`.")
+        return
+
+    # Find the team for the mentioned member
+    team_idx = next(
+        (i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]),
+        None,
+    )
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not registered as a GM in this draft.")
+        return
+
+    # Set pick number
+    if draft.mode == "roundless":
+        draft.current_round    = pick_number - 1
+        draft.current_in_round = 0
+    else:
+        total_picks = draft.num_teams * ROUNDS
+        if pick_number < 1 or pick_number > total_picks:
+            await ctx.send(f"❌ Pick number must be between 1 and {total_picks}.")
+            return
+        zero_pick              = pick_number - 1
+        draft.current_round    = zero_pick // draft.num_teams
+        draft.current_in_round = zero_pick % draft.num_teams
+
+    # Force the specified GM to be next (clears after one pick)
+    draft.next_team_override = team_idx
+    draft.paused_remaining   = None
+    draft.timer_start        = None
+    draft.state              = "active"
+    draft.save()
+
+    # Cancel stale timer and ping
+    global _timer_task, _window_task
+    if _timer_task and not _timer_task.done():
+        _timer_task.cancel()
+    if _window_task and not _window_task.done():
+        _window_task.cancel()
+    await _delete_active_ping()
+
+    team = draft.teams[team_idx]
+    await ctx.send(
+        f"✅ Pick set to **#{pick_number}** | Next up: **{team['name']}** ({_team_mentions(team)})\n"
+        f"Starting timer…"
     )
     await _start_timer()
 
@@ -1286,8 +1548,11 @@ async def timerunskip(ctx):
     draft.timer_start      = None
     draft.paused_remaining = None
 
-    # Revert skip count
+    # Revert skip count (and last_pick_number for roundless)
     draft.teams[undo["team_idx"]]["skip_count"] = undo["prev_skip_count"]
+    prev_lpn = undo.get("prev_last_pick_number")
+    if prev_lpn is not None:
+        draft.teams[undo["team_idx"]]["last_pick_number"] = prev_lpn
 
     draft.last_skip = None  # consumed — can't undo twice
     draft.save()
@@ -1329,34 +1594,61 @@ async def timerstatus(ctx):
     else:
         time_left = "unknown"
 
-    embed = discord.Embed(
-        title=f"Draft Status - Round {draft.round_number} of {ROUNDS}",
-        color=discord.Color.dark_gray() if draft.state == "window_paused" else discord.Color.orange() if draft.state == "paused" else discord.Color.blue(),
-    )
-    embed.add_field(name="Overall Pick",  value=str(draft.overall_pick),   inline=True)
-    embed.add_field(name="Pick in Round", value=str(draft.pick_in_round),   inline=True)
-    embed.add_field(name="Up Now",        value=_team_mentions(team),        inline=True)
-    embed.add_field(name="Time Left",     value=time_left,                   inline=True)
-    embed.add_field(name="Base Timer",    value=f"{duration // 60} min",     inline=True)
+    color = (discord.Color.dark_gray() if draft.state == "window_paused"
+             else discord.Color.orange() if draft.state == "paused"
+             else discord.Color.blue())
 
-    if draft.penalty_teams:
-        penalised = ", ".join(_team_mentions(draft.teams[i]) for i in draft.penalty_teams)
-        embed.add_field(name="Pick Last (R6-10)", value=penalised, inline=False)
+    if draft.mode == "roundless":
+        embed = discord.Embed(title="Draft Status — Roundless", color=color)
+        embed.add_field(name="Overall Pick", value=str(draft.overall_pick), inline=True)
+        embed.add_field(name="Up Now",       value=_team_mentions(team),     inline=True)
+        embed.add_field(name="Time Left",    value=time_left,                inline=True)
+        embed.add_field(name="Base Timer",   value=f"{duration // 60} min",  inline=True)
 
-    skippers = [(t["name"], t.get("skip_count", 0)) for t in draft.teams if t.get("skip_count", 0) > 0]
-    if skippers:
-        embed.add_field(
-            name="Skip Penalties",
-            value="\n".join(f"{n}: {c} skip(s) (−{c*10} min)" for n, c in skippers),
-            inline=False,
-        )
+        order = draft._roundless_sorted_order()
+        current_idx = draft.current_team_idx
+        queue_lines = []
+        for pos, idx in enumerate(order[:8], 1):
+            t = draft.teams[idx]
+            money = t.get("money_spent", 0)
+            picks = len(t.get("picks", []))
+            arrow = " ← **ON CLOCK**" if idx == current_idx else ""
+            queue_lines.append(f"**{pos}.** {t['name']} — ${money}, {picks} pick(s){arrow}")
+        embed.add_field(name="Pick Queue", value="\n".join(queue_lines) or "—", inline=False)
+
+        skippers = [(t["name"], t.get("skip_count", 0)) for t in draft.teams if t.get("skip_count", 0) > 0]
+        if skippers:
+            embed.add_field(
+                name="Skip Penalties",
+                value="\n".join(f"{n}: {c} skip(s) (−{c*10} min)" for n, c in skippers),
+                inline=False,
+            )
+    else:
+        embed = discord.Embed(title=f"Draft Status - Round {draft.round_number} of {ROUNDS}", color=color)
+        embed.add_field(name="Overall Pick",  value=str(draft.overall_pick),  inline=True)
+        embed.add_field(name="Pick in Round", value=str(draft.pick_in_round), inline=True)
+        embed.add_field(name="Up Now",        value=_team_mentions(team),      inline=True)
+        embed.add_field(name="Time Left",     value=time_left,                 inline=True)
+        embed.add_field(name="Base Timer",    value=f"{duration // 60} min",   inline=True)
+
+        if draft.penalty_teams:
+            penalised = ", ".join(_team_mentions(draft.teams[i]) for i in draft.penalty_teams)
+            embed.add_field(name="Pick Last (R6-10)", value=penalised, inline=False)
+
+        skippers = [(t["name"], t.get("skip_count", 0)) for t in draft.teams if t.get("skip_count", 0) > 0]
+        if skippers:
+            embed.add_field(
+                name="Skip Penalties",
+                value="\n".join(f"{n}: {c} skip(s) (−{c*10} min)" for n, c in skippers),
+                inline=False,
+            )
 
     await ctx.send(embed=embed)
 
 
 @bot.command(name="timerskiplist")
 async def timerskiplist(ctx):
-    """!timerskiplist — show each team's skip count and resulting timer per round"""
+    """!timerskiplist — show each team's skip count and resulting timer"""
     if draft.state not in ("lotto", "active", "paused", "window_paused", "complete"):
         await ctx.send("❌ No draft loaded.")
         return
@@ -1371,22 +1663,33 @@ async def timerskiplist(ctx):
         if skips == 0:
             continue
         any_skips = True
-        is_as    = draft.is_active_skip(i)
+        is_as     = draft.is_active_skip(i)
         deduction = skips * SKIP_PENALTY
-        lines = []
-        for r in range(1, ROUNDS + 1):
-            base      = ROUND_TIMERS.get(r, 1800)
-            effective = max(base - deduction, 0)
-            base_min  = base // 60
+        as_tag    = " 🔴 **ACTIVE SKIP**" if is_as else ""
+
+        if draft.mode == "roundless":
+            from config import ROUNDLESS_TIMER
+            effective = max(ROUNDLESS_TIMER - deduction, 0)
+            base_min  = ROUNDLESS_TIMER // 60
             eff_min   = effective // 60
-            if effective <= 0:
-                lines.append(f"R{r}: ~~{base_min}m~~ → **instant skip**")
-            else:
-                lines.append(f"R{r}: ~~{base_min}m~~ → **{eff_min}m**")
-        as_tag = " 🔴 **ACTIVE SKIP**" if is_as else ""
+            value = (f"~~{base_min}m~~ → **instant skip**" if effective <= 0
+                     else f"~~{base_min}m~~ → **{eff_min}m**")
+        else:
+            lines = []
+            for r in range(1, ROUNDS + 1):
+                base      = ROUND_TIMERS.get(r, 1800)
+                effective = max(base - deduction, 0)
+                base_min  = base // 60
+                eff_min   = effective // 60
+                if effective <= 0:
+                    lines.append(f"R{r}: ~~{base_min}m~~ → **instant skip**")
+                else:
+                    lines.append(f"R{r}: ~~{base_min}m~~ → **{eff_min}m**")
+            value = "\n".join(lines)
+
         embed.add_field(
             name=f"{team['name']} — {skips} skip(s) (−{skips * 10} min){as_tag}",
-            value="\n".join(lines),
+            value=value,
             inline=True,
         )
 
@@ -1468,7 +1771,8 @@ async def timerskiphistory(ctx, member: discord.Member = None):
                 ts = datetime.fromisoformat(e["timestamp"])
                 date_str = ts.strftime("%b %d, %Y")
                 skip_type = "timeout" if e.get("auto") else "manual"
-                lines.append(f"Pick #{e['pick_num']} (R{e['round_num']}) — {skip_type} — {date_str}")
+                round_str = "" if e.get("mode") == "roundless" else f" (R{e['round_num']})"
+                lines.append(f"Pick #{e['pick_num']}{round_str} — {skip_type} — {date_str}")
             embed.add_field(
                 name=f"{label} — {len(draft_entries)} skip(s) as \"{team_name}\"",
                 value="\n".join(lines),
@@ -1524,10 +1828,161 @@ async def timerboard(ctx):
         await ctx.send("❌ No draft in progress.")
         return
 
-    teams = draft.teams
-    chunks = [teams[i:i+25] for i in range(0, len(teams), 25)]
-    view = BoardView(chunks) if len(chunks) > 1 else discord.utils.MISSING
-    await ctx.send(embed=_build_board_embed(chunks, 0), view=view if len(chunks) > 1 else None)
+    COMPLETE_PICKS = 10  # teams with this many picks are done and hidden from the board
+
+    if draft.mode == "roundless":
+        order = draft._roundless_sorted_order()
+        current_idx = draft.current_team_idx
+        lines = []
+        pos = 1
+        for idx in order:
+            t = draft.teams[idx]
+            picks = len(t.get("picks", []))
+            if picks >= COMPLETE_PICKS:
+                continue  # team is done — skip
+            money = t.get("money_spent", 0)
+            last  = t.get("last_pick_number", 0)
+            skips = t.get("skip_count", 0)
+            skip_str = f" | {skips}x skip" if skips else ""
+            arrow = " ← **ON CLOCK**" if idx == current_idx else ""
+            lines.append(f"**{pos}.** {t['name']} — ${money} | {picks} picks | last #{last}{skip_str}{arrow}")
+            pos += 1
+        desc = "\n".join(lines) if lines else "_All teams complete!_"
+        if len(desc) > 4000:
+            desc = desc[:3997] + "…"
+        embed = discord.Embed(
+            title=f"Roundless Draft — Pick Order  (Pick #{draft.overall_pick})",
+            description=desc,
+            color=discord.Color.dark_blue(),
+        )
+        await ctx.send(embed=embed)
+    else:
+        teams  = [t for t in draft.teams if len(t.get("picks", [])) < COMPLETE_PICKS]
+        chunks = [teams[i:i+25] for i in range(0, len(teams), 25)]
+        if not chunks:
+            await ctx.send("✅ All teams have completed their picks!")
+            return
+        view = BoardView(chunks) if len(chunks) > 1 else None
+        await ctx.send(embed=_build_board_embed(chunks, 0), view=view)
+
+
+@bot.command(name="timersettimer")
+@is_commissioner()
+async def timersettimer(ctx, minutes: int):
+    """!timersettimer <minutes> — override the timer for all future picks. Use 0 to revert to defaults."""
+    if draft.state not in ("active", "paused", "window_paused"):
+        await ctx.send("❌ No draft in progress.")
+        return
+
+    channel = bot.get_channel(DRAFT_CHANNEL_ID)
+
+    if minutes == 0:
+        draft.timer_override = None
+        draft.save()
+        await ctx.send("✅ Timer override cleared — back to default round timers.")
+        return
+
+    draft.timer_override = minutes * 60
+    draft.save()
+    await ctx.send(f"✅ Timer set to **{minutes} minutes** for all future picks.")
+
+    # If currently active, restart the current pick's timer with the new duration
+    if draft.state == "active" and channel:
+        await _start_timer(channel)
+
+
+# ── Roundless sync commands ───────────────────────────────────────────────────
+
+@bot.command(name="timerset")
+@is_commissioner()
+async def timerset(ctx, member: discord.Member, money: int, picks: int, last_pick: int):
+    """!timerset @GM <money> <picks> <last_pick#> — set all three roundless stats at once.
+    Example: !timerset @Admiral Ackbar 57 3 65"""
+    team_idx = next((i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    team = draft.teams[team_idx]
+    team["money_spent"] = money
+    current = len(team.get("picks", []))
+    if picks > current:
+        team.setdefault("picks", []).extend(["[manual]"] * (picks - current))
+    elif picks < current:
+        team["picks"] = team["picks"][:picks]
+    team["last_pick_number"] = last_pick
+    team["pending_makeup"]   = False
+    draft.save()
+    await ctx.send(
+        f"✅ **{team['name']}** — money: **${money}** | picks: **{picks}** | last pick: **#{last_pick}** | pending cleared."
+    )
+
+
+@bot.command(name="timersetmoney")
+@is_commissioner()
+async def timersetmoney(ctx, member: discord.Member, amount: int):
+    """!timersetmoney @GM <dollars> — set a team's total money spent (roundless setup).
+    Example: !timersetmoney @Morgan 51"""
+    team_idx = next((i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    draft.teams[team_idx]["money_spent"] = amount
+    draft.save()
+    await ctx.send(f"✅ **{draft.teams[team_idx]['name']}** money spent set to **${amount}**.")
+
+
+@bot.command(name="timersetpicks")
+@is_commissioner()
+async def timersetpicks(ctx, member: discord.Member, count: int):
+    """!timersetpicks @GM <count> — set a team's picks-made count (roundless setup).
+    Example: !timersetpicks @Morgan 2"""
+    team_idx = next((i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    team = draft.teams[team_idx]
+    current = len(team.get("picks", []))
+    if count > current:
+        team.setdefault("picks", []).extend(["[manual]"] * (count - current))
+    elif count < current:
+        team["picks"] = team["picks"][:count]
+    draft.save()
+    await ctx.send(f"✅ **{team['name']}** picks made set to **{count}**.")
+
+
+@bot.command(name="timersetlastpick")
+@is_commissioner()
+async def timersetlastpick(ctx, member: discord.Member, pick_number: int):
+    """!timersetlastpick @GM <pick#> — set the overall pick# when this team last picked (roundless setup).
+    Example: !timersetlastpick @Morgan 39"""
+    team_idx = next((i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    draft.teams[team_idx]["last_pick_number"] = pick_number
+    draft.save()
+    await ctx.send(f"✅ **{draft.teams[team_idx]['name']}** last pick number set to **#{pick_number}**.")
+
+
+@bot.command(name="timeraddskip")
+@is_commissioner()
+async def timeraddskip(ctx, member: discord.Member, count: int = 1):
+    """!timeraddskip @GM [count] — manually add skip(s) to a team (default 1).
+    Example: !timeraddskip @Morgan   (adds 1 skip)
+    Example: !timeraddskip @Morgan 2 (adds 2 skips)"""
+    team_idx = next((i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    team = draft.teams[team_idx]
+    team["skip_count"] = team.get("skip_count", 0) + count
+    draft.save()
+    new_total = team["skip_count"]
+    penalty   = new_total * 600 // 60
+    await ctx.send(
+        f"✅ **{team['name']}** skip count set to **{new_total}** "
+        f"(-{penalty} min off future timers)."
+    )
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
@@ -1645,6 +2100,31 @@ async def removeskip(ctx, member: discord.Member):
     )
 
 
+@bot.command(name="clearpending")
+@is_commissioner()
+async def clearpending(ctx, member: discord.Member):
+    """!clearpending @GM — clear a team's pending makeup flag so they re-enter the roundless queue normally."""
+    team_idx = next(
+        (i for i, t in enumerate(draft.teams) if member.id in t["user_ids"]),
+        None
+    )
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+
+    team = draft.teams[team_idx]
+    if not team.get("pending_makeup"):
+        await ctx.send(f"ℹ️ **{team['name']}** is not marked as pending.")
+        return
+
+    team["pending_makeup"] = False
+    draft.save()
+    await ctx.send(
+        f"✅ **{team['name']}** pending flag cleared — they re-enter the queue based on "
+        f"${team.get('money_spent', 0)} spent, {len(team.get('picks', []))} pick(s)."
+    )
+
+
 @bot.command(name="markpending")
 @is_commissioner()
 async def markpending(ctx, member: discord.Member):
@@ -1706,6 +2186,7 @@ async def addskip(ctx, member: discord.Member):
         "pick_num":      draft.overall_pick,
         "round_num":     draft.round_number,
         "auto":          True,
+        "mode":          draft.mode,
         "timestamp":     datetime.now(timezone.utc).isoformat(),
     })
 
@@ -1787,6 +2268,8 @@ async def timerhelp(ctx):
         "`!timerloadlotto` - reads the most recent lotto from the lotto channel automatically\n"
         "`!timerlottoupdate` - re-reads the lotto to pick up roster changes (e.g. new co-owner added)\n"
         "`!timerstart [name]` - begin the draft (optional name e.g. `ATD 101` is saved to skip history)\n"
+        "`!timermode roundless` - switch to roundless (money-based) mode at any time\n"
+        "`!timermode snake` - switch back to normal snake mode\n"
         "`!timerpause` - freeze the clock mid-pick\n"
         "`!timerresume` - resume from where it was paused\n"
         "`!timerjumpto <pick#>` - jump to a specific pick (use when picks were made before the bot started)\n"
@@ -1805,12 +2288,21 @@ async def timerhelp(ctx):
         "`!timerboard` - show all picks made so far"
     ), inline=False)
 
-    embed.add_field(name="⏱️ Round Timers", value=(
+    embed.add_field(name="⏱️ Round Timers (Snake)", value=(
         "R1–2: **60 min**\n"
         "R3–8: **45 min**\n"
         "R9–10: **30 min**\n"
         "Each skip deducts **10 min** from all of that team's future picks."
     ), inline=True)
+
+    embed.add_field(name="🔄 Roundless Mode", value=(
+        "Pick order is computed **after every pick** based on:\n"
+        "1. Less money spent → picks sooner\n"
+        "2. Fewer picks made → picks sooner\n"
+        "3. More time since last pick → picks sooner\n"
+        "Picks must include price: `14. :Emoji: Player Name $42 Year`\n"
+        "No fixed rounds — use `!timereset` to end the draft."
+    ), inline=False)
 
     embed.add_field(name="⚡ Challenge Rules", value=(
         "After a GM is pinged, if they post in **#atd-chat**, anyone can reply to that message with `challenge`.\n"
