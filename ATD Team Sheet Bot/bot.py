@@ -9,73 +9,120 @@ import json
 import os
 from datetime import datetime
 import requests.exceptions
-from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME
+from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID
 from player_positions import PLAYER_POSITIONS
-from emoji_map import EMOJI_TEAM_MAP
+from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
 
-# ── Persistent sheet config ───────────────────────────────────────────────────
+# ── Persistent config ─────────────────────────────────────────────────────────
 _CONFIG_FILE = "/data/sheet_config.json"
 
-def _load_sheet_name() -> str:
+
+def _load_config() -> dict:
     try:
         with open(_CONFIG_FILE) as f:
-            return json.load(f).get("worksheet_name") or WORKSHEET_NAME
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return WORKSHEET_NAME
+        return {}
 
-def _save_sheet_name(name: str):
+
+def _save_config(cfg: dict):
     os.makedirs(os.path.dirname(_CONFIG_FILE), exist_ok=True)
     with open(_CONFIG_FILE, "w") as f:
-        json.dump({"worksheet_name": name}, f)
+        json.dump(cfg, f)
 
-_current_sheet_name = _load_sheet_name()
+
+_config = _load_config()
+
+# channel_sheet_map: {channel_id (int): {"tab": str, "sheet_id": str}}
+def _migrate_entry(v):
+    """Migrate old string-value entries to the new dict format."""
+    if isinstance(v, str):
+        return {"tab": v, "sheet_id": SPREADSHEET_ID}
+    return v
+
+_channel_sheet_map: dict[int, dict] = {
+    int(k): _migrate_entry(v) for k, v in _config.get("channel_sheet_map", {}).items()
+}
+# Backward compat: seed from legacy single-sheet config
+if not _channel_sheet_map and DISCORD_CHANNEL_ID:
+    _channel_sheet_map[DISCORD_CHANNEL_ID] = {
+        "tab": _config.get("worksheet_name") or WORKSHEET_NAME,
+        "sheet_id": SPREADSHEET_ID,
+    }
+
+# Per-channel SheetManager instances (lazy-initialised on first use)
+_channel_managers: dict[int, "SheetManager"] = {}
+
+
+def _persist_channel_map():
+    cfg = _load_config()
+    cfg["channel_sheet_map"] = {str(k): v for k, v in _channel_sheet_map.items()}
+    _save_config(cfg)
+
+
+def _set_channel_sheet(channel_id: int, tab: str, spreadsheet_id: str = None):
+    _channel_sheet_map[channel_id] = {
+        "tab": tab,
+        "sheet_id": spreadsheet_id or SPREADSHEET_ID,
+    }
+    _channel_managers.pop(channel_id, None)
+    _persist_channel_map()
+
+
+def _remove_channel_sheet(channel_id: int):
+    _channel_sheet_map.pop(channel_id, None)
+    _channel_managers.pop(channel_id, None)
+    _persist_channel_map()
+
+
+def _get_manager(channel_id: int) -> "SheetManager | None":
+    """Return the SheetManager for a channel, creating it lazily if needed."""
+    if channel_id not in _channel_sheet_map:
+        return None
+    if channel_id not in _channel_managers:
+        entry = _channel_sheet_map[channel_id]
+        try:
+            ws = connect_sheets(entry["tab"], entry["sheet_id"])
+            _channel_managers[channel_id] = SheetManager(ws, entry["sheet_id"])
+        except Exception as e:
+            print(f"[Setup] ❌ Cannot connect to '{entry['tab']}' for channel {channel_id}: {e}")
+            return None
+    return _channel_managers.get(channel_id)
+
+
+def _extract_spreadsheet_id(args: str) -> tuple:
+    """
+    Parse an optional spreadsheet ID or Google Sheets URL from the start of args.
+    Returns (spreadsheet_id_or_None, remaining_tab_name).
+    """
+    url_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]{20,})', args)
+    if url_match:
+        sid = url_match.group(1)
+        remaining = re.sub(r'https?://\S+', '', args).strip()
+        return sid, remaining
+    # Bare ID: first token is 30+ alphanumeric chars (won't match any tab name)
+    first, _, rest = args.partition(' ')
+    if re.fullmatch(r'[a-zA-Z0-9_-]{30,}', first):
+        return first, rest.strip()
+    return None, args
 
 
 # =============================================================================
 # GOOGLE SHEETS
 # =============================================================================
 
-def connect_sheets(sheet_name: str = None):
+def connect_sheets(sheet_name: str, spreadsheet_id: str = None):
     scope = [
         'https://spreadsheets.google.com/feeds',
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive',
     ]
-    name = sheet_name or _current_sheet_name
+    sid = spreadsheet_id or SPREADSHEET_ID
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
     client = gspread.authorize(creds)
-    ws = client.open_by_key(SPREADSHEET_ID).worksheet(name)
-    print(f"✅ Connected to worksheet: '{name}'")
+    ws = client.open_by_key(sid).worksheet(sheet_name)
+    print(f"✅ Connected to worksheet: '{sheet_name}' (spreadsheet: {sid})")
     return ws
-
-
-
-try:
-    worksheet = connect_sheets()
-except Exception as e:
-    print(f"❌ Google Sheets connection failed: {e}")
-    worksheet = None
-
-
-def _sheets_call(fn, *args, retries=3, **kwargs):
-    """
-    Call a gspread function, retrying up to `retries` times on transient
-    network errors (dropped connections, timeouts, etc.).
-    Sleeps 2s between attempts and reconnects the worksheet on failure.
-    """
-    global worksheet
-    for attempt in range(1, retries + 1):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            if attempt == retries:
-                raise
-            print(f"[Sheets] Error (attempt {attempt}/{retries}): {type(e).__name__}: {e} — reconnecting…")
-            time.sleep(2)
-            try:
-                worksheet = connect_sheets()
-            except Exception:
-                pass  # will retry the original call anyway
 
 
 # =============================================================================
@@ -111,9 +158,28 @@ POSITION_OFFSETS = {
 # =============================================================================
 
 class SheetManager:
-    def __init__(self, ws):
+    def __init__(self, ws, spreadsheet_id: str = None):
         self.ws = ws
+        self._spreadsheet_id = spreadsheet_id or SPREADSHEET_ID
         self._undo_stack = []  # list of dicts describing each successful write
+
+    def _call(self, method_name, *args, retries=3, **kwargs):
+        """
+        Call a gspread worksheet method by name, retrying up to `retries` times
+        on transient errors. Reconnects the worksheet between attempts.
+        """
+        for attempt in range(1, retries + 1):
+            try:
+                return getattr(self.ws, method_name)(*args, **kwargs)
+            except Exception as e:
+                if attempt == retries:
+                    raise
+                print(f"[Sheets] Error (attempt {attempt}/{retries}): {type(e).__name__}: {e} — reconnecting…")
+                time.sleep(2)
+                try:
+                    self.ws = connect_sheets(self.ws.title, self._spreadsheet_id)
+                except Exception:
+                    pass
 
     def _find_team_cell(self, team_name):
         """
@@ -122,7 +188,7 @@ class SheetManager:
         Supports any grid layout — teams can be anywhere.
         """
         print(f"[Sheet] Fetching sheet data to locate '{team_name}'…")
-        data = _sheets_call(self.ws.get_all_values)
+        data = self._call('get_all_values')
         name_lower = team_name.lower().strip()
 
         # Exact match first
@@ -241,7 +307,7 @@ class SheetManager:
 
         # 3. Duplicate check — player must not already exist anywhere in the sheet
         print(f"[Pick] Checking for duplicates…")
-        all_data = _sheets_call(self.ws.get_all_values)
+        all_data = self._call('get_all_values')
         existing_team = self._find_existing_player(player_name, all_data)
         if existing_team:
             print(f"[Pick] ❌ Duplicate — '{player_name}' already on '{existing_team}'")
@@ -323,7 +389,7 @@ class SheetManager:
             })
 
         print(f"[Pick] Writing to sheet: row={target_row} col={team_col} → '{player_name}' | year={year} price={price}")
-        _sheets_call(self.ws.batch_update, updates)
+        self._call('batch_update', updates)
         print(f"[Pick] ✅ Done — {player_name} ({used_position} {slot_label}) → {team_name} row {target_row}")
 
         # Record for undo
@@ -364,13 +430,10 @@ class SheetManager:
             ranges.append(gspread.utils.rowcol_to_a1(row, entry['price_col']))
 
         print(f"[Undo] Clearing {ranges} for '{player}' on '{team}'")
-        _sheets_call(self.ws.batch_clear, ranges)
+        self._call('batch_clear', ranges)
         print(f"[Undo] ✅ Removed {player} ({slot}) from {team} row {row}")
 
         return True, f"**{player}** ({slot}) removed from **{team}** (row {row})"
-
-
-sheet_manager = SheetManager(worksheet) if worksheet else None
 
 
 # =============================================================================
@@ -448,28 +511,37 @@ def parse_message(content):
     text = content.strip()
 
     # Normalize curly/smart apostrophes → straight apostrophe so year regex matches
-    text = text.replace('\u2018', "'").replace('\u2019', "'").replace('\u02bc', "'")
+    text = text.replace('‘', "'").replace('’', "'").replace('ʼ', "'")
 
     # Remove leading pick number e.g. "61. "
     text = _PICK_RE.sub('', text).strip()
 
     # --- Team emoji (required) ---
     emoji_match = _CUSTOM_EMOJI_RE.search(text)
-    if not emoji_match:
-        return None, (
-            "No team emoji found. "
-            "Make sure to include your team's logo emoji in the message."
-        )
-
-    emoji_name = emoji_match.group(1)
-    text = _CUSTOM_EMOJI_RE.sub('', text, count=1).strip()
-
-    team = EMOJI_TEAM_MAP.get(emoji_name)
-    if not team:
-        return None, (
-            f"Unrecognised emoji **:{emoji_name}:**.\n"
-            f"Add it to `emoji_map.py`: `\"{emoji_name}\": \"Team Name\"`"
-        )
+    if emoji_match:
+        emoji_name = emoji_match.group(1)
+        text = _CUSTOM_EMOJI_RE.sub('', text, count=1).strip()
+        team = EMOJI_TEAM_MAP.get(emoji_name)
+        if not team:
+            return None, (
+                f"Unrecognised emoji **:{emoji_name}:**.\n"
+                f"Add it to `emoji_map.py`: `\"{emoji_name}\": \"Team Name\"`"
+            )
+    else:
+        # Fall back to built-in Unicode emojis (e.g. flag_fr 🇫🇷)
+        team = None
+        emoji_name = None
+        for char, team_name in UNICODE_EMOJI_MAP.items():
+            if char in text:
+                team = team_name
+                emoji_name = char
+                text = text.replace(char, '', 1).strip()
+                break
+        if not team:
+            return None, (
+                "No team emoji found. "
+                "Make sure to include your team's logo emoji in the message."
+            )
 
     # --- Bench + position override (optional, e.g. "Bench PF" at end) ---
     bench_only = False
@@ -513,7 +585,7 @@ def parse_message(content):
     player = re.sub(r'\(\s*\)', '', text)                    # remove empty ()
     player = re.sub(r'(?i)^\s*select\s+', '', player)        # strip leading "select"
     player = re.sub(r'(?i)\s+for[\s.,;:]*$', '', player)      # strip trailing "for"
-    player = re.sub(r'\s*-\s*', ' ', player)                 # collapse stray dashes
+    player = re.sub(r'\s+-\s+', ' ', player)                 # collapse stray dashes (space-dash-space only, preserves hyphenated names)
     player = player.strip('.,;: ')                            # strip trailing punctuation
     player = re.sub(r'\s+', ' ', player).strip()
     player = player.title()
@@ -547,7 +619,9 @@ COMMISSIONER_ROLE = "LeComissioner"
 
 @bot.check
 async def require_commissioner(ctx):
-    """Global check — every command requires the LeComissioner role."""
+    """Global check — requires LeComissioner role OR server administrator permission."""
+    if ctx.author.guild_permissions.administrator:
+        return True
     if any(r.name == COMMISSIONER_ROLE for r in ctx.author.roles):
         return True
     raise commands.CheckFailure("not_commissioner")
@@ -556,11 +630,10 @@ async def require_commissioner(ctx):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
-        if ctx.channel.id == DISCORD_CHANNEL_ID:
-            await ctx.send(
-                f"❌ You don't have permission to use bot commands. "
-                f"Contact **Soapz** to apply for **LeCommish**."
-            )
+        await ctx.send(
+            f"❌ You don't have permission to use bot commands. "
+            f"Contact **Soapz** to apply for **LeCommish**."
+        )
     elif isinstance(error, commands.CommandNotFound):
         pass  # ignore unknown commands silently
 
@@ -568,16 +641,24 @@ async def on_command_error(ctx, error):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    if channel:
-        print(f"✅ Monitoring #{channel.name} (ID: {DISCORD_CHANNEL_ID})")
-    else:
-        print(f"⚠️  Channel {DISCORD_CHANNEL_ID} not found — check DISCORD_CHANNEL_ID")
+    if not _channel_sheet_map:
+        print("⚠️  No channel→sheet mappings configured. Use !addchannel or !setsheet.")
+        return
+    for ch_id, entry in _channel_sheet_map.items():
+        ch = bot.get_channel(ch_id)
+        ch_name = f"#{ch.name}" if ch else str(ch_id)
+        manager = _get_manager(ch_id)
+        if manager:
+            print(f"✅ {ch_name} → '{entry['tab']}' (sheet: {entry['sheet_id']})")
+        else:
+            print(f"⚠️  {ch_name} → '{entry['tab']}' (connection failed)")
 
 
 @bot.event
 async def on_message(message):
-    if message.author.bot:
+    # Let the Draft List Bot's picks through; ignore all other bot messages.
+    _from_draft_list = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
+    if message.author.bot and not _from_draft_list:
         return
 
     # Always process commands regardless of channel
@@ -585,12 +666,9 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # Only handle non-command messages in the designated channel
-    if message.channel.id != DISCORD_CHANNEL_ID:
-        return
-
-    if not sheet_manager:
-        await message.channel.send("❌ Not connected to Google Sheets. Check the console.")
+    # Only handle pick messages in channels that have a sheet mapping
+    manager = _get_manager(message.channel.id)
+    if not manager:
         return
 
     print(f"\n[Msg] #{message.channel.name} | {message.author.display_name}: {message.content[:120]}")
@@ -598,19 +676,31 @@ async def on_message(message):
 
     if error:
         print(f"[Parse] ❌ {error}")
-        # Only surface errors if the message looks like an attempted pick
-        # (contains a custom emoji). Skip notifications and other messages
-        # have no emoji and should be silently ignored.
-        if _CUSTOM_EMOJI_RE.search(message.content):
+        # Respond if the message looks like a pick attempt:
+        # has a custom emoji, OR starts with a pick number (e.g. "14.")
+        looks_like_pick = bool(
+            _CUSTOM_EMOJI_RE.search(message.content)
+            or re.match(r'^\s*\d+\.', message.content)
+        )
+        if looks_like_pick:
             await message.add_reaction('❌')
             await message.channel.send(f"❌ {error}")
         return
 
     print(f"[Parse] ✅ emoji={data['emoji_name']} team={data['team']} player={data['player']} year={data['year']} price={data['price']} bench_only={data['bench_only']}")
 
+    # Price is mandatory for this draft theme
+    if PRICE_REQUIRED and not data.get('price'):
+        await message.add_reaction('❌')
+        await message.channel.send(
+            "❌ **Price is required** for this draft. Include the price in your pick, e.g. `$26`.\n"
+            "Format: `14. <:YourEmoji:> Player Name year $price`"
+        )
+        return
+
     try:
         async with message.channel.typing():
-            success, result = sheet_manager.add_player(
+            success, result = manager.add_player(
                 data['team'],
                 data['player'],
                 year=data['year'],
@@ -647,44 +737,102 @@ async def on_message(message):
 
 @bot.command(name='reload')
 async def cmd_reload(ctx):
-    """Reconnect to Google Sheets and refresh data."""
-    if ctx.channel.id != DISCORD_CHANNEL_ID:
+    """Reconnect to Google Sheets for this channel."""
+    channel_id = ctx.channel.id
+    if channel_id not in _channel_sheet_map:
+        await ctx.send(
+            "❌ This channel has no sheet mapping. "
+            "Use `!setsheet <Tab Name>` to map it first."
+        )
         return
-    global worksheet, sheet_manager
+    entry = _channel_sheet_map[channel_id]
+    tab, sid = entry["tab"], entry["sheet_id"]
     try:
-        worksheet = connect_sheets()
-        sheet_manager = SheetManager(worksheet)
-        await ctx.send("✅ Reconnected to Google Sheets.")
+        ws = connect_sheets(tab, sid)
+        _channel_managers[channel_id] = SheetManager(ws, sid)
+        await ctx.send(f"✅ Reconnected to worksheet **{tab}**.")
     except Exception as e:
         await ctx.send(f"❌ Reconnect failed: {e}")
 
 
 @bot.command(name='setsheet')
-async def cmd_setsheet(ctx, *, name: str):
-    """Switch to a different worksheet tab. Usage: !setsheet ATD 102 - Flux"""
-    global worksheet, sheet_manager, _current_sheet_name
+async def cmd_setsheet(ctx, *, args: str):
+    """Map this channel to a worksheet tab. Usage: !setsheet [SpreadsheetID_or_URL] Tab Name"""
+    sid, tab = _extract_spreadsheet_id(args)
+    sid = sid or SPREADSHEET_ID
+    if not tab:
+        await ctx.send("❌ Please provide a tab name. Usage: `!setsheet [SpreadsheetID] Tab Name`")
+        return
     try:
-        worksheet = connect_sheets(sheet_name=name)
-        sheet_manager = SheetManager(worksheet)
-        _current_sheet_name = name
-        _save_sheet_name(name)
-        await ctx.send(f"✅ Switched to worksheet **{name}**.")
+        ws = connect_sheets(tab, sid)
+        _set_channel_sheet(ctx.channel.id, tab, sid)
+        _channel_managers[ctx.channel.id] = SheetManager(ws, sid)
+        await ctx.send(f"✅ This channel now writes to worksheet **{tab}**.")
     except gspread.exceptions.WorksheetNotFound:
-        await ctx.send(f"❌ No worksheet tab named **{name}** found. Check the spelling.")
+        await ctx.send(f"❌ No worksheet tab named **{tab}** found. Check the spelling.")
     except Exception as e:
         await ctx.send(f"❌ Failed to switch sheet: {e}")
 
 
-@bot.command(name='sheetundo')
-async def cmd_sheetundo(ctx):
-    """Undo the last player addition."""
-    if ctx.channel.id != DISCORD_CHANNEL_ID:
-        return
-    if not sheet_manager:
-        await ctx.send("❌ Not connected to Google Sheets.")
+@bot.command(name='addchannel')
+async def cmd_addchannel(ctx, channel: discord.TextChannel, *, args: str):
+    """Map a channel to a worksheet tab. Usage: !addchannel #channel [SpreadsheetID_or_URL] Tab Name"""
+    sid, tab = _extract_spreadsheet_id(args)
+    sid = sid or SPREADSHEET_ID
+    if not tab:
+        await ctx.send("❌ Please provide a tab name. Usage: `!addchannel #channel [SpreadsheetID] Tab Name`")
         return
     try:
-        success, result = sheet_manager.undo_last()
+        ws = connect_sheets(tab, sid)
+        _set_channel_sheet(channel.id, tab, sid)
+        _channel_managers[channel.id] = SheetManager(ws, sid)
+        await ctx.send(f"✅ **#{channel.name}** → worksheet **{tab}**.")
+    except gspread.exceptions.WorksheetNotFound:
+        await ctx.send(f"❌ No worksheet tab named **{tab}** found. Check the spelling.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed: {e}")
+
+
+@bot.command(name='removechannel')
+async def cmd_removechannel(ctx, channel: discord.TextChannel):
+    """Remove a channel→sheet mapping. Usage: !removechannel #channel"""
+    if channel.id not in _channel_sheet_map:
+        await ctx.send(f"❌ **#{channel.name}** has no sheet mapping.")
+        return
+    _remove_channel_sheet(channel.id)
+    await ctx.send(f"✅ Removed mapping for **#{channel.name}**. The bot will no longer process picks there.")
+
+
+@bot.command(name='channels')
+async def cmd_channels(ctx):
+    """List all channel→sheet mappings."""
+    if not _channel_sheet_map:
+        await ctx.send("No channel→sheet mappings configured. Use `!addchannel` or `!setsheet` to add one.")
+        return
+    lines = []
+    for ch_id, entry in _channel_sheet_map.items():
+        ch_ref = f"<#{ch_id}>"
+        tab = entry["tab"]
+        sid = entry["sheet_id"]
+        short_id = sid[:10] + "…" if len(sid) > 10 else sid
+        lines.append(f"{ch_ref} → **{tab}** (`{short_id}`)")
+    embed = discord.Embed(
+        title="Channel → Sheet Mappings",
+        description="\n".join(lines),
+        color=discord.Color.blue(),
+    )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='sheetundo')
+async def cmd_sheetundo(ctx):
+    """Undo the last player addition in this channel."""
+    manager = _get_manager(ctx.channel.id)
+    if not manager:
+        await ctx.send("❌ This channel has no sheet mapping.")
+        return
+    try:
+        success, result = manager.undo_last()
     except Exception as e:
         await ctx.send(f"❌ Undo failed: {e}")
         return
@@ -697,8 +845,6 @@ async def cmd_sheetundo(ctx):
 @bot.command(name='teams')
 async def cmd_teams(ctx):
     """List all configured emoji → team mappings."""
-    if ctx.channel.id != DISCORD_CHANNEL_ID:
-        return
     if not EMOJI_TEAM_MAP:
         await ctx.send("No teams configured in `emoji_map.py` yet.")
         return
@@ -752,8 +898,6 @@ class HelpView(discord.ui.View):
 @bot.command(name='sheethelp')
 async def cmd_sheethelp(ctx):
     """Detailed explanation of everything the bot does."""
-    if ctx.channel.id != DISCORD_CHANNEL_ID:
-        return
 
     # ── Embed 1: Message format ───────────────────────────────────────────────
     e1 = discord.Embed(
@@ -883,6 +1027,7 @@ async def cmd_sheethelp(ctx):
         value=(
             "`!sheetundo` — Removes the last successfully added player from the sheet.\n"
             "Can be used multiple times to step back through picks one by one.\n"
+            "Undo is **per channel** — each channel has its own undo history.\n"
             "**Undo history resets when the bot restarts.**"
         ),
         inline=False,
@@ -921,8 +1066,12 @@ async def cmd_sheethelp(ctx):
             "`!sheethelp` — This guide\n"
             "`!sheetinfo` — Quick-reference summary\n"
             "`!teams` — List all emoji → team mappings currently configured\n"
-            "`!sheetundo` — Undo the last player addition\n"
-            "`!reload` — Force-reconnect to Google Sheets (use if the bot seems stuck)"
+            "`!sheetundo` — Undo the last player addition in this channel\n"
+            "`!reload` — Force-reconnect this channel to Google Sheets\n"
+            "`!setsheet <Tab Name>` — Map this channel to a worksheet tab\n"
+            "`!addchannel #channel <Tab Name>` — Map another channel to a worksheet tab\n"
+            "`!removechannel #channel` — Remove a channel's sheet mapping\n"
+            "`!channels` — List all channel → sheet mappings"
         ),
         inline=False,
     )
@@ -943,8 +1092,6 @@ async def cmd_sheethelp(ctx):
 @bot.command(name='sheetinfo')
 async def cmd_help(ctx):
     """Show usage instructions."""
-    if ctx.channel.id != DISCORD_CHANNEL_ID:
-        return
     embed = discord.Embed(
         title="ATD Team Sheet Bot",
         color=discord.Color.blue(),
@@ -952,7 +1099,7 @@ async def cmd_help(ctx):
     embed.add_field(
         name="Adding a player",
         value=(
-            "Post in this channel (no command prefix needed):\n"
+            "Post in a configured channel (no command prefix needed):\n"
             "```[pick#.] <team emoji> [year] Player Name [year] [$price] [POS]```\n"
             "**Examples:**\n"
             "`61. :MIL: 91-92 Dennis Rodman ($3)`\n"
@@ -969,8 +1116,12 @@ async def cmd_help(ctx):
         name="Commands",
         value=(
             "`!teams` — List all emoji → team mappings\n"
-            "`!sheetundo` — Undo the last player addition\n"
-            "`!reload` — Reconnect to Google Sheets\n"
+            "`!sheetundo` — Undo the last player addition in this channel\n"
+            "`!reload` — Reconnect this channel to Google Sheets\n"
+            "`!setsheet <Tab Name>` — Map this channel to a worksheet tab\n"
+            "`!addchannel #channel <Tab Name>` — Map another channel to a tab\n"
+            "`!removechannel #channel` — Remove a channel mapping\n"
+            "`!channels` — Show all channel → sheet mappings\n"
             "`!sheetinfo` — This summary\n"
             "`!sheethelp` — Full guide with all details"
         ),
@@ -982,10 +1133,8 @@ async def cmd_help(ctx):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("❌ DISCORD_TOKEN not set in .env")
-    elif not DISCORD_CHANNEL_ID:
-        print("❌ DISCORD_CHANNEL_ID not set in .env")
-    elif not worksheet:
-        print("❌ Could not connect to Google Sheets — check credentials and SPREADSHEET_ID")
+    elif not SPREADSHEET_ID:
+        print("❌ SPREADSHEET_ID not set in .env")
     else:
         print("🚀 Starting ATD Team Sheet Bot...")
         bot.run(DISCORD_TOKEN)

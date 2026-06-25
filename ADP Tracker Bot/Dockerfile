@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
+FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 
@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "wowy_bot.py"]
+CMD ["python", "avg_draft_position.py"]

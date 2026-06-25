@@ -62,6 +62,12 @@ CMD_TRACK        = "!track"
 CMD_UNTRACK      = "!untrack"
 CMD_TRACKS       = "!tracks"
 
+KNOWN_CMDS = {
+    CMD_HELP, CMD_RESET, CMD_STATUS, CMD_UNDO, CMD_REDO,
+    CMD_FORCE, CMD_COLOR, CMD_ENDHIGHLIGHT, CMD_REHIGHLIGHT,
+    CMD_TRACK, CMD_UNTRACK, CMD_TRACKS,
+}
+
 # ==========================================================
 # ROLE LOCK
 # ==========================================================
@@ -481,6 +487,9 @@ async def on_message(message: discord.Message):
     # ROLE LOCK — COMMANDS ONLY
     # ----------------------------------------------------------
     if is_command(content):
+        cmd_word = content.split()[0].lower() if content.split() else ""
+        if cmd_word not in KNOWN_CMDS:
+            return  # Not our command — ignore silently
         if not isinstance(message.author, discord.Member) or not is_commish(message.author):
             await message.reply(
                 "Unfortunately, you are not a commish. "

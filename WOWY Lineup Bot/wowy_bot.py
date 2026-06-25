@@ -124,14 +124,18 @@ def find_closest_team(abbr: str):
 # COMMAND PARSING
 # ==========================================================
 
+VALID_LEVERAGES = {"all", "high", "medium", "low"}
+
 def parse_wowy_args(args: str):
     """
-    Parse: SAS Victor Wembanyama| De'Aaron Fox| Stephon Castle 2026
+    Parse: SAS Victor Wembanyama| De'Aaron Fox 2026 [PS] [high|low|medium|all]
     Supports:
-        - Single year:  2026         → start=2026, end=2026
-        - Year range:   2022-2026    → start=2022, end=2026
-        - No year:      defaults to current season
-    Returns (team, [player_names], start_year, end_year)
+        - Single year:        2026         → start=2026, end=2026
+        - Dash range:         2022-2026    → start=2022, end=2026
+        - Space range:        2022 2026    → start=2022, end=2026
+        - Playoffs:           PS or playoffs keyword
+        - Leverage:           high / low / medium / all (default: all)
+    Returns (team, [player_names], start_year, end_year, season_type, leverage)
     Raises ValueError on bad input.
     """
     args = args.strip()
@@ -145,18 +149,40 @@ def parse_wowy_args(args: str):
             "e.g. `2013` for the 2012-13 season, `2024` for 2023-24."
         )
 
-    # Extract year or year range from end of string
-    year_range_match = re.search(r'\b(\d{4})-(\d{4})\s*$', args)
-    year_single_match = re.search(r'\b(\d{4})\s*$', args)
+    # Extract playoffs flag (PS or playoffs, case-insensitive)
+    season_type = "regular"
+    ps_match = re.search(r'\b(PS|playoffs)\b', args, re.IGNORECASE)
+    if ps_match:
+        season_type = "playoffs"
+        args = (args[:ps_match.start()] + args[ps_match.end():]).strip()
 
-    if year_range_match:
-        start_year = int(year_range_match.group(1))
-        end_year = int(year_range_match.group(2))
-        args = args[:year_range_match.start()].strip()
-    elif year_single_match:
-        end_year = int(year_single_match.group(1))
+    # Extract leverage (high/low/medium/all) — standalone word
+    leverage = "all"
+    lev_match = re.search(r'\b(high|low|medium|all)\b', args, re.IGNORECASE)
+    if lev_match:
+        leverage = lev_match.group(1).lower()
+        args = (args[:lev_match.start()] + args[lev_match.end():]).strip()
+
+    # Extract year(s) from end of string
+    # Space-separated range: "2022 2026"
+    two_year_match = re.search(r'\b(\d{4})\s+(\d{4})\s*$', args)
+    # Dash-separated range: "2022-2026"
+    dash_range_match = re.search(r'\b(\d{4})-(\d{4})\s*$', args)
+    # Single year
+    single_year_match = re.search(r'\b(\d{4})\s*$', args)
+
+    if two_year_match:
+        start_year = int(two_year_match.group(1))
+        end_year = int(two_year_match.group(2))
+        args = args[:two_year_match.start()].strip()
+    elif dash_range_match:
+        start_year = int(dash_range_match.group(1))
+        end_year = int(dash_range_match.group(2))
+        args = args[:dash_range_match.start()].strip()
+    elif single_year_match:
+        end_year = int(single_year_match.group(1))
         start_year = end_year
-        args = args[:year_single_match.start()].strip()
+        args = args[:single_year_match.start()].strip()
     else:
         raise ValueError(
             "Please include a year.\n"
@@ -186,7 +212,7 @@ def parse_wowy_args(args: str):
     if len(player_names) > 5:
         raise ValueError("Too many players (max 5).")
 
-    return team, player_names, start_year, end_year
+    return team, player_names, start_year, end_year, season_type, leverage
 
 
 def season_label(start_year: int, end_year: int) -> str:
@@ -226,16 +252,16 @@ def _is_current_season(start_year: int, end_year: int) -> bool:
     return end_year >= _current_season_end_year()
 
 
-def _cache_path(team: str, player_ids: list, start_year: int, end_year: int) -> str:
-    key = f"{team}_{'_'.join(str(p) for p in player_ids)}_{start_year}_{end_year}"
+def _cache_path(team: str, player_ids: list, start_year: int, end_year: int, season_type: str, leverage: str) -> str:
+    key = f"{team}_{'_'.join(str(p) for p in player_ids)}_{start_year}_{end_year}_{season_type}_{leverage}"
     return os.path.join(CACHE_DIR, f"{key}.png")
 
 
-def _cache_get(team, player_ids, start_year, end_year):
+def _cache_get(team, player_ids, start_year, end_year, season_type, leverage):
     if _is_current_season(start_year, end_year):
         log.info(f"[CACHE] Live season ({start_year}-{end_year}) — skipping cache read")
         return None
-    path = _cache_path(team, player_ids, start_year, end_year)
+    path = _cache_path(team, player_ids, start_year, end_year, season_type, leverage)
     if os.path.exists(path):
         log.info(f"[CACHE] Hit: {path}")
         with open(path, "rb") as f:
@@ -243,13 +269,13 @@ def _cache_get(team, player_ids, start_year, end_year):
     return None
 
 
-def _cache_put(team, player_ids, start_year, end_year, data: bytes):
+def _cache_put(team, player_ids, start_year, end_year, season_type, leverage, data: bytes):
     if _is_current_season(start_year, end_year):
         log.info(f"[CACHE] Live season ({start_year}-{end_year}) — screenshot not cached")
         return
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        path = _cache_path(team, player_ids, start_year, end_year)
+        path = _cache_path(team, player_ids, start_year, end_year, season_type, leverage)
         with open(path, "wb") as f:
             f.write(data)
         log.info(f"[CACHE] Saved: {path}")
@@ -261,7 +287,7 @@ def _cache_put(team, player_ids, start_year, end_year, data: bytes):
 # SCREENSHOT
 # ==========================================================
 
-DATABALLR_URL = "https://databallr.com/wowy/{team}/{start}/{end}/regular/all/wowy/{players}"
+DATABALLR_URL = "https://databallr.com/wowy/{team}/{start}/{end}/{season_type}/{leverage}/wowy/{players}"
 
 # Persistent browser — launched once, reused across all requests
 _pw_instance = None
@@ -289,15 +315,17 @@ async def _get_browser():
         return _browser
 
 
-async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year: int) -> bytes:
+async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year: int,
+                          season_type: str = "regular", leverage: str = "all") -> bytes:
     # Check disk cache first
-    cached = _cache_get(team, player_ids, start_year, end_year)
+    cached = _cache_get(team, player_ids, start_year, end_year, season_type, leverage)
     if cached:
         return cached
 
     players_path = "/".join(str(pid) for pid in player_ids)
     url = DATABALLR_URL.format(
-        team=team, start=start_year, end=end_year, players=players_path
+        team=team, start=start_year, end=end_year,
+        season_type=season_type, leverage=leverage, players=players_path
     )
     log.info(f"[SCREENSHOT] {url}")
 
@@ -306,9 +334,9 @@ async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year
         page = await browser.new_page(viewport={"width": 1440, "height": 2400})
         try:
             # networkidle waits for React data fetches to complete.
-            # Cap at 20s then proceed anyway — page usually has data by then.
+            # Large queries (multi-year, high leverage) can take 30s+, so cap at 45s.
             try:
-                await page.goto(url, wait_until="networkidle", timeout=20000)
+                await page.goto(url, wait_until="networkidle", timeout=45000)
             except Exception:
                 pass  # Timeout is fine — React data is likely loaded, just still polling
 
@@ -322,11 +350,11 @@ async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year
                         const t = document.body.textContent || '';
                         return t.includes('databallr') && t.includes('LINEUP');
                     }""",
-                    timeout=30000,
+                    timeout=60000,
                 )
                 await asyncio.sleep(0.5)
             except Exception:
-                await asyncio.sleep(5)
+                await asyncio.sleep(15)
 
             # Hide the scroll-to-top button and quick hotkeys bar via TreeWalker
             await page.evaluate("""
@@ -383,6 +411,12 @@ async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year
                 () => document.body.textContent.includes('LINEUP')
             """)
             if not has_lineup_view:
+                # Check if the page loaded at all (has databallr watermark)
+                has_databallr = await page.evaluate("""
+                    () => document.body.textContent.includes('databallr')
+                """)
+                if not has_databallr:
+                    raise ValueError("SLOW_LOAD")
                 raise ValueError("NOT_ON_TEAM")
 
             # Find the data card — anchor on 'databallr' watermark which is inside the card.
@@ -422,7 +456,7 @@ async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year
         finally:
             await page.close()
 
-    _cache_put(team, player_ids, start_year, end_year, img)
+    _cache_put(team, player_ids, start_year, end_year, season_type, leverage, img)
     return img
 
 
@@ -452,7 +486,7 @@ async def wowy_cmd(ctx, *, args: str = ""):
     async with ctx.typing():
         # Parse command
         try:
-            team, player_names, start_year, end_year = parse_wowy_args(args)
+            team, player_names, start_year, end_year, season_type, leverage = parse_wowy_args(args)
         except ValueError as e:
             msg = str(e)
             if msg.startswith("SUGGEST_TEAM:"):
@@ -486,11 +520,11 @@ async def wowy_cmd(ctx, *, args: str = ""):
             )
             return
 
-        log.info(f"[WOWY] team={team} players={resolved_names} {start_year}-{end_year} by={ctx.author}")
+        log.info(f"[WOWY] team={team} players={resolved_names} {start_year}-{end_year} {season_type} leverage={leverage} by={ctx.author}")
 
         # Take screenshot
         try:
-            img_bytes = await screenshot_wowy(team, player_ids, start_year, end_year)
+            img_bytes = await screenshot_wowy(team, player_ids, start_year, end_year, season_type, leverage)
         except ValueError as e:
             msg = str(e)
             if msg == "NOT_ON_TEAM":
@@ -511,6 +545,10 @@ async def wowy_cmd(ctx, *, args: str = ""):
                     await ctx.send(f"❌ `{team}` isn't a valid team. Did you mean **{closest}**?")
                 else:
                     await ctx.send(f"❌ `{team}` isn't a valid NBA team abbreviation.")
+            elif msg == "SLOW_LOAD":
+                await ctx.send(
+                    f"❌ The page took too long to load. Large date ranges or tight leverage filters can be slow — try again or narrow the range."
+                )
             else:
                 await ctx.send(f"❌ {msg}")
             return
@@ -520,6 +558,10 @@ async def wowy_cmd(ctx, *, args: str = ""):
             return
 
         label = season_label(start_year, end_year)
+        if season_type == "playoffs":
+            label += " Playoffs"
+        if leverage != "all":
+            label += f" ({leverage} leverage)"
         players_str = " + ".join(resolved_names)
         await ctx.send(
             f"**WOWY** | `{team}` | {players_str} | {label}",
@@ -543,9 +585,10 @@ async def wowy_help_cmd(ctx):
         name="Examples",
         value=(
             "`!WOWY SAS Victor Wembanyama| De'Aaron Fox| Stephon Castle 2026`\n"
-            "`!WOWY LAL LeBron James| Anthony Davis 2024`\n"
-            "`!WOWY GSW Stephen Curry| Klay Thompson| Draymond Green 2022`\n"
-            "`!WOWY BOS Jayson Tatum| Jaylen Brown 2022-2025`  ← multi-year"
+            "`!WOWY LAL LeBron James| Anthony Davis 2024 PS`  ← playoffs\n"
+            "`!WOWY GSW Stephen Curry| Klay Thompson 2022 high`  ← high leverage\n"
+            "`!WOWY BOS Jayson Tatum| Jaylen Brown 2022 2025`  ← multi-year\n"
+            "`!WOWY BOS Larry Bird 1985 PS high`  ← playoffs + leverage"
         ),
         inline=False,
     )
@@ -553,8 +596,20 @@ async def wowy_help_cmd(ctx):
         name="Year Format",
         value=(
             "`2026` → 2025-26 season only\n"
-            "`2022-2026` → spans 2021-22 through 2025-26\n"
-            "Omit year → defaults to current season"
+            "`2022 2026` or `2022-2026` → spans 2021-22 through 2025-26"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Playoffs",
+        value="Append `PS` or `playoffs` for playoff data.\nExample: `!WOWY BOS Larry Bird 1985 PS`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Leverage",
+        value=(
+            "Filter by game leverage: `high` `low` `medium` `all` (default: `all`)\n"
+            "Example: `!WOWY GSW Stephen Curry 2016 high`"
         ),
         inline=False,
     )

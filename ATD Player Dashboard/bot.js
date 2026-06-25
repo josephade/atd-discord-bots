@@ -56,7 +56,7 @@ function setCached(cache, key, data, ttl) {
 // "2025" → "2024-25"
 function parseSeason(yearStr) {
   const year = parseInt(yearStr);
-  if (isNaN(year) || year < 2014 || year > 2026) return null;
+  if (isNaN(year) || year < 2014 || year > 2030) return null;
   return `${year - 1}-${String(year).slice(-2)}`;
 }
 
@@ -84,52 +84,81 @@ function findPlayer(query, playerMap) {
   return bestScore > 0.5 ? { id: bestId, name: bestName } : null;
 }
 
-// "Aaron Gordon 2025 playoffs" → { playerName, season, seasonType }
+// "Aaron Gordon 2025 playoffs" → { playerName, seasons: ['2024-25'], seasonType }
+// "Aaron Gordon 2024 2026 PS"  → { playerName, seasons: ['2023-24','2024-25','2025-26'], seasonType }
 function parseArgs(raw) {
   const tokens = raw.trim().split(/\s+/);
 
+  // Playoffs: accept "playoffs" or "PS"
   let seasonType = 'regular';
-  const pfIdx = tokens.findIndex(t => t.toLowerCase() === 'playoffs');
+  const pfIdx = tokens.findIndex(t => /^(playoffs|ps)$/i.test(t));
   if (pfIdx !== -1) { seasonType = 'playoffs'; tokens.splice(pfIdx, 1); }
 
-  let season = null;
-  const last = tokens[tokens.length - 1];
-  if (/^\d{4}$/.test(last)) {
-    season = parseSeason(last);
-    if (!season) return { error: `Invalid year "${last}". Use 2014–2026.` };
-    tokens.pop();
-  } else if (/^\d{4}-\d{2}$/.test(last)) {
-    season = last;
-    tokens.pop();
+  // Find all 4-digit year indices
+  const yearIdxs = tokens.map((t, i) => /^\d{4}$/.test(t) ? i : -1).filter(i => i !== -1);
+
+  let seasons;
+  if (yearIdxs.length >= 2) {
+    // Multi-year range: take first and last year found, treat everything before first year as player name
+    const firstIdx = yearIdxs[0];
+    const startYear = parseInt(tokens[firstIdx]);
+    const endYear   = parseInt(tokens[yearIdxs[yearIdxs.length - 1]]);
+    if (endYear < startYear) return { error: 'End year must be after start year.' };
+    if (endYear - startYear > 15) return { error: 'Year range too large (max 15 seasons).' };
+    seasons = [];
+    for (let y = startYear; y <= endYear; y++) {
+      const s = parseSeason(String(y));
+      if (s) seasons.push(s);
+    }
+    if (!seasons.length) return { error: 'Invalid year range. Use 2014–2027.' };
+    tokens.splice(firstIdx); // drop years and anything after
+  } else if (yearIdxs.length === 1) {
+    const idx = yearIdxs[0];
+    const season = parseSeason(tokens[idx]);
+    if (!season) return { error: `Invalid year "${tokens[idx]}". Use 2014–2027.` };
+    tokens.splice(idx);
+    seasons = [season];
+  } else {
+    // Check for "2024-25" format at end
+    const last = tokens[tokens.length - 1];
+    if (/^\d{4}-\d{2}$/.test(last)) {
+      seasons = [last];
+      tokens.pop();
+    } else {
+      seasons = [DEFAULT_SEASON];
+    }
   }
 
   const playerName = tokens.join(' ');
   if (!playerName) return { error: 'Please provide a player name.' };
-  return { playerName, season: season || DEFAULT_SEASON, seasonType };
+  return { playerName, seasons, seasonType };
 }
 
 // ── Chart generation ──────────────────────────────────────────────────────────
 
-async function generateChartImage(playerName, season, graphType, seasonType) {
+async function generateChartImage(playerName, seasons, graphType, seasonType) {
   const t0 = Date.now();
+  // Use the most recent season for player lookup
+  const lookupSeason = seasons[seasons.length - 1];
+  const seasonsKey = seasons.join('+');
 
   // ── Fast path: check caches before launching Puppeteer ──────────────────────
-  const mapKey = `${season}_${seasonType}`;
+  const mapKey = `${lookupSeason}_${seasonType}`;
   const cachedPlayerMap = getCached(playerMapCache, mapKey);
   if (cachedPlayerMap) {
     const player = findPlayer(playerName, cachedPlayerMap);
     if (player) {
-      const chartKey = `${player.id}_${season}_${graphType}_${seasonType}`;
+      const chartKey = `${player.id}_${seasonsKey}_${graphType}_${seasonType}`;
       const cachedPng = getCached(chartCache, chartKey);
       if (cachedPng) {
-        log('INFO', `Cache HIT  chart [${player.name} / ${season} / ${graphType}] — ${Date.now() - t0}ms`);
+        log('INFO', `Cache HIT  chart [${player.name} / ${seasonsKey} / ${graphType}] — ${Date.now() - t0}ms`);
         return { screenshot: cachedPng, playerName: player.name };
       }
     }
   }
 
   // ── Full path: launch Puppeteer ──────────────────────────────────────────────
-  log('INFO', `Starting  [${playerName} / ${season} / ${graphType} / ${seasonType}]`);
+  log('INFO', `Starting  [${playerName} / ${seasonsKey} / ${graphType} / ${seasonType}]`);
   const browser = await puppeteer.launch({
     args: [
       '--no-sandbox',
@@ -149,7 +178,7 @@ async function generateChartImage(playerName, season, graphType, seasonType) {
     await page.goto('https://nbavisuals.com/player-dashboard', { waitUntil: 'networkidle0', timeout: 60000 });
     log('INFO', `Page load  ${Date.now() - t1}ms`);
 
-    // Player map — fetch if not cached
+    // Player map — fetch if not cached (use most recent season for lookup)
     let playerMap = getCached(playerMapCache, mapKey);
     if (!playerMap) {
       const t2 = Date.now();
@@ -157,9 +186,9 @@ async function generateChartImage(playerName, season, graphType, seasonType) {
         const res = await fetch(`/get_players/${encodeURIComponent(season)}/${encodeURIComponent(seasonType)}`);
         if (!res.ok) throw new Error(`Player list HTTP ${res.status}`);
         return res.json();
-      }, season, seasonType);
+      }, lookupSeason, seasonType);
       if (!playerMap || Object.keys(playerMap).length === 0) {
-        throw new Error(`No players found for ${season} (${seasonType}). Season may not be available yet.`);
+        throw new Error(`No players found for ${lookupSeason} (${seasonType}). Season may not be available yet.`);
       }
       setCached(playerMapCache, mapKey, playerMap, PLAYER_MAP_TTL);
       log('INFO', `Player map ${Object.keys(playerMap).length} players, cached ${PLAYER_MAP_TTL / 3600000}h — ${Date.now() - t2}ms`);
@@ -175,26 +204,26 @@ async function generateChartImage(playerName, season, graphType, seasonType) {
         .filter(n => normalize(n).split(' ').some(p => p.length > 2 && (q.includes(p) || p.includes(q.split(' ')[0]))))
         .slice(0, 3).join(', ');
       throw new Error(
-        `Player "${playerName}" not found for ${season}.` +
+        `Player "${playerName}" not found for ${lookupSeason}.` +
         (suggestions ? ` Did you mean: ${suggestions}?` : '')
       );
     }
     log('INFO', `Matched    ${player.name} (id=${player.id})`);
 
     // Check chart cache again with canonical player ID (handles name variant lookups)
-    const chartKey = `${player.id}_${season}_${graphType}_${seasonType}`;
+    const chartKey = `${player.id}_${seasonsKey}_${graphType}_${seasonType}`;
     const cachedPng = getCached(chartCache, chartKey);
     if (cachedPng) {
-      log('INFO', `Cache HIT  chart [${player.name} / ${season} / ${graphType}] — ${Date.now() - t0}ms`);
+      log('INFO', `Cache HIT  chart [${player.name} / ${seasonsKey} / ${graphType}] — ${Date.now() - t0}ms`);
       return { screenshot: cachedPng, playerName: player.name };
     }
 
     // POST chart data
     const t3 = Date.now();
-    const chartData = await page.evaluate(async (playerId, season, graphType, seasonType) => {
+    const chartData = await page.evaluate(async (playerId, seasons, graphType, seasonType) => {
       const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
       const body = new URLSearchParams();
-      body.append('seasons[]', season);
+      seasons.forEach(s => body.append('seasons[]', s));
       body.append('player', playerId);
       body.append('graph_type', graphType);
       body.append('season_type', seasonType);
@@ -206,14 +235,13 @@ async function generateChartImage(playerName, season, graphType, seasonType) {
       const res = await fetch('/player-dashboard', { method: 'POST', headers, body: body.toString() });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+        throw new Error(`NO_DATA:${res.status}`);
       }
       return res.json();
-    }, player.id, season, graphType, seasonType);
+    }, player.id, seasons, graphType, seasonType);
     log('INFO', `API data   ${Date.now() - t3}ms`);
 
-    if (chartData.error) throw new Error(chartData.error);
-    if (!chartData.data || !chartData.layout) throw new Error('No chart data returned');
+    if (chartData.error || !chartData.data || !chartData.layout) throw new Error('NO_DATA:ok');
 
     // Render Plotly chart → PNG
     const t4 = Date.now();
@@ -242,7 +270,7 @@ async function generateChartImage(playerName, season, graphType, seasonType) {
 
     // Cache the PNG
     setCached(chartCache, chartKey, screenshot, CHART_TTL);
-    log('INFO', `Done       ${player.name} / ${season} / ${graphType} — total ${Date.now() - t0}ms`);
+    log('INFO', `Done       ${player.name} / ${seasonsKey} / ${graphType} — total ${Date.now() - t0}ms`);
 
     return { screenshot, playerName: player.name };
   } finally {
@@ -274,13 +302,15 @@ client.on('messageCreate', async (message) => {
       .setColor(0xE87722)
       .setDescription(
         `Charts are pulled live from [nbavisuals.com](https://nbavisuals.com/player-dashboard).\n\n` +
-        `**Usage:** \`!<command> <player name> [year]\`\n` +
+        `**Usage:** \`!<command> <player name> [year] [year2] [PS]\`\n` +
         `**Year** — 4-digit season end year, e.g. \`2025\` = 2024-25. Defaults to current season.\n` +
-        `**Playoffs** — append \`playoffs\` for playoff data.\n\n` +
+        `**Multi-year** — add two years for a range: \`2022 2026\` spans 2021-22 through 2025-26.\n` +
+        `**Playoffs** — append \`PS\` or \`playoffs\` for playoff data.\n\n` +
         `**Examples:**\n` +
         `\`!playtype Aaron Gordon 2025\`\n` +
-        `\`!shotzone LeBron James 2020 playoffs\`\n` +
-        `\`!scoring Steph Curry\``
+        `\`!shotzone LeBron James 2020 PS\`\n` +
+        `\`!3pt Jayson Tatum 2024 2026\`\n` +
+        `\`!playmaking Karl-Anthony Towns 2026 PS\``
       );
 
     for (const [key, def] of Object.entries(CHART_TYPES)) {
@@ -307,14 +337,17 @@ client.on('messageCreate', async (message) => {
   const parsed = parseArgs(argsStr);
   if (parsed.error) return message.reply(parsed.error);
 
-  const { playerName, season, seasonType } = parsed;
-  const seasonLabel = seasonType === 'playoffs' ? `${season} Playoffs` : season;
+  const { playerName, seasons, seasonType } = parsed;
+  const seasonRange = seasons.length > 1
+    ? `${seasons[0]}–${seasons[seasons.length - 1]}`
+    : seasons[0];
+  const seasonLabel = seasonType === 'playoffs' ? `${seasonRange} Playoffs` : seasonRange;
 
-  log('INFO', `Request    !${cmd} "${playerName}" ${season} ${seasonType} — ${message.author.tag}`);
+  log('INFO', `Request    !${cmd} "${playerName}" ${seasonRange} ${seasonType} — ${message.author.tag}`);
   const thinking = await message.reply(`Generating **${chartDef.label}** for **${playerName}** (${seasonLabel})...`);
 
   try {
-    const { screenshot, playerName: foundName } = await generateChartImage(playerName, season, chartDef.graphType, seasonType);
+    const { screenshot, playerName: foundName } = await generateChartImage(playerName, seasons, chartDef.graphType, seasonType);
 
     const attachment = new AttachmentBuilder(screenshot, { name: 'chart.png' });
     await thinking.edit({
@@ -324,7 +357,14 @@ client.on('messageCreate', async (message) => {
     log('INFO', `Delivered  !${cmd} ${foundName} to ${message.author.tag}`);
   } catch (err) {
     log('ERROR', `!${cmd} "${playerName}" — ${err.message}`);
-    await thinking.edit(`Error: ${err.message}`);
+    if (err.message.startsWith('NO_DATA')) {
+      await thinking.edit(
+        `❌ No **${chartDef.label}** data found for **${playerName}** (${seasonLabel}).\n` +
+        `This chart type may not be available for ${seasonType === 'playoffs' ? 'playoffs' : 'this season'}.`
+      );
+    } else {
+      await thinking.edit(`❌ ${err.message}`);
+    }
   }
 });
 

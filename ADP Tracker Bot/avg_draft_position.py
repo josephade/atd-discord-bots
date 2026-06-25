@@ -36,22 +36,24 @@ GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service_account.
 NAME_COL_LETTER = os.getenv("NAME_COLUMN", "A").upper()
 
 # ===================== CHANNEL CONFIG =====================
-CHAN1 = int(need("DISCORD_CHANNEL_ID_1"))
-COL1  = need("ADP_COLUMN_1").upper()
-
-CHAN2 = int(need("DISCORD_CHANNEL_ID_2"))
-COL2  = need("ADP_COLUMN_2").upper()
-
-CHAN3 = int(need("DISCORD_CHANNEL_ID_3"))
-COL3  = need("ADP_COLUMN_3").upper()
+# Supports any number of channel→column mappings.
+# Set env vars as pairs: DISCORD_CHANNEL_ID_1 + ADP_COLUMN_1, then _2, _3, etc.
+# Only pairs where both vars are set are registered.
 
 DISCORD_TOKEN = need("DISCORD_TOKEN")
 
-channel_to_col_letter = {
-    CHAN1: COL1,
-    CHAN2: COL2,
-    CHAN3: COL3,
-}
+channel_to_col_letter: dict[int, str] = {}
+n = 1
+while True:
+    ch_env = os.getenv(f"DISCORD_CHANNEL_ID_{n}")
+    col_env = os.getenv(f"ADP_COLUMN_{n}")
+    if not ch_env or not col_env:
+        break
+    channel_to_col_letter[int(ch_env)] = col_env.upper()
+    n += 1
+
+if not channel_to_col_letter:
+    raise SystemExit("No channel→column mappings configured. Set DISCORD_CHANNEL_ID_1 and ADP_COLUMN_1.")
 
 def col_to_index(col_letter: str) -> int:
     idx = 0
@@ -138,6 +140,8 @@ async def on_message(message: discord.Message):
         return
 
     raw = message.content.strip()
+    log.info(f"[MSG] channel={message.channel.id} content={raw!r}")
+
     pick_num = try_parse_picknum(raw)
 
     if pick_num is None:
@@ -152,7 +156,12 @@ async def on_message(message: discord.Message):
     name, row, score = match
     cell = rowcol_to_a1(row, col_index)
 
-    existing = ws.acell(cell).value
+    try:
+        existing = ws.acell(cell).value
+    except Exception as e:
+        log.error(f"[SHEETS READ ERROR] {e}")
+        await message.add_reaction("❓")
+        return
 
     if existing:
         await message.add_reaction("❌")
@@ -162,7 +171,13 @@ async def on_message(message: discord.Message):
         log.info(f"[DUPLICATE] {name} already picked at {existing}")
         return
 
-    ws.update(cell, [[pick_num]])
+    try:
+        ws.update(cell, [[pick_num]])
+    except Exception as e:
+        log.error(f"[SHEETS WRITE ERROR] {e}")
+        await message.add_reaction("❓")
+        return
+
     await message.add_reaction("✅")
     log.info(f"[UPDATE] {name} → pick {pick_num}")
 

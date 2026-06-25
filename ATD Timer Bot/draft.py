@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from config import ROUNDS
 
 _state_dir = os.environ.get("STATE_DIR", os.path.dirname(__file__))
-STATE_FILE   = os.path.join(_state_dir, "draft_state.json")
+
+# Per-channel state files
+def state_file(channel_id: int) -> str:
+    return os.path.join(_state_dir, f"draft_state_{channel_id}.json")
+
+# Skip history is shared across all drafts (entries include channel_id)
 HISTORY_FILE = os.path.join(_state_dir, "skip_history.json")
 
 # ATD snake direction per round (0-indexed).
@@ -152,11 +157,12 @@ class DraftState:
         self.pick_order = build_snake_order(self.num_teams, self.penalty_teams)
 
     def effective_timer(self, round_num: int, team_idx: int) -> int:
-        """Base timer for this pick minus accumulated skip penalties (min 0)."""
+        """Base timer for this pick minus accumulated skip penalties (min 0).
+        Skip penalties are not applied when timer_override is set (fixed timer mode)."""
         from config import SKIP_PENALTY
         if self.timer_override is not None:
-            base = self.timer_override
-        elif self.mode == "roundless":
+            return self.timer_override  # fixed timer — no skip deductions
+        if self.mode == "roundless":
             from config import ROUNDLESS_TIMER
             base = ROUNDLESS_TIMER
         else:
@@ -172,8 +178,8 @@ class DraftState:
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
-    def save(self):
-        with open(STATE_FILE, "w") as f:
+    def save(self, channel_id: int):
+        with open(state_file(channel_id), "w") as f:
             json.dump({
                 "teams":            self.teams,
                 "pick_order":       self.pick_order,
@@ -192,10 +198,11 @@ class DraftState:
             }, f, indent=2)
 
     @classmethod
-    def load(cls) -> "DraftState":
-        if not os.path.exists(STATE_FILE):
+    def load(cls, channel_id: int) -> "DraftState":
+        path = state_file(channel_id)
+        if not os.path.exists(path):
             return cls()
-        with open(STATE_FILE) as f:
+        with open(path) as f:
             d = json.load(f)
         ds = cls()
         ds.teams            = d.get("teams", [])
