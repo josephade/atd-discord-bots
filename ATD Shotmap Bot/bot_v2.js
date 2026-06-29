@@ -130,37 +130,68 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
     // ── 4. POST to /shotmap through the browser ──
     // Must use page.evaluate() so the request goes through the browser session
     // (with Cloudflare clearance cookies) rather than raw Node fetch from Fly.io's IP.
+    async function postShotmap(seasonsToUse) {
+      return page.evaluate(async (params) => {
+        const body = new URLSearchParams();
+        body.append('csrf_token', params.csrfToken);
+        body.append('graphtype', 'shotmap');
+        params.seasons.forEach(s => body.append('seasons[]', s));
+        body.append('player', params.playerId);
+        if (params.playoff) body.append('season_type', 'playoffs');
+        if (params.dark) body.append('darkmode', 'on');
+        body.append('assistmode', 'on');
+        if (params.modern) body.append('modernmode', 'on');
+
+        const res = await fetch('/shotmap', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: body.toString(),
+        });
+
+        const text = await res.text();
+        if (!res.ok) return { _error: `server_${res.status}` };
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          return { _error: `Invalid response from shotmap server.` };
+        }
+      }, { csrfToken, seasons: seasonsToUse, playerId, playoff, dark, modern });
+    }
+
     console.log('Submitting API request...');
-    const result = await page.evaluate(async (params) => {
-      const body = new URLSearchParams();
-      body.append('csrf_token', params.csrfToken);
-      body.append('graphtype', 'shotmap');
-      params.seasons.forEach(s => body.append('seasons[]', s));
-      body.append('player', params.playerId);
-      if (params.playoff) body.append('season_type', 'playoffs');
-      if (params.dark) body.append('darkmode', 'on');
-      body.append('assistmode', 'on');
-      if (params.modern) body.append('modernmode', 'on');
+    let result = await postShotmap(seasons);
 
-      const res = await fetch('/shotmap', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'X-Requested-With': 'XMLHttpRequest',
-        },
-        body: body.toString(),
-      });
-
-      const text = await res.text();
-      if (!res.ok) return { _error: `Server error ${res.status}: ${text.slice(0, 200)}` };
-      try {
-        return JSON.parse(text);
-      } catch (e) {
-        return { _error: `Invalid JSON response: ${text.slice(0, 200)}` };
+    // For multi-year playoff ranges, if the combined request fails, find which
+    // individual seasons have data and retry with only those.
+    if (result._error && playoff && seasons.length > 1) {
+      console.log('Combined playoff request failed — probing individual seasons...');
+      const validSeasons = [];
+      for (const s of seasons) {
+        const probe = await postShotmap([s]);
+        if (!probe._error && !probe.error && probe.image) {
+          validSeasons.push(s);
+          console.log(`  ${s} — has playoff data`);
+        } else {
+          console.log(`  ${s} — no playoff data`);
+        }
       }
-    }, { csrfToken, seasons, playerId, playoff, dark, modern });
+      if (validSeasons.length === 0) {
+        throw new Error(`**${foundName}** has no playoff data from ${seasonLabel}. They may not have made the playoffs during this period.`);
+      }
+      if (validSeasons.length === 1) {
+        result = await postShotmap(validSeasons);
+      } else {
+        result = await postShotmap(validSeasons);
+      }
+      if (result._error || result.error) {
+        throw new Error(`Could not generate playoff shotmap for **${foundName}**. Try a narrower year range.`);
+      }
+    }
 
-    if (result._error) throw new Error(result._error);
+    if (result._error) throw new Error(`Could not generate shotmap for **${foundName}**. The data source may be temporarily down — try again later.`);
     if (result.error) throw new Error(result.error);
     if (!result.image) throw new Error('No image returned from server');
 
@@ -250,20 +281,31 @@ client.on('messageCreate', async (message) => {
   const yearEnd = years.length > 1 ? years[years.length - 1] : null;
   const yearLabel = yearEnd ? `${yearStart}-${yearEnd}` : yearStart;
 
-  await message.react('⏳').catch(() => {});
+  const reaction = await message.react('⏳').catch(() => null);
 
   try {
     const img = await generateShotmap(playerName, yearStart, yearEnd, modern, playoff, dark);
+    if (reaction) await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
     await message.reply({
       content: `Shotmap: **${playerName}** (${yearLabel}${playoff ? ' Playoffs' : ''})${modern ? ' - Modern' : ''}${dark ? ' - Dark' : ''}`,
       files: [{ attachment: img, name: `shotmap_${playerName.replace(/\s+/g, '_')}_${yearLabel}${playoff ? '_ps' : ''}.png` }],
     });
   } catch (err) {
+    if (reaction) await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
     console.error('Error:', err.message);
-    const msg = err.message.toLowerCase().includes('waiting failed') || err.message.toLowerCase().includes('exceeded')
-      ? 'The graph took too long to load. Try a shorter range of years.'
-      : `Error: ${err.message}`;
-    await message.reply(msg);
+    let msg;
+    const lower = err.message.toLowerCase();
+    if (lower.includes('waiting failed') || lower.includes('exceeded'))
+      msg = 'The graph took too long to load. Try a shorter range of years.';
+    else if (lower.includes('not found'))
+      msg = err.message;
+    else if (lower.includes('no playoff data') || lower.includes('may not have made'))
+      msg = err.message;
+    else if (lower.includes('server_'))
+      msg = `The shotmap server returned an error. It may be temporarily down — try again in a minute.`;
+    else
+      msg = err.message;
+    await message.reply(`❌ ${msg}`);
   }
 });
 

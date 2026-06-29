@@ -44,8 +44,9 @@ def build_snake_order(num_teams: int, penalty_teams: list[int] = None) -> list[l
 
         if r >= 5 and penalty_teams:          # rounds 6-10 (0-indexed r = 5..9)
             normal  = [t for t in seq if t not in penalty_teams]
-            penalty = [t for t in seq if t in penalty_teams]
-            seq = normal + penalty            # penalty teams pick last, preserving snake order
+            # Penalty teams pick last, reverse draft order (later pick goes first)
+            penalty = sorted(penalty_teams, reverse=True)
+            seq = normal + penalty
 
         order.append(seq)
 

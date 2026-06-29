@@ -181,7 +181,7 @@ _PICK_RE = re.compile(
 _LOTTO_LINE_RE = re.compile(
     r'^\s*(\d+)\.'          # position number
     r'.*?-\s*'              # anything up to the first dash
-    r'((?:<@!?\d+>\s*)+)$', # one or more Discord mentions
+    r'(.*)',                 # rest of line (mentions extracted separately)
 )
 
 # Matches prices in roundless pick messages: $42, ($42), (42), 42$
@@ -1359,6 +1359,20 @@ async def timerpenalty(ctx, pick_number: int):
     )
 
 
+@bot.command(name="timerrebuildorder")
+@is_commissioner()
+async def timerrebuildorder(ctx):
+    """!timerrebuildorder — Rebuild the snake pick order (applies penalty fixes)."""
+    s = _get_session(ctx.channel.id)
+    if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
+        await ctx.send("❌ No draft in progress.")
+        return
+    s.draft.pick_order = build_snake_order(s.draft.num_teams, s.draft.penalty_teams)
+    s.draft.save(s.channel_id)
+    penalty_names = ", ".join(s.draft.teams[i]["name"] for i in s.draft.penalty_teams) if s.draft.penalty_teams else "none"
+    await ctx.send(f"✅ Pick order rebuilt for {s.draft.num_teams} teams. Penalty teams: {penalty_names}")
+
+
 @bot.command(name="timerjumpto")
 @is_commissioner()
 async def timerjumpto(ctx, pick_number: int):
@@ -1461,6 +1475,38 @@ async def timersetpick(ctx, pick_number: int, member: discord.Member):
 
 
 # ── During-draft commands ─────────────────────────────────────────────────────
+
+@bot.command(name="timeraddowner")
+@is_commissioner()
+async def timeraddowner(ctx, slot: int, member: discord.Member):
+    """!timeraddowner <slot#> @user — add a co-GM to a specific lotto slot."""
+    s = _get_session(ctx.channel.id)
+
+    if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
+        await ctx.send("❌ No draft loaded.")
+        return
+
+    if slot < 1 or slot > len(s.draft.teams):
+        await ctx.send(f"❌ Invalid slot. Must be between 1 and {len(s.draft.teams)}.")
+        return
+
+    team = s.draft.teams[slot - 1]
+
+    if member.id in team["user_ids"]:
+        await ctx.send(f"❌ {member.mention} is already on **{team['name']}**.")
+        return
+
+    team["user_ids"].append(member.id)
+    team["name"] = " / ".join(
+        (ctx.guild.get_member(uid).display_name if ctx.guild.get_member(uid) else str(uid))
+        for uid in team["user_ids"]
+    )
+    s.draft.save(s.channel_id)
+
+    log.info("ADD OWNER | ch=%d | Slot %d Team: %s | Added: %s (%d)",
+             s.channel_id, slot, team["name"], member.display_name, member.id)
+    await ctx.send(f"✅ {member.mention} added to slot **{slot}** — **{team['name']}**.")
+
 
 @bot.command(name="timerproxy")
 @is_commissioner()
@@ -2189,6 +2235,7 @@ async def timerhelp(ctx):
             "`!timerjumpto <pick#>` — Jump to a specific pick number\n"
             "`!timersetpick <pick#> @GM` — Jump and force a specific GM next\n"
             "`!timersettimer <min>` — Override timer (0 = revert to defaults)\n"
+            "`!timeraddowner <slot#> @user` — Add a co-GM to a specific lotto slot\n"
             "`!timerproxy @user` / `!timerremoveproxy @user` — Add/remove a proxy picker\n"
             "`!timeraddskip @GM [n]` / `!removeskip @GM` — Add/remove skips\n"
             "`!timerset @GM <money> <picks> <last#>` — Set all roundless stats at once\n"

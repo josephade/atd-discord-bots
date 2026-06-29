@@ -90,6 +90,7 @@ EMOJI_TEAM_MAP = {
     "DrakeBulldogs": "Drake Bulldogs",
     "OKST": "Oklahoma State Cowboys",
     "CreightonBulljays": "Creighton Bluejays",
+    "CreightonBluejays": "Creighton Bluejays",
     "CalPoly:": "Cal Poly Mustangs",
     "CCSU:": "Ctr. Connecticut Blue Devils",
     "SIUE:": "SIU-Edwardsville Cougars",
