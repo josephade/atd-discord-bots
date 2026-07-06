@@ -1,0 +1,9 @@
+app = "atd-win-bot"
+primary_region = "ewr"
+
+[build]
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
