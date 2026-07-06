@@ -142,6 +142,9 @@ async def on_message(message: discord.Message):
     raw = message.content.strip()
     log.info(f"[MSG] channel={message.channel.id} content={raw!r}")
 
+    if raw.startswith('!'):
+        return
+
     pick_num = try_parse_picknum(raw)
 
     if pick_num is None:

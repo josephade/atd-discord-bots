@@ -677,6 +677,9 @@ async def on_message(message: discord.Message):
         return
 
     # ================= PICK FLOW =================
+    if is_command(content):
+        return
+
     match = find_best_match(content, names, row_map, keys, key_to_name)
     
     if not match:

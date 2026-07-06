@@ -965,6 +965,9 @@ async def on_message(message: discord.Message):
     if message.channel.id not in _sessions:
         return
 
+    if message.content.startswith('!'):
+        return
+
     s = _sessions[message.channel.id]
     await _try_process_pick(s, message)
 

@@ -1,5 +1,6 @@
 PLAYER_POSITIONS = {
-    # ── Point Guards 
+    # ── Point Guards
+    "Ajay Mitchell":             "PG/SG",
     "Magic Johnson":             "PG/SF/PF",
     "Tony Parker":               "PG",
     "Tim Hardaway":              "PG",

@@ -13,7 +13,7 @@ from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_AC
 from player_positions import PLAYER_POSITIONS
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
 
-# ── Persistent storage ────────────────────────────────────────────────────────
+# ── Persistent storage 
 _CONFIG_FILE  = "/data/sheet_config.json"
 _UNDO_FILE    = "/data/undo_stack.json"
 _AUDIT_FILE   = "/data/audit.json"
@@ -1177,6 +1177,19 @@ async def cmd_removeteam(ctx, *, target: str):
     await ctx.send(f"✅ Removed **{member.display_name}**'s ownership of **{team}**.")
 
 
+@bot.command(name='resetteams')
+async def cmd_resetteams(ctx):
+    """!resetteams — Remove all team ownership assignments (commissioner only)."""
+    if not _team_owners:
+        await ctx.send("No team assignments to clear.")
+        return
+
+    count = len(_team_owners)
+    _team_owners.clear()
+    _save_owners(_team_owners)
+    await ctx.send(f"✅ Cleared **{count}** team assignment{'s' if count != 1 else ''}.")
+
+
 def _find_roster_slot(query: str, slots: dict):
     """Find a player in roster slots by exact match, then partial/substring.
     Returns (slot_dict, error_str). One will be None."""
@@ -1993,26 +2006,41 @@ async def cmd_roster(ctx, *, team_input: str):
         await ctx.send(f"❌ {last_error}")
         return
 
-    embed = discord.Embed(title=f"\U0001f3c0 {result_name}", color=discord.Color.blue())
+    # Use the team's custom emoji in the title and as thumbnail if the user passed one
+    title_prefix = emoji_match.group(0) if emoji_match else "🏀"
+    thumbnail_url = f"https://cdn.discordapp.com/emojis/{emoji_match.group(2)}.png" if emoji_match else None
+
+    # Find GM(s) assigned to this team
+    gm_uids = [uid for uid, tname in _team_owners.items() if tname == result_name]
+    gm_line = "**GM:** " + " ".join(f"<@{uid}>" for uid in gm_uids) if gm_uids else "**GM:** *Unassigned*"
+
+    filled          = sum(1 for e in roster if e["player"])
+    starters_filled = sum(1 for e in roster[:5] if e["player"])
+    bench_filled    = sum(1 for e in roster[5:] if e["player"])
+    color           = discord.Color.gold() if filled == 10 else discord.Color.blue()
+
+    embed = discord.Embed(title=f"{title_prefix} {result_name}", description=gm_line, color=color)
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
 
     def _format_lines(entries):
         lines = []
         for e in entries:
-            player = e["player"] or "—"
+            player = e["player"] or "*Empty*"
             line = f"`{e['position']}` {player}"
             if e["year"]:
-                line += f" ({e['year']})"
+                line += f" '{e['year'][-2:]}"
             if e["price"]:
                 p = e["price"]
                 line += f" — {p}" if p.startswith("$") else f" — ${p}"
             lines.append(line)
         return "\n".join(lines)
 
-    embed.add_field(name="Starters", value=_format_lines(roster[:5]), inline=False)
-    embed.add_field(name="Bench", value=_format_lines(roster[5:]), inline=False)
+    embed.add_field(name=f"⭐ Starters — {starters_filled}/5", value=_format_lines(roster[:5]), inline=False)
+    embed.add_field(name=f"🏃 Bench — {bench_filled}/5",    value=_format_lines(roster[5:]),  inline=False)
 
-    filled = sum(1 for e in roster if e["player"])
-    embed.set_footer(text=f"{filled}/10 slots filled")
+    footer_icon = "✅" if filled == 10 else "🔄"
+    embed.set_footer(text=f"{footer_icon} {filled}/10 slots filled")
     await ctx.send(embed=embed)
 
 

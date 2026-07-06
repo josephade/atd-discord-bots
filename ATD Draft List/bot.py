@@ -177,29 +177,26 @@ def _fetch_roster_names(force: bool = False) -> set:
 
 
 def _player_available(player_name: str, availability: dict, roster_names: set | None = None) -> bool:
-    """Check availability — exact match first, then partial."""
+    """Check availability — color sheet first, roster text as fallback."""
     name_lower = player_name.lower().strip()
 
-    # Text-based check against the roster sheet (most reliable — Team Sheet Bot writes text, not colors)
+    # Option 1: Color-based check (PLAYERS_SHEET_NAME — black background = drafted)
+    if availability:
+        if name_lower in availability:
+            return availability[name_lower]
+        for sheet_name, avail in availability.items():
+            if name_lower in sheet_name:
+                return avail
+
+    # Option 2: Text-based roster check (ROSTER_SHEET_NAME — fallback when color sheet unavailable)
     if roster_names is not None:
         if name_lower in roster_names:
             return False
         for roster_name in roster_names:
-            # Only check if player name is a substring of a roster cell (e.g. "LeBron James" in "LeBron James '13").
-            # NOT the reverse — short cell values (headers, years, team names) would falsely match inside player names.
             if name_lower in roster_name:
                 return False
 
-    # Color-based check against the players pool sheet (black background = drafted)
-    if name_lower in availability:
-        return availability[name_lower]
-
-    for sheet_name, avail in availability.items():
-        if name_lower in sheet_name:
-            return avail
-
-    # Not found in either sheet — log and assume available
-    log.warning("Player '%s' not found in sheet — assuming available", player_name)
+    log.warning("Player '%s' not found in either sheet — assuming available", player_name)
     return True
 
 
@@ -270,6 +267,29 @@ def _build_pick_message(pick_num: int, emoji: str, pick: dict) -> str:
 
 
 # ── Auto-pick logic ───────────────────────────────────────────────────────────
+async def _lookup_emoji_from_lotto(user_id: int) -> str | None:
+    """Search the lotto channel (then draft channel) for the lotto message and return this user's emoji."""
+    search_channels = []
+    if LOTTO_CHANNEL_ID:
+        ch = bot.get_channel(LOTTO_CHANNEL_ID)
+        if ch:
+            search_channels.append(ch)
+    draft_ch = bot.get_channel(DRAFT_CHANNEL_ID)
+    if draft_ch:
+        search_channels.append(draft_ch)
+
+    for ch in search_channels:
+        try:
+            async for msg in ch.history(limit=100):
+                if re.search(r'^\s*1\.', msg.content, re.MULTILINE):
+                    for emoji_str, user_ids in _extract_lotto_lines(msg.content):
+                        if user_id in user_ids:
+                            return emoji_str
+        except Exception as e:
+            log.warning("LOTTO LOOKUP | channel %d failed: %s", ch.id, e)
+    return None
+
+
 async def _do_auto_pick(channel: discord.TextChannel, user: discord.User, pick_num: int):
     async with _autopick_lock:
         await _do_auto_pick_inner(channel, user, pick_num)
@@ -298,46 +318,50 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
 
     emoji = user_data.get("emoji", "")
     if not _is_valid_emoji(emoji):
-        log.warning("AUTO-PICK | %s | no valid emoji set — aborting", user.display_name)
-        try:
-            await user.send(
-                f"⚠️ It's your turn (Pick **#{pick_num}**) but I can't auto-pick for you because "
-                f"you don't have a team emoji set.\n\n"
-                f"Ask the commissioner to run `!setemoji @{user.display_name} <:emoji:id>` "
-                f"in the server, then you'll be good to go.\n\n"
-                f"You need to respond manually in the draft channel for this pick."
-            )
-        except Exception:
-            pass
-        return
+        log.info("AUTO-PICK | %s | no emoji set — searching lotto message", user.display_name)
+        found = await _lookup_emoji_from_lotto(user.id)
+        if found and _is_valid_emoji(found):
+            log.info("AUTO-PICK | %s | emoji auto-found from lotto: %s", user.display_name, found)
+            emoji = found
+            _data[uid]["emoji"] = emoji
+            _save_data(_data)
+        else:
+            log.warning("AUTO-PICK | %s | emoji not found in lotto — aborting", user.display_name)
+            try:
+                await user.send(
+                    f"⚠️ It's your turn (Pick **#{pick_num}**) but I couldn't find your team emoji "
+                    f"in the lotto message either.\n\n"
+                    f"Ask the commissioner to run `!setemoji @{user.display_name} <:emoji:id>` "
+                    f"in the server, then you'll be good to go.\n\n"
+                    f"You need to respond manually in the draft channel for this pick."
+                )
+            except Exception:
+                pass
+            try:
+                owner = await bot.fetch_user(OWNER_ID)
+                if owner:
+                    await owner.send(
+                        f"⚠️ Auto-pick failed for **{user.display_name}** (Pick **#{pick_num}**) — "
+                        f"no team emoji found in the lotto message.\n"
+                        f"Run `!setemoji @{user.display_name} <:emoji:id>` to fix it."
+                    )
+            except Exception:
+                pass
+            return
 
-    # Fetch sheet availability (force-refresh — stale data could cause a bad auto-pick)
+    # Option 1: color-based check (PLAYERS_SHEET_NAME). Force-refresh every pick.
+    availability = {}
+    roster_names = None
     try:
         availability = _fetch_availability(force=True)
-        log.info("AUTO-PICK | fetched %d player entries from sheet", len(availability))
+        log.info("AUTO-PICK | fetched %d player entries from PLAYERS sheet", len(availability))
     except Exception as e:
-        log.error("AUTO-PICK | sheet fetch failed: %s", e)
-        availability = {}
-
-    try:
-        roster_names = _fetch_roster_names(force=True)
-    except Exception as e:
-        log.error("AUTO-PICK | roster fetch failed: %s", e)
-        roster_names = None
-
-    # Scan recent draft channel messages to catch picks not yet reflected in the sheet.
-    # A pick message starts with a number + period (e.g. "42. <:emoji:id> LeBron James '23 $5").
-    recently_picked: set[str] = set()
-    try:
-        pick_names_lower = {p["player"].lower() for p in picks}
-        async for msg in channel.history(limit=50):
-            if re.match(r'^\d+\s*\.', msg.content.strip()):
-                content_lower = msg.content.lower()
-                for name in pick_names_lower:
-                    if name in content_lower:
-                        recently_picked.add(name)
-    except Exception as e:
-        log.warning("AUTO-PICK | channel history scan failed: %s", e)
+        log.error("AUTO-PICK | PLAYERS sheet fetch failed — falling back to ROSTER sheet: %s", e)
+        try:
+            roster_names = _fetch_roster_names(force=True)
+            log.info("AUTO-PICK | fetched %d entries from ROSTER sheet (fallback)", len(roster_names))
+        except Exception as e2:
+            log.error("AUTO-PICK | ROSTER sheet fetch also failed: %s", e2)
 
     # Walk list — find first available player
     chosen_idx  = None
@@ -346,13 +370,7 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
 
     for idx, pick in enumerate(picks):
         name_lower = pick["player"].lower()
-        if name_lower in _drafted_this_session:
-            skipped.append(pick["player"])
-            log.info("AUTO-PICK | %s | '%s' already drafted this session — skipping", user.display_name, pick["player"])
-        elif name_lower in recently_picked:
-            skipped.append(pick["player"])
-            log.info("AUTO-PICK | %s | '%s' found in recent channel messages — skipping", user.display_name, pick["player"])
-        elif _player_available(pick["player"], availability, roster_names):
+        if _player_available(pick["player"], availability, roster_names):
             chosen_idx  = idx
             chosen_pick = pick
             break
@@ -563,8 +581,21 @@ async def on_message(message: discord.Message):
                 if name_lower not in _drafted_this_session and name_lower in content_lower:
                     _drafted_this_session.add(name_lower)
                     if is_picker:
-                        log.info("PICK TRACKED | '%s' picked by owner — session-tracked only", pick["player"])
-                        continue
+                        log.info("PICK TRACKED | '%s' picked by owner — clearing their list", pick["player"])
+                        _data[uid]["picks"] = []
+                        _save_data(_data)
+                        try:
+                            user = bot.get_user(int(uid))
+                            if not user:
+                                user = await bot.fetch_user(int(uid))
+                            if user:
+                                await user.send(
+                                    f"✅ Detected your manual pick of **{pick['player']}**. "
+                                    f"Your pick list has been cleared for the next round."
+                                )
+                        except Exception:
+                            pass
+                        break
                     pos = picks.index(pick) + 1
                     picks.remove(pick)
                     _save_data(_data)
@@ -935,7 +966,8 @@ async def cmd_synclotto(ctx):
 async def cmd_alllists(ctx):
     """!alllists — show every registered drafter's pick list (owner only)."""
     in_dm = isinstance(ctx.channel, discord.DMChannel)
-    is_owner = ctx.author.id == OWNER_ID
+    _ALLLISTS_AUTHORIZED = {OWNER_ID, 1174419581675249807}
+    is_owner = ctx.author.id in _ALLLISTS_AUTHORIZED
 
     if in_dm and not is_owner:
         return
@@ -1233,7 +1265,8 @@ async def cmd_resetall(ctx):
     """!resetall — wipe ALL drafter data (picks, emoji, settings) for a fresh ATD (owner DM only)."""
     if not isinstance(ctx.channel, discord.DMChannel):
         return
-    if ctx.author.id != OWNER_ID:
+    _RESET_AUTHORIZED = {OWNER_ID, 1174419581675249807}
+    if ctx.author.id not in _RESET_AUTHORIZED:
         await ctx.send("❌ You don't have permission to use this command.")
         return
 
