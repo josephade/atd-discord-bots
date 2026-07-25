@@ -26,7 +26,9 @@ ROUNDLESS_TIMER = 2700  # 45 minutes per pick in roundless (money-based) mode
 AS_THRESHOLD = 3
 
 # Players that trigger the "pick at the end of rounds 6-10" penalty
-PENALTY_PLAYERS = {"lebron james", "michael jordan"}
+# TEMPORARILY DISABLED for budget draft — re-enable when done
+# PENALTY_PLAYERS = {"lebron james", "michael jordan"}
+PENALTY_PLAYERS = set()
 
 # User ID of the ATD Draft List Bot — its picks are trusted (treated like a commissioner pick).
 # Set this as a Fly.io secret: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-timer-bot

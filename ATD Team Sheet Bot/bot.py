@@ -9,11 +9,23 @@ import json
 import os
 from datetime import datetime
 import requests.exceptions
-from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID
+from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID, TEAM_BUDGET
 from player_positions import PLAYER_POSITIONS
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
 
-# ── Persistent storage 
+
+def _friendly_sheet_error(exc: Exception) -> str:
+    """Log the full exception server-side and return a short, safe message for Discord."""
+    print(f"[SheetError] {exc}")
+    if isinstance(exc, discord.errors.HTTPException):
+        return "❌ Discord's API is temporarily unavailable. Please try again in a moment."
+    text = str(exc)
+    if "<html" in text.lower() or "500" in text or "502" in text or "503" in text:
+        return "❌ Sheet error: Google Sheets is temporarily unavailable. Please try again in a moment."
+    return f"❌ Sheet error: {text.splitlines()[0][:200]}"
+
+
+# ── Persistent storage
 _CONFIG_FILE  = "/data/sheet_config.json"
 _UNDO_FILE    = "/data/undo_stack.json"
 _AUDIT_FILE   = "/data/audit.json"
@@ -229,7 +241,7 @@ class SheetManager:
         undo_data = _load_undo()
         self._undo_stack = undo_data.get(str(channel_id), []) if channel_id else []
 
-    def _call(self, method_name, *args, retries=3, **kwargs):
+    def _call(self, method_name, *args, retries=4, **kwargs):
         """
         Call a gspread worksheet method by name, retrying up to `retries` times
         on transient errors. Reconnects the worksheet between attempts.
@@ -240,8 +252,9 @@ class SheetManager:
             except Exception as e:
                 if attempt == retries:
                     raise
-                print(f"[Sheets] Error (attempt {attempt}/{retries}): {type(e).__name__}: {e} — reconnecting…")
-                time.sleep(2)
+                delay = 2 ** attempt  # 2s, 4s, 8s…
+                print(f"[Sheets] Error (attempt {attempt}/{retries}): {type(e).__name__}: {e} — reconnecting in {delay}s…")
+                time.sleep(delay)
                 try:
                     self.ws = connect_sheets(self.ws.title, self._spreadsheet_id)
                 except Exception:
@@ -376,14 +389,16 @@ class SheetManager:
             )
 
         # 3. Duplicate check — player must not already exist anywhere in the sheet
-        print(f"[Pick] Checking for duplicates…")
-        existing_team = self._find_existing_player(player_name, all_data)
-        if existing_team:
-            print(f"[Pick] ❌ Duplicate — '{player_name}' already on '{existing_team}'")
-            return False, (
-                f"**{player_name}** is already on **{existing_team}**. "
-                f"Each player can only be on one team."
-            )
+        # TEMPORARILY DISABLED: this ATD allows the same player on multiple teams
+        # To re-enable, uncomment the block below
+        # print(f"[Pick] Checking for duplicates…")
+        # existing_team = self._find_existing_player(player_name, all_data)
+        # if existing_team:
+        #     print(f"[Pick] ❌ Duplicate — '{player_name}' already on '{existing_team}'")
+        #     return False, (
+        #         f"**{player_name}** is already on **{existing_team}**. "
+        #         f"Each player can only be on one team."
+        #     )
 
         # 4. Try slots in this order: all starters first, then all bench.
         #    e.g. for PF/SF: PF Starter → SF Starter → PF Bench → SF Bench
@@ -557,6 +572,10 @@ class SheetManager:
 # =============================================================================
 
 _CUSTOM_EMOJI_RE = re.compile(r'<a?:([\w~]+):(\d+)>')
+_UNICODE_FLAG_RE = re.compile('|'.join(re.escape(k) for k in UNICODE_EMOJI_MAP))
+_MENTION_EMOJI_PAIR_RE = re.compile(
+    r'<@!?(\d+)>\s*(?:<a?:([\w~]+):\d+>|(' + '|'.join(re.escape(k) for k in UNICODE_EMOJI_MAP) + r'))'
+)
 _YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b|\b(\d{2})'|\b(\d{2})\b")
 _PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?)\)?|\((\d+(?:\.\d+)?)\)|\b(\d+(?:\.\d+)?)\$')
 _PICK_RE         = re.compile(r'^\s*\d+\.\s*')
@@ -843,9 +862,15 @@ async def on_message(message):
                 bench_only=data['bench_only'],
             ))
     except Exception as exc:
-        print(f"[Pick] ❌ Exception in add_player: {exc}")
-        await message.add_reaction('❌')
-        await message.channel.send(f"❌ Sheet error: {exc}")
+        print(f"[Pick] ❌ Exception while processing pick: {exc}")
+        try:
+            await message.add_reaction('❌')
+        except discord.errors.HTTPException:
+            pass
+        try:
+            await message.channel.send(_friendly_sheet_error(exc))
+        except discord.errors.HTTPException:
+            pass
         return
 
     if success:
@@ -1051,13 +1076,22 @@ async def cmd_claimteam(ctx, *, emoji_input: str = ""):
         return
 
     emoji_match = _CUSTOM_EMOJI_RE.search(emoji_input)
+    team_name = None
     if emoji_match:
         emoji_name = emoji_match.group(1)
+        team_name = EMOJI_TEAM_MAP.get(emoji_name)
     else:
-        await ctx.send("❌ Please use a custom server emoji, not text or Unicode.")
-        return
+        # Fall back to built-in Unicode emojis (e.g. flag_no 🇳🇴, England 🏴󠁧󠁢󠁥󠁮󠁧󠁿)
+        emoji_name = None
+        for char, tname in UNICODE_EMOJI_MAP.items():
+            if char in emoji_input:
+                emoji_name = char
+                team_name = tname
+                break
+        if not team_name:
+            await ctx.send("❌ Please use a custom server emoji or a country flag emoji.")
+            return
 
-    team_name = EMOJI_TEAM_MAP.get(emoji_name)
     if not team_name:
         await ctx.send(f"❌ Unrecognised emoji **:{emoji_name}:**. Add it to `emoji_map.py` first.")
         return
@@ -1114,11 +1148,18 @@ async def cmd_assignteam(ctx, *, args: str = ""):
     assigned = []
     errors = []
 
-    # Format 1: <:emoji:> @user1 @user2 — one team, multiple GMs
-    emoji_first = _CUSTOM_EMOJI_RE.match(args.strip())
-    if emoji_first:
-        emoji_name = emoji_first.group(1)
-        team_name = EMOJI_TEAM_MAP.get(emoji_name)
+    # Format 1: <:emoji:> @user1 @user2 — one team, multiple GMs (custom or Unicode flag emoji)
+    stripped_args = args.strip()
+    emoji_first = _CUSTOM_EMOJI_RE.match(stripped_args)
+    unicode_first = None if emoji_first else _UNICODE_FLAG_RE.match(stripped_args)
+
+    if emoji_first or unicode_first:
+        if emoji_first:
+            emoji_name = emoji_first.group(1)
+            team_name = EMOJI_TEAM_MAP.get(emoji_name)
+        else:
+            emoji_name = unicode_first.group(0)
+            team_name = UNICODE_EMOJI_MAP.get(emoji_name)
         if not team_name:
             await ctx.send(f"❌ Unknown emoji **:{emoji_name}:**. Add it to `emoji_map.py` first.")
             return
@@ -1130,15 +1171,20 @@ async def cmd_assignteam(ctx, *, args: str = ""):
             _team_owners[uid_str] = team_name
             assigned.append(f"<@{uid_str}> → **{team_name}**")
     else:
-        # Format 2: @user1 <:emoji1:> @user2 <:emoji2:> — different teams
-        pairs = re.findall(r'<@!?(\d+)>\s*<a?:([\w~]+):\d+>', args)
+        # Format 2: @user1 <:emoji1:> @user2 🇲🇽 — different teams, custom or Unicode flag emoji
+        pairs = _MENTION_EMOJI_PAIR_RE.findall(args)
         if not pairs:
             await ctx.send("❌ Could not parse. Use `!assignteam <:emoji:> @user1 @user2` or `!assignteam @user1 <:emoji1:> @user2 <:emoji2:>`")
             return
-        for uid_str, emoji_name in pairs:
-            team_name = EMOJI_TEAM_MAP.get(emoji_name)
+        for uid_str, emoji_name, unicode_flag in pairs:
+            if emoji_name:
+                team_name = EMOJI_TEAM_MAP.get(emoji_name)
+                label = f":{emoji_name}:"
+            else:
+                team_name = UNICODE_EMOJI_MAP.get(unicode_flag)
+                label = unicode_flag
             if not team_name:
-                errors.append(f":{emoji_name}: — unknown emoji")
+                errors.append(f"{label} — unknown emoji")
                 continue
             _team_owners[uid_str] = team_name
             assigned.append(f"<@{uid_str}> → **{team_name}**")
@@ -1258,21 +1304,27 @@ async def cmd_swap(ctx, *, args: str):
 
     # Find the sheet manager
     manager = _get_manager(ctx.channel.id)
-    if not manager:
-        for ch_id in _channel_sheet_map:
-            manager = _get_manager(ch_id)
-            if manager:
-                break
-    if not manager:
+    managers_to_try = []
+    if manager:
+        managers_to_try.append(manager)
+    for ch_id in _channel_sheet_map:
+        if ch_id != ctx.channel.id:
+            m = _get_manager(ch_id)
+            if m:
+                managers_to_try.append(m)
+    if not managers_to_try:
         await ctx.send("❌ No sheet mappings configured.")
         return
 
     try:
         async with ctx.channel.typing():
-            all_data = manager._call('get_all_values')
-
-            # Find the team header
-            team_row, team_col = manager._find_team_cell(team_name, all_data)
+            all_data = team_row = team_col = None
+            for m in managers_to_try:
+                data = m._call('get_all_values')
+                row, col = m._find_team_cell(team_name, data)
+                if row:
+                    manager, all_data, team_row, team_col = m, data, row, col
+                    break
             if not team_row:
                 await ctx.send(f"❌ Team **{team_name}** not found in the sheet.")
                 return
@@ -1319,7 +1371,7 @@ async def cmd_swap(ctx, *, args: str):
             manager._call('batch_update', updates)
 
     except Exception as exc:
-        await ctx.send(f"❌ Sheet error: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
         return
 
     # Position labels for display
@@ -1364,19 +1416,27 @@ async def cmd_addyear(ctx, *, args: str):
     year = _normalize_year(parts[1].strip())
 
     manager = _get_manager(ctx.channel.id)
-    if not manager:
-        for ch_id in _channel_sheet_map:
-            manager = _get_manager(ch_id)
-            if manager:
-                break
-    if not manager:
+    managers_to_try = []
+    if manager:
+        managers_to_try.append(manager)
+    for ch_id in _channel_sheet_map:
+        if ch_id != ctx.channel.id:
+            m = _get_manager(ch_id)
+            if m:
+                managers_to_try.append(m)
+    if not managers_to_try:
         await ctx.send("❌ No sheet mappings configured.")
         return
 
     try:
         async with ctx.channel.typing():
-            all_data = manager._call('get_all_values')
-            team_row, team_col = manager._find_team_cell(team_name, all_data)
+            all_data = team_row = team_col = None
+            for m in managers_to_try:
+                data = m._call('get_all_values')
+                row, col = m._find_team_cell(team_name, data)
+                if row:
+                    manager, all_data, team_row, team_col = m, data, row, col
+                    break
             if not team_row:
                 await ctx.send(f"❌ Team **{team_name}** not found in the sheet.")
                 return
@@ -1405,7 +1465,7 @@ async def cmd_addyear(ctx, *, args: str):
             }])
 
     except Exception as exc:
-        await ctx.send(f"❌ Sheet error: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
         return
 
     await ctx.send(f"✅ **{player_name}** — year set to **{year}** on **{team_name}**.")
@@ -1832,7 +1892,7 @@ async def cmd_find(ctx, *, player_name: str):
                     found_tab = _channel_sheet_map[ch_id]["tab"]
                     break
     except Exception as exc:
-        await ctx.send(f"❌ Sheet error: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
         return
 
     if found_team:
@@ -1901,7 +1961,7 @@ async def cmd_available(ctx, *, position: str):
                 return result
             drafted = await loop.run_in_executor(None, _fetch_drafted)
     except Exception as exc:
-        await ctx.send(f"❌ Sheet error: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
         return
 
     # Match candidates against drafted names (case-insensitive)
@@ -1949,10 +2009,20 @@ async def cmd_roster(ctx, *, team_input: str):
     """View a team's current roster from the sheet. Accepts team name, emoji name, or custom emoji."""
     # Extract emoji name from custom emoji syntax (e.g. <:NW:123456> → "NW")
     emoji_match = _CUSTOM_EMOJI_RE.search(team_input)
-    lookup = emoji_match.group(1) if emoji_match else team_input.strip()
+    team_name = None
+    if emoji_match:
+        lookup = emoji_match.group(1)
+    else:
+        # Fall back to built-in Unicode emojis (e.g. flag_fr 🇫🇷, England 🏴󠁧󠁢󠁥󠁮󠁧󠁿)
+        for char, tname in UNICODE_EMOJI_MAP.items():
+            if char in team_input:
+                team_name = tname
+                break
+        lookup = team_input.strip()
 
     # Resolve: emoji name → exact team name → partial team name → raw
-    team_name = EMOJI_TEAM_MAP.get(lookup)
+    if not team_name:
+        team_name = EMOJI_TEAM_MAP.get(lookup)
     if not team_name:
         lookup_lower = lookup.lower()
         for ename, tname in EMOJI_TEAM_MAP.items():
@@ -1999,7 +2069,7 @@ async def cmd_roster(ctx, *, team_input: str):
                     break
                 last_error = roster
     except Exception as exc:
-        await ctx.send(f"❌ Sheet error: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
         return
 
     if result_name is None:
@@ -2019,7 +2089,18 @@ async def cmd_roster(ctx, *, team_input: str):
     bench_filled    = sum(1 for e in roster[5:] if e["player"])
     color           = discord.Color.gold() if filled == 10 else discord.Color.blue()
 
+    spent = 0
+    for e in roster:
+        if not e["player"] or not e["price"]:
+            continue
+        try:
+            spent += int(float(re.sub(r'[^\d.]', '', e["price"])))
+        except (ValueError, TypeError):
+            pass
+    remaining = TEAM_BUDGET - spent
+
     embed = discord.Embed(title=f"{title_prefix} {result_name}", description=gm_line, color=color)
+    embed.add_field(name="💰 Budget", value=f"${remaining} remaining (${spent}/${TEAM_BUDGET} spent)", inline=False)
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
 

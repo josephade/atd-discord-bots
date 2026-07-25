@@ -67,7 +67,11 @@ gc = gspread.authorize(creds)
 # DYNAMIC TRACKS (persisted to flux_tracks.json)
 # ==========================================================
 
-TRACKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flux_tracks.json")
+TRACKS_FILE = os.getenv(
+    "FLUX_TRACKS_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "flux_tracks.json"),
+)
+os.makedirs(os.path.dirname(TRACKS_FILE), exist_ok=True)
 
 def load_tracks() -> Dict[int, Dict]:
     if os.path.exists(TRACKS_FILE):
@@ -325,8 +329,8 @@ async def flux(ctx, vol: int):
     existing = get_existing_rounds(header)
     next_round = 2 if not existing else max(existing) + 1
 
-    if next_round > 10:
-        await ctx.send("❌ Maximum round is 10.")
+    if next_round > 11:
+        await ctx.send("❌ Maximum round is 11.")
         return
 
     log.info(f"Flux started | round={next_round} | vol={vol} | user={user}")
@@ -487,7 +491,7 @@ async def fluxhelp(ctx):
     embed.add_field(
         name="Important Rules",
         value=(
-            "• Maximum round is **Round 10**\n"
+            "• Maximum round is **Round 11**\n"
             "• Flux value must be **3, 4, or 5**\n"
             "• Pricing is based on the **Value** column\n"
             "• Behaviour matches manual drag-down exactly"

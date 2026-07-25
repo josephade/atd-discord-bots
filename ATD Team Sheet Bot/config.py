@@ -16,6 +16,9 @@ WORKSHEET_NAME = os.getenv('WORKSHEET_NAME', 'Sheet1')
 # Leave unset (or false) for drafts where price is optional.
 PRICE_REQUIRED = os.getenv('PRICE_REQUIRED', '').lower() in ('1', 'true', 'yes')
 
+# Total budget each team starts with, for the "remaining budget" line on !roster.
+TEAM_BUDGET = int(os.getenv('TEAM_BUDGET', '100'))
+
 # User ID of the ATD Draft List Bot — its picks are processed like regular user picks.
 # Set: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-team-sheet-bot
 DRAFT_LIST_BOT_ID = int(os.getenv('DRAFT_LIST_BOT_ID', 0)) or None

@@ -20,8 +20,11 @@ HISTORY_FILE = os.path.join(_state_dir, "skip_history.json")
 
 # ATD snake direction per round (0-indexed).
 # True = reversed (picks N→1), False = forward (picks 1→N).
-# Rounds 3 and 6 are "flips" — same direction as the previous round.
-_REVERSED = [False, True, True, False, True, True, False, True, False, True]
+# TEMPORARILY DISABLED flips for budget draft — re-enable when done
+# Normal ATD (with flips on rounds 3 and 6):
+# _REVERSED = [False, True, True, False, True, True, False, True, False, True]
+# Standard snake (no flips):
+_REVERSED = [False, True, False, True, False, True, False, True, False, True]
 
 
 def build_snake_order(num_teams: int, penalty_teams: list[int] = None) -> list[list[int]]:

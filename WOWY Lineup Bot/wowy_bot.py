@@ -315,6 +315,29 @@ async def _get_browser():
         return _browser
 
 
+async def _reset_browser():
+    """Discard the shared browser/playwright instance so the next request
+    launches a fresh one. Used when a request times out — a wedged CDP
+    connection usually means the whole browser is broken, not just one page."""
+    global _browser, _pw_instance
+    old_browser, old_pw = _browser, _pw_instance
+    _browser = None
+    _pw_instance = None
+    if old_browser:
+        try:
+            await asyncio.wait_for(old_browser.close(), timeout=5)
+        except Exception:
+            pass
+    if old_pw:
+        try:
+            await asyncio.wait_for(old_pw.stop(), timeout=5)
+        except Exception:
+            pass
+
+
+SCREENSHOT_TIMEOUT_SECS = 90
+
+
 async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year: int,
                           season_type: str = "regular", leverage: str = "all") -> bytes:
     # Check disk cache first
@@ -322,6 +345,19 @@ async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year
     if cached:
         return cached
 
+    try:
+        return await asyncio.wait_for(
+            _screenshot_wowy_inner(team, player_ids, start_year, end_year, season_type, leverage),
+            timeout=SCREENSHOT_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        log.error(f"[SCREENSHOT] Timed out after {SCREENSHOT_TIMEOUT_SECS}s — resetting browser")
+        await _reset_browser()
+        raise ValueError("SCREENSHOT_TIMEOUT")
+
+
+async def _screenshot_wowy_inner(team: str, player_ids: list, start_year: int, end_year: int,
+                                  season_type: str, leverage: str) -> bytes:
     players_path = "/".join(str(pid) for pid in player_ids)
     url = DATABALLR_URL.format(
         team=team, start=start_year, end=end_year,
@@ -454,7 +490,10 @@ async def screenshot_wowy(team: str, player_ids: list, start_year: int, end_year
             img = await element.screenshot()
 
         finally:
-            await page.close()
+            try:
+                await asyncio.wait_for(page.close(), timeout=5)
+            except Exception:
+                pass
 
     _cache_put(team, player_ids, start_year, end_year, season_type, leverage, img)
     return img
@@ -548,6 +587,10 @@ async def wowy_cmd(ctx, *, args: str = ""):
             elif msg == "SLOW_LOAD":
                 await ctx.send(
                     f"❌ The page took too long to load. Large date ranges or tight leverage filters can be slow — try again or narrow the range."
+                )
+            elif msg == "SCREENSHOT_TIMEOUT":
+                await ctx.send(
+                    "❌ That took too long and the browser got stuck — it's been reset automatically. Please try again."
                 )
             else:
                 await ctx.send(f"❌ {msg}")

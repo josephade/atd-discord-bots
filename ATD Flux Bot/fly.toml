@@ -3,6 +3,13 @@ app = "atd-flux-bot"
 kill_signal = "SIGINT"
 kill_timeout = 30
 
+[env]
+  FLUX_TRACKS_PATH = "/data/flux_tracks.json"
+
+[[mounts]]
+  source = "flux_data"
+  destination = "/data"
+
 [vm]
   size = "shared-cpu-1x"
   memory = 512

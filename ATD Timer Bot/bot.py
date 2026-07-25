@@ -18,6 +18,7 @@ During draft:
   !timerskip             Skip your turn (-10 min on future picks)
   !timerstatus           Current pick, round, and time remaining
   !timerboard            Show all picks so far
+  !timerdm on|off|status Opt in/out of DMs when it's your turn (DM or server, global)
   !timerhelp             Full command reference
 
 Admin:
@@ -163,6 +164,62 @@ def _append_skip_history(entry: dict):
         json.dump(history, f, indent=2)
 
 
+# ── Pick-turn DM preferences (global per-user, shared across all drafts) ─────
+
+DM_PREFS_FILE = os.path.join(_state_dir, "dm_prefs.json")
+
+
+def _load_dm_prefs() -> dict:
+    try:
+        with open(DM_PREFS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_dm_prefs(prefs: dict):
+    with open(DM_PREFS_FILE, "w") as f:
+        json.dump(prefs, f, indent=2)
+
+
+def _dm_enabled(user_id: int) -> bool:
+    return _load_dm_prefs().get(str(user_id), False)
+
+
+async def _dm_team(s: DraftSession, team: dict, deadline_ts: int, header: str):
+    """DM every opted-in GM on `team` that it's their turn to pick."""
+    prefs = _load_dm_prefs()
+    opted_in = [uid for uid in team["user_ids"] if prefs.get(str(uid), False)]
+    if not opted_in:
+        return
+
+    channel = s.channel
+    link = (f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
+            if channel and channel.guild else None)
+    location = f"[{channel.name}]({link})" if link else "your draft channel"
+
+    embed = discord.Embed(
+        title=header,
+        description=(
+            f"**{team['name']}** — it's your turn to pick!\n\n"
+            f"⏱️ Pick deadline: <t:{deadline_ts}:R>\n\n"
+            f"Type your pick in {location}:\n"
+            f"{_pick_format(s)}"
+        ),
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="Turn this off anytime with !timerdm off")
+
+    for uid in opted_in:
+        try:
+            user = bot.get_user(uid) or await bot.fetch_user(uid)
+            await user.send(embed=embed)
+        except discord.Forbidden:
+            log.info("DM blocked | user=%d has DMs disabled", uid)
+        except Exception as exc:
+            log.warning("DM failed | user=%d | %s", uid, exc)
+
+
 # ── Regex patterns ────────────────────────────────────────────────────────────
 
 # Matches:  14. <:Pacers:123> Marc Gasol 2012-13
@@ -289,6 +346,7 @@ async def _ping_current(s: DraftSession, remaining: int = None):
     s.challenge_count    = 0
     s.challenged_msg_ids = set()
     s.active_ping = await s.channel.send(content=_team_mentions(team), embed=embed)
+    await _dm_team(s, team, deadline_ts, _pick_title(s))
 
 
 async def _delete_active_ping(s: DraftSession):
@@ -333,6 +391,8 @@ async def _auto_pause_for_window(s: DraftSession, remaining: float, next_up: boo
         )
         embed.set_footer(text="Use !timerskip to pass." if s.draft.timer_override is not None else "Use !timerskip to pass (costs 10 min on future picks).")
         s.active_ping = await channel.send(content=_team_mentions(team), embed=embed)
+        deadline_ts = int(datetime.now(timezone.utc).timestamp()) + int(_secs_until_open()) + remaining
+        await _dm_team(s, team, deadline_ts, _pick_title(s))
     else:
         await channel.send(
             f"🌙 **Draft window closed** (midnight ET). Timer paused.\n"
@@ -377,6 +437,7 @@ async def _window_resume_task(s: DraftSession, sleep_secs: float):
     s.active_ping = await channel.send(
         content=f"☀️ **Draft window open!** {_team_mentions(team)}", embed=embed
     )
+    await _dm_team(s, team, deadline_ts, _pick_title(s))
     s.timer_task = asyncio.create_task(_timer_loop(s, remaining, team["user_ids"]))
 
 
@@ -482,6 +543,7 @@ async def _process_challenge(s: DraftSession, challenger_mention: str, challenge
     s.active_ping      = await channel.send(content=_team_mentions(team), embed=embed)
     s.draft.timer_start = datetime.now(timezone.utc).isoformat()
     s.draft.save(s.channel_id)
+    await _dm_team(s, team, deadline_ts, f"⚡ Challenged! {_pick_title(s)}")
     s.timer_task = asyncio.create_task(_timer_loop(s, new_duration, team["user_ids"]))
 
 
@@ -919,14 +981,25 @@ async def on_message(message: discord.Message):
     if message.author.bot and not _from_draft_list:
         return
 
-    # ── Challenge detection: reply in ATD_CHAT_CHANNEL_ID ────────────────────
-    if (message.channel.id == ATD_CHAT_CHANNEL_ID
+    # ── Challenge detection: reply in ATD_CHAT_CHANNEL_ID or its threads ────────
+    _in_chat = (message.channel.id == ATD_CHAT_CHANNEL_ID
+                or getattr(message.channel, 'parent_id', None) == ATD_CHAT_CHANNEL_ID)
+    if (_in_chat
             and message.reference
             and message.content.strip().lower() == "challenge"):
+        try:
+            ref_msg = await message.channel.fetch_message(message.reference.message_id)
+        except (discord.NotFound, discord.HTTPException):
+            return
+
         for ch_id, s in list(_sessions.items()):
             if s.draft.state != "active" or not s.draft.current_team:
                 continue
             if message.author.id in s.draft.current_team["user_ids"]:
+                continue
+            # This session's challenge only applies if the replied-to message
+            # was sent by the team currently on the clock in THIS draft.
+            if ref_msg.author.id not in s.draft.current_team["user_ids"]:
                 continue
 
             effective_ping_time = s.ping_time
@@ -935,29 +1008,20 @@ async def on_message(message: discord.Message):
             if effective_ping_time is None:
                 continue
 
-            expected_team_idx = s.draft.current_team_idx
             try:
-                ref_msg = await message.channel.fetch_message(message.reference.message_id)
-            except (discord.NotFound, discord.HTTPException):
-                continue
-
-            if (s.draft.state == "active"
-                    and s.draft.current_team_idx == expected_team_idx
-                    and ref_msg.author.id in s.draft.current_team["user_ids"]):
-                try:
-                    if ref_msg.created_at < effective_ping_time:
-                        await message.reply(
-                            "❌ **Invalid challenge** — the GM typed that message before they were pinged to pick."
-                        )
-                    elif ref_msg.id in s.challenged_msg_ids:
-                        await message.reply(
-                            "❌ **Invalid challenge** — that message has already been challenged."
-                        )
-                    else:
-                        s.challenged_msg_ids.add(ref_msg.id)
-                        await _process_challenge(s, message.author.mention, message.author.display_name)
-                except discord.HTTPException as e:
-                    log.warning("Challenge reply failed: %s", e)
+                if ref_msg.created_at < effective_ping_time:
+                    await message.reply(
+                        "❌ **Invalid challenge** — the GM typed that message before they were pinged to pick."
+                    )
+                elif ref_msg.id in s.challenged_msg_ids:
+                    await message.reply(
+                        "❌ **Invalid challenge** — that message has already been challenged."
+                    )
+                else:
+                    s.challenged_msg_ids.add(ref_msg.id)
+                    await _process_challenge(s, message.author.mention, message.author.display_name)
+            except discord.HTTPException as e:
+                log.warning("Challenge reply failed: %s", e)
             break
         return
 
@@ -1248,6 +1312,57 @@ async def timerorder(ctx, *positions):
     lines = "\n".join(f"**{i+1}.** {_team_mentions(t)}" for i, t in enumerate(s.draft.teams))
     embed = discord.Embed(title="📋 Draft Order Set", description=lines, color=discord.Color.blue())
     embed.set_footer(text="Run !timerstart to begin.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="timerslotedit")
+@is_commissioner()
+async def timerslotedit(ctx, slot: int, *, args: str = ""):
+    """!timerslotedit <slot#> @user1 @user2 OR <discord_id> <name> — replace a lotto slot's owners."""
+    s = _get_session(ctx.channel.id)
+
+    if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
+        await ctx.send("❌ No lotto loaded.")
+        return
+
+    if slot < 1 or slot > len(s.draft.teams):
+        await ctx.send(f"❌ Slot must be between 1 and {len(s.draft.teams)}.")
+        return
+
+    team = s.draft.teams[slot - 1]
+
+    # Collect user_ids from mentions first, then bare IDs, then resolve display names
+    new_ids   = [m.id for m in ctx.message.mentions]
+    new_names = [m.display_name for m in ctx.message.mentions]
+
+    # Also parse raw IDs and plain names from args (after stripping mention tokens)
+    remaining = re.sub(r'<@!?\d+>', '', args).strip()
+    for token in re.split(r'\s+', remaining):
+        if not token:
+            continue
+        if token.isdigit() and len(token) > 6:
+            uid = int(token)
+            member = ctx.guild.get_member(uid)
+            new_ids.append(uid)
+            new_names.append(member.display_name if member else str(uid))
+        elif token:
+            new_ids.append(0)   # unknown — no Discord ID
+            new_names.append(token)
+
+    if not new_ids:
+        await ctx.send("❌ Provide at least one user (@mention, Discord ID, or name).")
+        return
+
+    team["user_ids"] = [uid for uid in new_ids if uid != 0]
+    team["name"]     = " / ".join(new_names)
+    s.draft.save(s.channel_id)
+
+    lines = "\n".join(f"**{i+1}.** {t['name']}" for i, t in enumerate(s.draft.teams))
+    embed = discord.Embed(
+        title=f"✅ Slot {slot} Updated",
+        description=f"**New owners:** {' / '.join(new_names)}\n\n{lines}",
+        color=discord.Color.green(),
+    )
     await ctx.send(embed=embed)
 
 
@@ -2196,6 +2311,37 @@ async def timereset(ctx):
     await ctx.send("🗑️ Draft has been reset.")
 
 
+@bot.command(name="timerdm")
+async def timerdm(ctx, action: str = ""):
+    """!timerdm on|off|status — opt in/out of DM pings for your turn to pick.
+    Works the same in DMs with the bot or in a server channel. Global across
+    every draft you're in — no need to toggle it per-channel."""
+    action = action.lower().strip()
+    uid    = str(ctx.author.id)
+    prefs  = _load_dm_prefs()
+
+    if action == "on":
+        prefs[uid] = True
+        _save_dm_prefs(prefs)
+        await ctx.send(
+            "✅ Pick-turn DMs are now **ON**. I'll message you here whenever it's "
+            "your turn to pick, across every draft you're in. Turn it off anytime with `!timerdm off`."
+        )
+    elif action == "off":
+        prefs[uid] = False
+        _save_dm_prefs(prefs)
+        await ctx.send("🔕 Pick-turn DMs are now **OFF**.")
+    elif action == "status":
+        state = "**ON** ✅" if prefs.get(uid, False) else "**OFF** 🔕"
+        await ctx.send(f"Your pick-turn DMs are currently {state}.")
+    else:
+        state = "**ON** ✅" if prefs.get(uid, False) else "**OFF** 🔕"
+        await ctx.send(
+            "**Usage:** `!timerdm on` / `!timerdm off` / `!timerdm status`\n"
+            f"Your pick-turn DMs are currently {state}."
+        )
+
+
 @bot.command(name="timerhelp")
 async def timerhelp(ctx):
     s = _get_session(ctx.channel.id)
@@ -2228,6 +2374,7 @@ async def timerhelp(ctx):
             "`!timerskiplist` — Show all teams' skip penalties\n"
             "`!timerskiphistory [@user]` — All-time skip leaderboard or per-GM history\n"
             "`challenge` (reply in atd-chat) — Cut current GM's timer to 10 min (3 = instant skip)\n"
+            "`!timerdm on|off|status` — Opt in/out of DMs when it's your turn (works in DM or server, global across all your drafts)\n"
         ),
         inline=False,
     )

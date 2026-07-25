@@ -350,7 +350,7 @@ async def on_message(message: discord.Message):
             await message.reply("❌ Invalid channel ID.")
             return
         sheet_id = parts[2]
-        worksheet_name = parts[3] if len(parts) >= 4 else None
+        worksheet_name = " ".join(parts[3:]) if len(parts) >= 4 else None
         # Validate by opening the sheet
         try:
             sh = gc.open_by_key(sheet_id)
