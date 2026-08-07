@@ -341,5 +341,4 @@ ADP_MAP = {
     "cooper flagg": 310.00,
     "ajay mitchell": 310.00,
     "kon knueppel": 310.00,
-    "rodney mccray": 306.00,
 }

@@ -15,7 +15,7 @@ Setup (admin only):
   !timerstart            Begin the draft
 
 During draft:
-  !timerskip             Skip your turn (-10 min on future picks)
+  !timerskip             Skip your turn (-5 min on future picks)
   !timerstatus           Current pick, round, and time remaining
   !timerboard            Show all picks so far
   !timerdm on|off|status Opt in/out of DMs when it's your turn (DM or server, global)
@@ -35,11 +35,14 @@ from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
+from rapidfuzz import fuzz, process
 
 from config import (AS_THRESHOLD, ATD_CHAT_CHANNEL_ID, DISCORD_TOKEN,
-                    DRAFT_CHANNEL_ID, DRAFT_LIST_BOT_ID, LOTTO_CHANNEL_ID,
-                    PENALTY_PLAYERS, ROUNDS)
+                    DRAFT_CHANNEL_ID, DRAFT_LIST_BOT_ID, DRAFT_RECAP_CHANNEL_ID,
+                    LOTTO_CHANNEL_ID, PENALTY_PLAYERS, ROUNDS,
+                    SBL_STEALS_PER_TEAM, SBL_BLOCKS_PER_TEAM, SBL_LOCKS_PER_TEAM)
 from draft import DraftState, HISTORY_FILE, build_snake_order, state_file, _state_dir
+from adp import ADP_MAP
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -134,6 +137,68 @@ def _get_session(channel_id: int) -> DraftSession:
     return _sessions[channel_id]
 
 
+# Channels that aren't a draft themselves, but are allowed to remotely view or
+# operate on whichever draft is currently in progress elsewhere (e.g. a
+# general/admin channel).
+_REMOTE_VIEW_CHANNELS = {934052158532378634, 1471629828208988314}
+
+_ACTIVE_DRAFT_STATES = ("active", "paused", "window_paused")
+
+# Broader than _ACTIVE_DRAFT_STATES: covers a draft from lotto-loaded through
+# complete, i.e. anything past blank/idle. Used to resolve during-draft admin
+# commands (skip, addpick, setmoney, ...) remotely — deliberately excludes
+# setup commands (!timerloadlotto, !timerstart, !timereset, ...), which bind
+# a session to whatever channel they're run in and must stay channel-explicit.
+_IN_PROGRESS_STATES = ("lotto", "active", "paused", "window_paused", "complete")
+
+
+async def _resolve_viewable_session(ctx) -> DraftSession | None:
+    """Session to use for a read-only status command (!timerboard,
+    !timersblstatus). In a normal draft channel, that's just this channel.
+    In a remote-view channel, auto-detect the single currently-active draft
+    across all tracked channels. Sends an explanatory message and returns
+    None if there isn't exactly one to show."""
+    if ctx.channel.id not in _REMOTE_VIEW_CHANNELS:
+        return _get_session(ctx.channel.id)
+
+    active = [s for s in _sessions.values() if s.draft.state in _ACTIVE_DRAFT_STATES]
+    if not active:
+        await ctx.send("❌ No active draft found in any tracked channel.")
+        return None
+    if len(active) > 1:
+        names = ", ".join(f"<#{s.channel_id}>" for s in active)
+        await ctx.send(
+            f"❌ Multiple drafts are active right now ({names}) — run this command "
+            f"in the specific draft's channel instead."
+        )
+        return None
+    return active[0]
+
+
+async def _resolve_command_session(ctx) -> DraftSession | None:
+    """Session to use for a during-draft admin command (!timerskip,
+    !timeraddpick, !timerpause, ...). In a normal draft channel, that's just
+    this channel. In a remote channel, auto-detect the single draft currently
+    in progress (lotto-loaded through complete) across all tracked channels.
+    Sends an explanatory message and returns None if there isn't exactly one
+    to act on."""
+    if ctx.channel.id not in _REMOTE_VIEW_CHANNELS:
+        return _get_session(ctx.channel.id)
+
+    candidates = [s for s in _sessions.values() if s.draft.state in _IN_PROGRESS_STATES]
+    if not candidates:
+        await ctx.send("❌ No draft in progress in any tracked channel.")
+        return None
+    if len(candidates) > 1:
+        names = ", ".join(f"<#{s.channel_id}>" for s in candidates)
+        await ctx.send(
+            f"❌ Multiple drafts are in progress right now ({names}) — run this command "
+            f"in the specific draft's channel instead."
+        )
+        return None
+    return candidates[0]
+
+
 def _list_saved_channels() -> list[int]:
     """Scan the state directory for existing draft state files."""
     result = []
@@ -162,6 +227,111 @@ def _append_skip_history(entry: dict):
     history.append(entry)
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=2)
+
+
+# ── Challenge history (shared across all drafts) ──────────────────────────────
+
+CHALLENGE_HISTORY_FILE = os.path.join(_state_dir, "challenge_history.json")
+
+
+def _load_challenge_history() -> list[dict]:
+    try:
+        with open(CHALLENGE_HISTORY_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _append_challenge_history(entry: dict):
+    history = _load_challenge_history()
+    history.append(entry)
+    with open(CHALLENGE_HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+# ── Draft recap ───────────────────────────────────────────────────────────────
+
+def _build_draft_recap(s: DraftSession) -> discord.Embed:
+    """Summarize a just-finished draft: best value pick, biggest reach (both
+    vs. ADP_MAP), and most skips/challenges for this specific draft."""
+    best_value    = None  # (delta, player_name, team_name, pick_num, adp)
+    biggest_reach = None
+
+    for team in s.draft.teams:
+        picks        = team.get("picks", [])
+        pick_numbers = team.get("pick_numbers", [])
+        for pick_raw, pick_num in zip(picks, pick_numbers):
+            player_name = _extract_player_name(pick_raw)
+            adp = ADP_MAP.get(player_name.lower())
+            if adp is None:
+                continue
+            delta = pick_num - adp  # positive = picked later than ADP (value); negative = reach
+            if delta > 0 and (best_value is None or delta > best_value[0]):
+                best_value = (delta, player_name, team["name"], pick_num, adp)
+            if delta < 0 and (biggest_reach is None or delta < biggest_reach[0]):
+                biggest_reach = (delta, player_name, team["name"], pick_num, adp)
+
+    skip_history      = _load_skip_history()
+    challenge_history = _load_challenge_history()
+    this_draft_skips = [
+        h for h in skip_history
+        if h.get("channel_id") == s.channel_id and h.get("draft_started") == s.draft.draft_started
+    ]
+    this_draft_challenges = [
+        h for h in challenge_history
+        if h.get("channel_id") == s.channel_id and h.get("draft_started") == s.draft.draft_started
+    ]
+
+    skip_counts = {}
+    for h in this_draft_skips:
+        skip_counts[h["team_name"]] = skip_counts.get(h["team_name"], 0) + 1
+    challenge_counts = {}
+    for h in this_draft_challenges:
+        challenge_counts[h["team_name"]] = challenge_counts.get(h["team_name"], 0) + 1
+
+    most_skips      = max(skip_counts.items(), key=lambda x: x[1]) if skip_counts else None
+    most_challenged = max(challenge_counts.items(), key=lambda x: x[1]) if challenge_counts else None
+
+    label = s.draft.draft_label or f"Draft in <#{s.channel_id}>"
+    embed = discord.Embed(title=f"📋 Draft Recap — {label}", color=discord.Color.gold())
+
+    if best_value:
+        delta, name, team_name, pick_num, adp = best_value
+        embed.add_field(
+            name="💎 Best Value Pick",
+            value=f"**{name}** — picked #{pick_num} by **{team_name}**\n(ADP {adp:.1f} — a {delta:.1f}-spot steal)",
+            inline=False,
+        )
+    if biggest_reach:
+        delta, name, team_name, pick_num, adp = biggest_reach
+        embed.add_field(
+            name="📈 Biggest Reach",
+            value=f"**{name}** — picked #{pick_num} by **{team_name}**\n(ADP {adp:.1f} — a {-delta:.1f}-spot reach)",
+            inline=False,
+        )
+    if most_skips:
+        team_name, count = most_skips
+        embed.add_field(name="⏩ Most Skips", value=f"**{team_name}** — {count} skip{'s' if count != 1 else ''}", inline=True)
+    if most_challenged:
+        team_name, count = most_challenged
+        embed.add_field(name="⚡ Most Challenged", value=f"**{team_name}** — challenged {count} time{'s' if count != 1 else ''}", inline=True)
+
+    total_picks = sum(len(t.get("picks", [])) for t in s.draft.teams)
+    embed.set_footer(text=f"{s.draft.num_teams} teams  ·  {total_picks} total picks")
+    return embed
+
+
+async def _post_draft_recap(s: DraftSession):
+    if not DRAFT_RECAP_CHANNEL_ID:
+        return
+    channel = bot.get_channel(DRAFT_RECAP_CHANNEL_ID)
+    if not channel:
+        log.warning("DRAFT_RECAP_CHANNEL_ID %d not found in cache — recap not posted", DRAFT_RECAP_CHANNEL_ID)
+        return
+    try:
+        await channel.send(embed=_build_draft_recap(s))
+    except Exception as exc:
+        log.error("Failed to build/post draft recap for ch=%d: %s", s.channel_id, exc, exc_info=True)
 
 
 # ── Pick-turn DM preferences (global per-user, shared across all drafts) ─────
@@ -232,6 +402,20 @@ _PICK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Captures (rather than discards) the team emoji from a pick/steal message.
+# Team Sheet Bot / ADP Bot resolve fantasy team identity from this emoji via
+# their own emoji_map.py — they have no concept of a GM's Discord name, which
+# is all Timer Bot tracks internally. SBL confirmations must forward the raw
+# emoji, not team["name"], so those bots can resolve the real sheet team.
+_EMOJI_CAPTURE_RE = re.compile(
+    r'(<a?:[^:]+:\d+>|:[^:\s]+:|[\U0001F000-\U0001FFFF\U00002600-\U000027BF⌀-⛿✀-➿︀-️]+)'
+)
+
+
+def _extract_team_emoji(content: str) -> str | None:
+    m = _EMOJI_CAPTURE_RE.search(content)
+    return m.group(1) if m else None
+
 # Matches a single lotto line:
 #   1. <:emoji:id> - <@userid> <@userid2>
 #   2. 🦢 - <@userid>
@@ -248,27 +432,74 @@ _PRICE_RE = re.compile(
     r'|\b(\d+(?:\.\d+)?)\$'
 )
 
+# Matches a trailing lock marker on a pick message (SBL mode): 🔒, a custom
+# :lock: emoji, or the word "lock"/"locked" at the very end.
+_LOCK_MARKER_RE = re.compile(r'\s*(?:🔒|<a?:lock:\d+>|\block(?:ed)?\b)\s*$', re.IGNORECASE)
+
+# Free-form SBL steal/block intent, anywhere in a message.
+_STEAL_INTENT_RE = re.compile(r'\b(steal|steals|stole|stolen|stealing)\b', re.IGNORECASE)
+_BLOCK_INTENT_RE = re.compile(r'\b(block|blocks|blocked|blocking)\b', re.IGNORECASE)
+
+
+def _has_sbl_intent(content: str) -> bool:
+    """True if content unambiguously carries steal XOR block intent (works
+    whether or not a numbered pick prefix like '2. ' is present)."""
+    content = content.strip()
+    if not content or content.startswith('!'):
+        return False
+    is_steal = bool(_STEAL_INTENT_RE.search(content))
+    is_block = bool(_BLOCK_INTENT_RE.search(content))
+    return is_steal != is_block
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _extract_price(raw: str) -> int | None:
+    m = _PRICE_RE.search(raw)
+    if not m:
+        return None
+    digits = (m.group(1) or m.group(2) or m.group(3) or "0")
+    try:
+        return int(float(digits.replace("$", "")))
+    except ValueError:
+        return None
+
 
 def _extract_player_name(raw: str) -> str:
     text = re.sub(r'<:[^:]+:\d+>', '', raw).strip()   # <:emoji:id>
     text = re.sub(r'^:[^:\s]+:\s*', '', text).strip()  # :emoji:
     text = re.sub(r'^[^a-zA-Z0-9]+', '', text).strip() # leading unicode emoji / symbols
-    text = re.sub(r'^selects\s+', '', text, flags=re.IGNORECASE).strip()  # "selects" keyword
+    text = re.sub(r'^selects?\s+', '', text, flags=re.IGNORECASE).strip()  # "select"/"selects" keyword
+    # A lock marker can land mid-string (e.g. "James Worthy ($11) 🔒 86-87" —
+    # price, then lock, then year) — _LOCK_MARKER_RE upstream only strips one
+    # anchored at the very end, so a marker anywhere earlier survives into the
+    # stored name otherwise.
+    text = re.sub(r'\s*(?:🔒|<a?:lock:\d+>)\s*', ' ', text, flags=re.IGNORECASE).strip()
+    text = _PRICE_RE.sub('', text).strip()             # price, wherever it appears
+    # An empty price placeholder (e.g. "( )" or "()" with no digits inside)
+    # isn't matched by _PRICE_RE, which requires at least one digit — left
+    # unstripped, it sits after a trailing year and blocks the year-stripping
+    # regexes below (which require the year to be at the very end of the
+    # string), corrupting the stored name with leftover junk.
+    text = re.sub(r'\(\s*\)', '', text).strip()
     # Strip a leading year that appears before the player name (e.g. "13 LeBron James" → "LeBron James")
-    text = re.sub(r"^'?\d{2,4}(-\d{2,4})?\s+", '', text).strip()
+    # Apostrophe class covers straight (') and the curly quotes (’ ‘) that
+    # mobile keyboards/Discord auto-substitute — a mismatch here (e.g. "26’"
+    # left unstripped) breaks duplicate-pick / steal-target name matching.
+    text = re.sub(r"^['’‘]?\d{2,4}(-\d{2,4})?\s+", '', text).strip()
     # Strip trailing year/season suffixes
-    text = re.sub(r"\s+'?\d{2}'-?\d{0,2}$", '', text).strip()
+    text = re.sub(r"\s+['’‘]?\d{2}['’‘]-?\d{0,2}$", '', text).strip()
     text = re.sub(r'\s+\d{4}(-\d{2,4})?$', '', text).strip()
-    text = re.sub(r"\s+'?\d{2}'?$", '', text).strip()
+    # Two-digit season range with no apostrophe (e.g. "85-86") — not covered
+    # by the apostrophe'd variant above or the 4-digit variant below.
+    text = re.sub(r'\s+\d{2}-\d{2}$', '', text).strip()
+    text = re.sub(r"\s+['’‘]?\d{2}['’‘]?$", '', text).strip()
+    text = re.sub(r'\s+', ' ', text).strip()  # collapse doubled spaces left by mid-string removals above
     return text
 
 
 def _pick_name_key(raw: str) -> str:
-    name = _extract_player_name(raw)
-    name = _PRICE_RE.sub('', name).strip()
-    return name.lower()
+    return _extract_player_name(raw).lower()
 
 
 def _team_mentions(team: dict) -> str:
@@ -280,13 +511,13 @@ def _is_team_owner(user_id: int, team: dict) -> bool:
 
 
 def _pick_title(s: DraftSession) -> str:
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         return f"Pick {s.draft.overall_pick}"
     return f"Round {s.draft.round_number} of {ROUNDS}  -  Pick {s.draft.overall_pick}"
 
 
 def _pick_format(s: DraftSession) -> str:
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         return f"`{s.draft.overall_pick}. :YourEmoji: Player Name $Price Year`"
     return f"`{s.draft.overall_pick}. :YourEmoji: Player Name Year`"
 
@@ -341,7 +572,7 @@ async def _ping_current(s: DraftSession, remaining: int = None):
         ),
         color=discord.Color.green(),
     )
-    embed.set_footer(text="Use !timerskip to pass." if s.draft.timer_override is not None else "Use !timerskip to pass (costs 10 min on future picks).")
+    embed.set_footer(text="Use !timerskip to pass (costs 5 min on future picks).")
     s.ping_time          = datetime.now(timezone.utc)
     s.challenge_count    = 0
     s.challenged_msg_ids = set()
@@ -389,7 +620,7 @@ async def _auto_pause_for_window(s: DraftSession, remaining: float, next_up: boo
             ),
             color=discord.Color.dark_gray(),
         )
-        embed.set_footer(text="Use !timerskip to pass." if s.draft.timer_override is not None else "Use !timerskip to pass (costs 10 min on future picks).")
+        embed.set_footer(text="Use !timerskip to pass (costs 5 min on future picks).")
         s.active_ping = await channel.send(content=_team_mentions(team), embed=embed)
         deadline_ts = int(datetime.now(timezone.utc).timestamp()) + int(_secs_until_open()) + remaining
         await _dm_team(s, team, deadline_ts, _pick_title(s))
@@ -433,7 +664,7 @@ async def _window_resume_task(s: DraftSession, sleep_secs: float):
         ),
         color=discord.Color.green(),
     )
-    embed.set_footer(text="Use !timerskip to pass." if s.draft.timer_override is not None else "Use !timerskip to pass (costs 10 min on future picks).")
+    embed.set_footer(text="Use !timerskip to pass (costs 5 min on future picks).")
     s.active_ping = await channel.send(
         content=f"☀️ **Draft window open!** {_team_mentions(team)}", embed=embed
     )
@@ -504,6 +735,15 @@ async def _process_challenge(s: DraftSession, challenger_mention: str, challenge
     log.info("CHALLENGE #%d | ch=%d | Challenger: %s | Team: %s",
              s.challenge_count, s.channel_id, challenger_name, team["name"])
 
+    _append_challenge_history({
+        "channel_id":    s.channel_id,
+        "draft_label":   s.draft.draft_label or s.draft.draft_started or "Unknown ATD",
+        "draft_started": s.draft.draft_started,
+        "team_name":     team["name"],
+        "challenger":    challenger_name,
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+    })
+
     if s.challenge_count >= 3:
         await channel.send(
             f"⚡ **Challenge #{s.challenge_count}!** {challenger_mention} challenged "
@@ -511,6 +751,21 @@ async def _process_challenge(s: DraftSession, challenger_mention: str, challenge
         )
         s.challenge_count = 0
         await _do_skip(s, auto=True)
+        return
+
+    if s.draft.state == "window_paused":
+        # Don't start a live timer while the window's closed — that would run
+        # a real pick-clock during closed hours alongside the still-sleeping
+        # _window_resume_task. Just record the challenge and cap the time
+        # that gets restored so the reduced clock kicks in automatically when
+        # the window reopens.
+        s.draft.paused_remaining = min(s.draft.paused_remaining or 600, 600)
+        s.draft.save(s.channel_id)
+        await channel.send(
+            f"⚡ **Challenge #{s.challenge_count}!** {challenger_mention} challenged "
+            f"{_team_mentions(team)} — draft window is closed, so the reduced "
+            f"**10 min** timer will start when it reopens at **10:00 AM ET**."
+        )
         return
 
     if s.timer_task and not s.timer_task.done():
@@ -538,7 +793,7 @@ async def _process_challenge(s: DraftSession, challenger_mention: str, challenge
         ),
         color=discord.Color.red(),
     )
-    embed.set_footer(text="Use !timerskip to pass." if s.draft.timer_override is not None else "Use !timerskip to pass (costs 10 min on future picks).")
+    embed.set_footer(text="Use !timerskip to pass (costs 5 min on future picks).")
 
     s.active_ping      = await channel.send(content=_team_mentions(team), embed=embed)
     s.draft.timer_start = datetime.now(timezone.utc).isoformat()
@@ -571,12 +826,20 @@ async def _start_timer_inner(s: DraftSession):
         log.error("_start_timer: channel %d not found in cache", s.channel_id)
         return
 
-    if not _in_window():
+    # A block just restored this GM's prior remaining time instead of a
+    # fresh timer — consume it once here so it feeds both the window-closed
+    # (paused_remaining) and window-open paths below identically.
+    if s.draft.next_timer_override_secs is not None:
+        duration = s.draft.next_timer_override_secs
+        s.draft.next_timer_override_secs = None
+    else:
         duration = s.draft.effective_timer(s.draft.round_number, s.draft.current_team_idx)
+
+    if not _in_window():
         await _auto_pause_for_window(s, duration, next_up=True)
         return
 
-    if s.draft.mode == "roundless" and team.get("pending_makeup"):
+    if s.draft.order_mode == "roundless" and team.get("pending_makeup"):
         log.info("PENDING MAKEUP SKIP | ch=%d | Pick %d | Team: %s",
                  s.channel_id, s.draft.overall_pick, team["name"])
         await channel.send(
@@ -595,8 +858,6 @@ async def _start_timer_inner(s: DraftSession):
         )
         await _do_skip(s, auto=True)
         return
-
-    duration = s.draft.effective_timer(s.draft.round_number, s.draft.current_team_idx)
 
     if duration <= 0:
         log.info("TIMER ZERO | ch=%d | Round %d | Pick %d | Team: %s | Auto-skipping",
@@ -630,6 +891,9 @@ async def _do_skip(s: DraftSession, auto: bool = False):
 
     pick_num   = s.draft.overall_pick
     team_idx   = s.draft.current_team_idx
+    served_from_queue = bool(
+        s.draft.sbl_enabled and s.draft.repick_queue and s.draft.repick_queue[0][0] == team_idx
+    )
     mentions   = _team_mentions(team)
     prev_skip  = team.get("skip_count", 0)
     skip_count = prev_skip + 1
@@ -637,7 +901,7 @@ async def _do_skip(s: DraftSession, auto: bool = False):
 
     team["skip_count"] = skip_count
     team["pending_makeup"] = True
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         team["last_pick_number"] = pick_num
 
     s.draft.last_skip = {
@@ -651,7 +915,7 @@ async def _do_skip(s: DraftSession, auto: bool = False):
     from config import SKIP_PENALTY
     if s.draft.timer_override is not None:
         skip_note = f"{skip_count} skip{'s' if skip_count != 1 else ''}"
-    elif s.draft.mode == "roundless":
+    elif s.draft.order_mode == "roundless":
         from config import ROUNDLESS_TIMER
         next_timer_min = max((ROUNDLESS_TIMER - skip_count * SKIP_PENALTY) // 60, 0)
         skip_note = f"{skip_count} skip{'s' if skip_count != 1 else ''} - {next_timer_min}m left on future picks"
@@ -680,7 +944,7 @@ async def _do_skip(s: DraftSession, auto: bool = False):
 
     await _delete_active_ping(s)
 
-    s.draft.advance()
+    s.draft.advance(served_from_queue=served_from_queue)
     s.draft.timer_start = None
     s.draft.save(s.channel_id)
 
@@ -691,9 +955,442 @@ async def _do_skip(s: DraftSession, auto: bool = False):
 
     if s.draft.state == "complete":
         await channel.send("🏆 **Draft complete!**")
+        await _post_draft_recap(s)
         return
 
     await _start_timer(s)
+
+
+# ── Steal / Block / Lock (SBL) ────────────────────────────────────────────────
+
+_NAME_NONLETTER_RE = re.compile(r'[^A-Za-z\s]')
+_NAME_WHITESPACE_RE = re.compile(r'\s+')
+
+
+def _normalize_name(text: str) -> str:
+    text = _NAME_NONLETTER_RE.sub(' ', text)
+    text = _NAME_WHITESPACE_RE.sub(' ', text)
+    return text.strip().lower()
+
+
+def _sbl_ineligible_reason(s: DraftSession, pick_num: int, rec: dict) -> str | None:
+    """None if targetable right now; otherwise a short reason why not."""
+    if rec.get("protected"):
+        return "that was a repick made after being blocked/stolen — it's protected from further steals/blocks."
+    if rec.get("locked"):
+        return "that player is locked — immune to steal/block for the rest of the draft."
+    if not s.draft.sbl_eligible(pick_num):
+        return "that pick is outside the current round's eligible window."
+    return None
+
+
+def _find_sbl_target(content: str, s: DraftSession):
+    """Fuzzy-match a player name mentioned in `content` against all known
+    picks (not just currently-eligible ones, so a specific reason can be
+    given for e.g. a protected repick). Returns (pick_number, record,
+    ineligible_reason) — record is None if nothing matched at all;
+    ineligible_reason is None if the match is currently targetable."""
+    all_records = [(int(num_str), rec) for num_str, rec in s.draft.pick_records.items()]
+    if not all_records:
+        return None, None, None
+
+    msg_norm = _normalize_name(content)
+
+    # Same real player can legitimately appear under multiple pick numbers
+    # (e.g. two different teams each drafted a "Paul Pressey") — when names
+    # tie on length, prefer whichever copy is actually targetable right now
+    # (in the current eligible window, unlocked, unprotected) over an older
+    # copy that just happens to share dict insertion order priority, then
+    # fall back to the most recent pick number.
+    def _tiebreak(nr):
+        n, r = nr
+        return (-len(r["player_name"]), _sbl_ineligible_reason(s, n, r) is not None, -n)
+
+    substr_matches = [
+        (n, r) for n, r in all_records
+        if _normalize_name(r["player_name"]) and _normalize_name(r["player_name"]) in msg_norm
+    ]
+    if substr_matches:
+        substr_matches.sort(key=_tiebreak)
+        pick_num, rec = substr_matches[0]
+        return pick_num, rec, _sbl_ineligible_reason(s, pick_num, rec)
+
+    norm_by_num = {n: _normalize_name(r["player_name"]) for n, r in all_records}
+    hit = process.extractOne(msg_norm, list(norm_by_num.values()), scorer=fuzz.token_sort_ratio)
+    if not hit or hit[1] < 75:
+        return None, None, None
+    fuzzy_matches = sorted(
+        (nr for nr in all_records if _normalize_name(nr[1]["player_name"]) == hit[0]),
+        key=_tiebreak,
+    )
+    if fuzzy_matches:
+        n, r = fuzzy_matches[0]
+        return n, r, _sbl_ineligible_reason(s, n, r)
+    return None, None, None
+
+
+def _find_latest_unreclaimed_steal_against(s: DraftSession, team_idx: int):
+    """Most recent pick record that's an unreclaimed steal taken FROM this
+    team — used as an implicit block target when a bare 'block' message (no
+    player name, no resolvable reply) doesn't give _find_sbl_target anything
+    to match against. This is overwhelmingly the common real case: a GM who
+    just got stolen from typing/replying just 'block' with nothing else."""
+    candidates = [
+        (int(num_str), rec) for num_str, rec in s.draft.pick_records.items()
+        if rec.get("is_steal_result") and rec.get("stolen_from_team_idx") == team_idx
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda nr: nr[0], reverse=True)
+    return candidates[0]
+
+
+async def _sbl_reject(message: discord.Message, text: str) -> bool:
+    """Send a rejection reply AND add a ❌ reaction to the original message.
+    The reaction (not just processed_msg_ids, which is in-memory only and
+    resets on every restart) is what lets _missed_pick_scanner() reliably
+    recognize this message as already handled, even across a redeploy —
+    without it, a rejected steal/block gets silently re-attempted and
+    re-rejected every 30s once the in-memory dedup state is gone."""
+    try:
+        await message.add_reaction('❌')
+    except discord.HTTPException:
+        pass
+    await message.reply(text)
+    return False
+
+
+async def _try_process_sbl_action(s: DraftSession, message: discord.Message,
+                                   override_acting_member: discord.Member = None) -> bool:
+    """Detect free-form steal/block intent in a GM's message and, if legal, apply it.
+    Returns True if a steal or block was actually applied.
+
+    Called for ANY message carrying steal/block intent, regardless of whether
+    SBL is actually enabled — a message like "3. steal LeBron James $34" must
+    never fall through to normal pick processing even in a plain snake draft,
+    or it gets literally recorded as a player named "steal LeBron James"
+    (and silently escapes the duplicate-pick check, since that text doesn't
+    match the real LeBron James record either).
+
+    override_acting_member: when set (only by !timersblfor), the action is
+    attributed to this member instead of message.author/mentions — lets a
+    commissioner act on behalf of a GM using THEIR eligibility/charges."""
+    if s.draft.state not in ("active", "paused", "window_paused"):
+        return False
+
+    content = message.content.strip()
+    if not content or (override_acting_member is None and content.startswith('!')):
+        return False
+
+    is_steal = bool(_STEAL_INTENT_RE.search(content))
+    is_block = bool(_BLOCK_INTENT_RE.search(content))
+    if is_steal == is_block:  # neither, or both (ambiguous) — ignore
+        return False
+
+    # Guards against reprocessing: Discord can re-fire on_message on
+    # reconnect, and _missed_pick_scanner() may independently rediscover the
+    # same message later. Once an attempt has been made (success OR a
+    # rejection like "no target found"), never retry it — otherwise a
+    # rejected message would get silently re-attempted, and eventually
+    # succeed once the game state around it happens to change (or spam
+    # rejection replies every 30s from the scanner).
+    if message.id in s.processed_msg_ids:
+        return False
+    s.processed_msg_ids.add(message.id)
+
+    if not s.draft.sbl_enabled:
+        return await _sbl_reject(
+            message,
+            f"❌ You can't {'steal' if is_steal else 'block'} — "
+            f"Steal/Block/Lock isn't enabled for this draft.",
+        )
+
+    # Support "reply to the pick with just 'block'/'steal'" — pull the target
+    # player name from the referenced message if the reply itself doesn't name one.
+    search_content = content
+    if message.reference:
+        try:
+            ref_msg = message.reference.resolved
+            if not isinstance(ref_msg, discord.Message):
+                ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            search_content = f"{content} {ref_msg.content}".strip()
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+    if override_acting_member is not None:
+        acting_id      = override_acting_member.id
+        acting_mention = override_acting_member.mention
+    else:
+        # ATD Draft List Bot relays steal/block on an absentee GM's behalf — it
+        # mentions the acting GM rather than being able to post as them, so the
+        # acting team must be resolved from that mention instead of message.author.
+        is_relayed = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID and message.mentions)
+        acting_id  = message.mentions[0].id if is_relayed else message.author.id
+        acting_mention = message.mentions[0].mention if is_relayed else message.author.mention
+
+    author_team_idx = next(
+        (i for i, t in enumerate(s.draft.teams) if acting_id in t["user_ids"]),
+        None,
+    )
+    if author_team_idx is None:
+        return await _sbl_reject(
+            message,
+            f"❌ {acting_mention} — couldn't match you to a team in this draft.",
+        )
+    author_team = s.draft.teams[author_team_idx]
+
+    if is_steal:
+        if author_team.get("sbl_owed_protection"):
+            return await _sbl_reject(
+                message,
+                "❌ You were just blocked/stolen from — you must make an original pick before you can steal.",
+            )
+        if s.draft.current_team_idx != author_team_idx:
+            return await _sbl_reject(message, "❌ You can only steal on your own turn.")
+        # Normally a stealer can never be serving a repick-queue turn (the
+        # sbl_owed_protection check above rules it out) — but a commissioner
+        # can clear that flag by hand to let a queued team steal instead of
+        # making an original pick. Captured now, before queue_repick() below
+        # inserts the victim at the front and would make this unreadable.
+        author_served_from_queue = bool(
+            s.draft.sbl_enabled and s.draft.repick_queue and s.draft.repick_queue[0][0] == author_team_idx
+        )
+        if author_team.get("steals_remaining", SBL_STEALS_PER_TEAM) <= 0:
+            return await _sbl_reject(message, f"❌ {acting_mention} — you have no steals remaining.")
+
+        pick_num, rec, ineligible_reason = _find_sbl_target(search_content, s)
+        if rec is None:
+            return await _sbl_reject(message, "❌ Couldn't identify an eligible player to steal in your message.")
+        if ineligible_reason:
+            return await _sbl_reject(message, f"❌ Can't steal **{rec['player_name']}** — {ineligible_reason}")
+        if rec["team_idx"] == author_team_idx:
+            return await _sbl_reject(message, "❌ You can't steal your own pick.")
+
+        if (s.draft.budget_max is not None and rec.get("price") is not None
+                and author_team.get("money_spent", 0) + rec["price"] > s.draft.budget_max):
+            return await _sbl_reject(
+                message,
+                f"❌ {acting_mention} — you ahhh is broke, you can't afford **{rec['player_name']}**.",
+            )
+
+        victim_idx  = rec["team_idx"]
+        victim_team = s.draft.teams[victim_idx]
+        old_pick_num = pick_num           # voided pick's number — reopened for the victim's repick
+        new_pick_num = s.draft.overall_pick  # the stealer's own turn — always a fresh number here,
+        # since sbl_owed_protection (checked above) rules out the stealer
+        # themselves currently serving a repick-queue turn.
+        price = rec.get("price")
+
+        author_team["steals_remaining"] = author_team.get("steals_remaining", SBL_STEALS_PER_TEAM) - 1
+
+        # Remove the player from the victim's roster bookkeeping entirely —
+        # they no longer own this pick.
+        victim_team["picks"] = [p for p in victim_team.get("picks", []) if _pick_name_key(p) != rec["name_key"]]
+        if old_pick_num in victim_team.get("pick_numbers", []):
+            victim_team["pick_numbers"].remove(old_pick_num)
+
+        # Re-key the record under the stealer's own turn number; the old
+        # number is freed up for the victim's eventual repick.
+        del s.draft.pick_records[str(old_pick_num)]
+        rec["team_idx"]             = author_team_idx
+        rec["is_steal_result"]      = True
+        rec["stolen_from_team_idx"] = victim_idx  # lets the original owner block-reclaim later
+
+        # This record's "remaining time" now belongs to the stealer, not the
+        # original picker — overwrite it with the stealer's own clock at the
+        # moment of stealing, since a future block of THIS pick should
+        # restore the stealer's time, not the original victim's.
+        steal_remaining = None
+        if s.draft.timer_start:
+            _dur = s.draft.effective_timer(s.draft.round_number, s.draft.current_team_idx)
+            _elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(s.draft.timer_start)).total_seconds()
+            steal_remaining = max(0, int(_dur - _elapsed))
+        rec["remaining_at_pick"] = steal_remaining
+
+        s.draft.pick_records[str(new_pick_num)] = rec
+
+        # Keep this in the same "Name $price" shape normal picks use — an
+        # annotation baked into the name text would corrupt future
+        # duplicate-name matching against _pick_name_key().
+        stolen_raw = f"{rec['player_name']} ${price}" if price is not None else rec['player_name']
+        author_team.setdefault("picks", []).append(stolen_raw)
+        author_team.setdefault("pick_numbers", []).append(new_pick_num)
+
+        if price is not None:
+            victim_team["money_spent"] = max(victim_team.get("money_spent", 0) - price, 0)
+            author_team["money_spent"] = author_team.get("money_spent", 0) + price
+
+        victim_team["sbl_owed_protection"] = True
+        s.draft.queue_repick(victim_idx, old_pick_num)
+
+        # A steal message can also declare a lock on the stolen player in the
+        # same breath (e.g. "3. Steal Kawhi Leonard ($34) 🔒") — recognize it
+        # here since this message never reaches _try_process_pick.
+        lock_note = ""
+        if _LOCK_MARKER_RE.search(content):
+            if author_team.get("locks_remaining", SBL_LOCKS_PER_TEAM) > 0:
+                rec["locked"] = True
+                author_team["locks_remaining"] = author_team.get("locks_remaining", SBL_LOCKS_PER_TEAM) - 1
+                lock_note = f" {acting_mention} also locked **{rec['player_name']}** in!"
+            else:
+                lock_note = " ⚠️ No locks remaining — the steal was not locked."
+
+        if s.timer_task and not s.timer_task.done():
+            s.timer_task.cancel()
+        if s.window_task and not s.window_task.done():
+            s.window_task.cancel()
+        await _delete_active_ping(s)
+        if s.draft.state in ("window_paused", "paused"):
+            s.draft.state            = "active"
+            s.draft.paused_remaining = None
+
+        # Team Sheet Bot / ADP Bot resolve fantasy team identity from the
+        # emoji, not the GM's Discord name — make sure the destination
+        # emoji is fresh from this message before it goes in the protocol line.
+        author_team["emoji"] = _extract_team_emoji(content) or author_team.get("emoji")
+
+        s.draft.advance(served_from_queue=author_served_from_queue)
+        s.draft.save(s.channel_id)
+
+        log.info("SBL STEAL | ch=%d | player=%s | %s -> %s | pick %d moved to %d | locked=%s",
+                  s.channel_id, rec["player_name"], victim_team["name"], author_team["name"],
+                  old_pick_num, new_pick_num, rec["locked"])
+        await message.add_reaction("🔓")
+        if rec["locked"]:
+            await message.add_reaction("🔒")
+        await message.channel.send(
+            f"🔓 **STEAL** — {acting_mention} stole **{rec['player_name']}** "
+            f"from **{victim_team['name']}**!{lock_note} {victim_team['name']} is back on the clock "
+            f"for pick **{old_pick_num}**.\n"
+            f"SBL_STEAL | {rec['player_name']} | {victim_team.get('emoji') or ''} | {author_team.get('emoji') or ''} | {price or ''}"
+        )
+        await _start_timer(s)
+        return True
+
+    if is_block:
+        if author_team.get("blocks_remaining", SBL_BLOCKS_PER_TEAM) <= 0:
+            return await _sbl_reject(message, f"❌ {acting_mention} — you have no blocks remaining.")
+
+        pick_num, rec, ineligible_reason = _find_sbl_target(search_content, s)
+        if rec is None:
+            fallback = _find_latest_unreclaimed_steal_against(s, author_team_idx)
+            if fallback:
+                pick_num, rec = fallback
+                ineligible_reason = _sbl_ineligible_reason(s, pick_num, rec)
+            else:
+                return await _sbl_reject(message, "❌ Couldn't identify an eligible player to block in your message.")
+        if ineligible_reason:
+            return await _sbl_reject(message, f"❌ Can't block **{rec['player_name']}** — {ineligible_reason}")
+        if rec["team_idx"] == author_team_idx:
+            return await _sbl_reject(message, "❌ You can't block your own pick.")
+
+        victim_idx  = rec["team_idx"]
+        victim_team = s.draft.teams[victim_idx]
+
+        # If this player was stolen, ANY block on it gives the player back
+        # directly to whoever they were originally stolen from — not just
+        # when that original owner happens to be the one doing the blocking
+        # — instead of voiding to the pool. "Blocking the steal" rather than
+        # blocking a pick outright.
+        original_owner_idx  = rec.get("stolen_from_team_idx")
+        original_owner_team = s.draft.teams[original_owner_idx] if original_owner_idx is not None else None
+        is_reclaim = bool(rec.get("is_steal_result") and original_owner_idx is not None)
+
+        refund_note = ""
+        if rec.get("is_steal_result"):
+            victim_team["steals_remaining"] = victim_team.get("steals_remaining", SBL_STEALS_PER_TEAM) + 1
+            refund_note = f" {victim_team['name']}'s steal charge has been refunded."
+
+        author_team["blocks_remaining"] = author_team.get("blocks_remaining", SBL_BLOCKS_PER_TEAM) - 1
+        victim_team["picks"] = [p for p in victim_team["picks"] if _pick_name_key(p) != rec["name_key"]]
+        if pick_num in victim_team.get("pick_numbers", []):
+            victim_team["pick_numbers"].remove(pick_num)
+        price = rec.get("price")
+        if price is not None:
+            victim_team["money_spent"] = max(victim_team.get("money_spent", 0) - price, 0)
+        del s.draft.pick_records[str(pick_num)]
+        victim_team["sbl_owed_protection"] = True
+        victim_team["sbl_barred_player_key"] = rec["name_key"]  # can't repick the same player who got blocked
+        s.draft.queue_repick(victim_idx, pick_num)
+
+        reclaim_note = ""
+        if is_reclaim:
+            # Give the player straight back to the original owner (whoever
+            # they were stolen from — not necessarily whoever's blocking).
+            # The original steal already queued that original owner for an
+            # emergency repick (to replace the player it lost) — the reclaim
+            # directly satisfies that exact obligation, so reuse ITS pick
+            # number instead of minting a brand new one. Minting a new number
+            # here would both skip a gap in the sequence for whoever picks
+            # next AND let this team draft twice for a single loss (once via
+            # the reclaim, again via the now-separately-still-queued repick).
+            reclaim_num = None
+            for i, (t_idx, reopened_num) in enumerate(s.draft.repick_queue):
+                if t_idx == original_owner_idx:
+                    reclaim_num = reopened_num
+                    s.draft.repick_queue.pop(i)
+                    break
+            if reclaim_num is None:
+                # No matching queued obligation found (shouldn't normally
+                # happen) — fall back to minting a fresh number so the
+                # reclaim still registers correctly.
+                s.draft.total_picks_made += 1
+                reclaim_num = s.draft.total_picks_made
+
+            reclaimed_raw = f"{rec['player_name']} ${price}" if price is not None else rec['player_name']
+            original_owner_team.setdefault("picks", []).append(reclaimed_raw)
+            original_owner_team.setdefault("pick_numbers", []).append(reclaim_num)
+            if price is not None:
+                original_owner_team["money_spent"] = original_owner_team.get("money_spent", 0) + price
+            s.draft.register_pick_record(reclaim_num, rec["player_name"], rec["name_key"], original_owner_idx, price)
+            # This reclaim satisfies the original owner's own queued repick
+            # obligation directly (they never type a pick for it), so it
+            # never goes through _try_process_pick — the only place that
+            # normally consumes sbl_owed_protection. Left unset, this stale
+            # flag would incorrectly attach "protected" to their next
+            # unrelated normal pick instead of the repick that actually
+            # earned it.
+            original_owner_team.pop("sbl_owed_protection", None)
+            reclaim_note = f" **{rec['player_name']}** is back on {original_owner_team['name']}'s roster!"
+
+        # When the victim comes back up for their repick, give them back
+        # whatever time was left on their own clock when they made this pick
+        # instead of a fresh full timer — getting blocked shouldn't hand them
+        # a free reset.
+        if rec.get("remaining_at_pick") is not None:
+            s.draft.next_timer_override_secs = rec["remaining_at_pick"]
+
+        # Always interrupt whoever's currently on the clock — the team that
+        # just got blocked takes priority now, ahead of anyone already
+        # waiting (queue_repick puts them at the front). Their turn isn't
+        # lost: repick-queue picks don't advance the normal rotation, so
+        # whoever was interrupted resumes automatically once the queue drains.
+        if s.timer_task and not s.timer_task.done():
+            s.timer_task.cancel()
+        if s.window_task and not s.window_task.done():
+            s.window_task.cancel()
+        await _delete_active_ping(s)
+        if s.draft.state in ("window_paused", "paused"):
+            s.draft.state            = "active"
+            s.draft.paused_remaining = None
+
+        s.draft.save(s.channel_id)
+
+        log.info("SBL BLOCK | ch=%d | player=%s | victim=%s | by=%s | reclaim=%s",
+                  s.channel_id, rec["player_name"], victim_team["name"], author_team["name"], is_reclaim)
+        clock_note = f"{victim_team['name']} is back on the clock now for pick **{pick_num}**!"
+        title = "🔁 **STEAL BLOCKED**" if is_reclaim else "🚫 **BLOCK**"
+        verb  = "blocked the steal of" if is_reclaim else "blocked"
+        await message.add_reaction("🔁" if is_reclaim else "🚫")
+        await message.channel.send(
+            f"{title} — {acting_mention} {verb} **{rec['player_name']}** "
+            f"({victim_team['name']})!{refund_note}{reclaim_note} {clock_note}\n"
+            + (f"SBL_STEAL | {rec['player_name']} | {victim_team.get('emoji') or ''} | {original_owner_team.get('emoji') or ''} | {price or ''}"
+               if is_reclaim else
+               f"SBL_BLOCK | {rec['player_name']} | {victim_team['name']}")
+        )
+        await _start_timer(s)
+        return True
 
 
 async def _try_process_roundless_makeup(s: DraftSession, message: discord.Message):
@@ -705,9 +1402,10 @@ async def _try_process_roundless_makeup(s: DraftSession, message: discord.Messag
     if pick_num_in_msg > s.draft.overall_pick:
         return
 
-    team = next((t for t in s.draft.teams if message.author.id in t["user_ids"]), None)
-    if not team or not team.get("pending_makeup"):
+    team_idx = next((i for i, t in enumerate(s.draft.teams) if message.author.id in t["user_ids"]), None)
+    if team_idx is None or not s.draft.teams[team_idx].get("pending_makeup"):
         return
+    team = s.draft.teams[team_idx]
 
     if pick_num_in_msg == s.draft.overall_pick and s.draft.current_team is team:
         return
@@ -717,23 +1415,125 @@ async def _try_process_roundless_makeup(s: DraftSession, message: discord.Messag
         return
 
     pick_raw = match.group(2).strip()
-    price_m  = _PRICE_RE.search(pick_raw)
+
+    wants_lock = bool(s.draft.sbl_enabled and _LOCK_MARKER_RE.search(pick_raw))
+    if wants_lock:
+        pick_raw = _LOCK_MARKER_RE.sub('', pick_raw).strip()
+
+    player_key = _pick_name_key(pick_raw)
+    for t in s.draft.teams:
+        for p in t.get("picks", []):
+            if _pick_name_key(p) == player_key:
+                log.info("DUPLICATE MAKEUP PICK | ch=%d | Player: %s | Already taken by: %s",
+                         s.channel_id, _extract_player_name(pick_raw), t["name"])
+                await message.add_reaction('❌')
+                await message.channel.send(
+                    f"❌ {message.author.mention} — **{_extract_player_name(pick_raw)}** has already "
+                    f"been taken by **{t['name']}**. Pick someone else."
+                )
+                return
+
+    if s.draft.sbl_enabled and team.get("sbl_barred_player_key") == player_key:
+        log.info("SBL BARRED MAKEUP REPICK | ch=%d | Player: %s | Team: %s",
+                  s.channel_id, _extract_player_name(pick_raw), team["name"])
+        await message.add_reaction('❌')
+        await message.channel.send(
+            f"❌ {message.author.mention} — **{_extract_player_name(pick_raw)}** was just blocked "
+            f"from you. Pick someone else.\nSBL_VETO | {_extract_player_name(pick_raw)}"
+        )
+        return
+
+    price_m = _PRICE_RE.search(pick_raw)
+    price_dollars = None
     if price_m:
         raw = (price_m.group(1) or price_m.group(2) or price_m.group(3) or "0")
         try:
-            dollars = int(float(raw.lstrip("$")))
-            team["money_spent"] = team.get("money_spent", 0) + dollars
+            price_dollars = int(float(raw.lstrip("$")))
+            team["money_spent"] = team.get("money_spent", 0) + price_dollars
         except ValueError:
             pass
 
     team["last_pick_number"] = pick_num_in_msg
     team["pending_makeup"]   = False
     team["picks"].append(pick_raw)
+    team.setdefault("pick_numbers", []).append(pick_num_in_msg)
+
+    # Register with the same SBL table normal picks use — without this, a
+    # makeup pick (someone catching up a skipped turn) is invisible to
+    # steal/block targeting and can never legally be hit. Also consume any
+    # owed-protection flag here, same as a normal pick would — otherwise it
+    # leaks past this pick and wrongly attaches to the team's next *normal*
+    # turn instead of the catch-up pick that actually earned it.
+    lock_note = ""
+    if s.draft.sbl_enabled:
+        player_name = _extract_player_name(pick_raw)
+        # See the equivalent comment in _try_process_pick: protected must
+        # reflect whether this pick actually came from the front of the
+        # repick queue, not the separately-tracked sbl_owed_protection flag,
+        # which can be cleared without the repick it was meant for happening.
+        served_from_queue = bool(
+            s.draft.repick_queue and s.draft.repick_queue[0][0] == team_idx
+        )
+        team.pop("sbl_owed_protection", None)
+        team.pop("sbl_barred_player_key", None)
+        s.draft.register_pick_record(
+            pick_num_in_msg, player_name, player_key, team_idx, price_dollars,
+            protected=served_from_queue,
+        )
+        if wants_lock:
+            if team.get("locks_remaining", SBL_LOCKS_PER_TEAM) > 0:
+                s.draft.pick_records[str(pick_num_in_msg)]["locked"] = True
+                team["locks_remaining"] = team.get("locks_remaining", SBL_LOCKS_PER_TEAM) - 1
+                lock_note = f"\n🔒 **{player_name}** is now locked — immune to steal/block for the rest of the draft."
+            else:
+                lock_note = "\n⚠️ You have no locks remaining — this pick was **not** locked."
+
     s.draft.save(s.channel_id)
 
     log.info("MAKEUP PICK | ch=%d | Team: %s | Pick #%d | %s",
              s.channel_id, team["name"], pick_num_in_msg, pick_raw)
     await message.add_reaction("✅")
+    if lock_note:
+        await message.channel.send(lock_note)
+
+
+async def _try_process_pick_price_edit(s: DraftSession, message: discord.Message, pick_num: int, pick_raw: str):
+    """A GM edited an already-recorded pick (typically to add a price they
+    forgot). Retroactively correct money_spent / the stored pick record —
+    does not re-validate, re-advance, or touch turn order."""
+    team = next((t for t in s.draft.teams if message.author.id in t["user_ids"]), None)
+    if not team:
+        return
+    pick_numbers = team.get("pick_numbers", [])
+    if pick_num not in pick_numbers:
+        return
+    idx = pick_numbers.index(pick_num)
+    picks = team.get("picks", [])
+    if idx >= len(picks):
+        return
+
+    old_price = _extract_price(picks[idx])
+    new_price = _extract_price(pick_raw)
+    if new_price is None or new_price == old_price:
+        return
+
+    picks[idx] = pick_raw
+    team["money_spent"] = team.get("money_spent", 0) - (old_price or 0) + new_price
+
+    if s.draft.sbl_enabled:
+        rec = s.draft.pick_records.get(str(pick_num))
+        if rec:
+            rec["price"]      = new_price
+            rec["player_name"] = _extract_player_name(pick_raw)
+            rec["name_key"]    = _pick_name_key(pick_raw)
+
+    s.draft.save(s.channel_id)
+    log.info("PICK EDIT | ch=%d | pick=%d | team=%s | price %s -> %s",
+              s.channel_id, pick_num, team["name"], old_price, new_price)
+    try:
+        await message.add_reaction("💰")
+    except discord.HTTPException:
+        pass
 
 
 async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: bool = False):
@@ -747,7 +1547,16 @@ async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: 
     pick_num = int(match.group(1))
     pick_raw = match.group(2).strip()
 
+    wants_lock = bool(s.draft.sbl_enabled and _LOCK_MARKER_RE.search(pick_raw))
+    if wants_lock:
+        pick_raw = _LOCK_MARKER_RE.sub('', pick_raw).strip()
+
     if pick_num != s.draft.overall_pick:
+        # An edit to a pick that's already been recorded (e.g. adding a price
+        # that was forgotten the first time) doesn't re-enter the normal flow
+        # below — it just needs its price/money bookkeeping corrected.
+        if is_edit and pick_num < s.draft.overall_pick:
+            await _try_process_pick_price_edit(s, message, pick_num, pick_raw)
         return
 
     # Edits are allowed to re-process (content changed); duplicate fires of the
@@ -764,7 +1573,16 @@ async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: 
 
     success = False
     try:
-        team = s.draft.current_team
+        # Captured once, up front: in roundless mode current_team_idx is
+        # recomputed dynamically from live team stats, and this function is
+        # about to mutate the picking team's stats (picks/last_pick_number).
+        # Re-reading current_team_idx after that would silently pick up
+        # whoever the dynamic sort now ranks first, not who actually picked.
+        team_idx = s.draft.current_team_idx
+        served_from_queue = bool(
+            s.draft.sbl_enabled and s.draft.repick_queue and s.draft.repick_queue[0][0] == team_idx
+        )
+        team     = s.draft.current_team
 
         is_commissioner_pick = (
             bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
@@ -791,11 +1609,43 @@ async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: 
                     )
                     return
 
+        if s.draft.sbl_enabled and team.get("sbl_barred_player_key") == player_key:
+            log.info("SBL BARRED REPICK | ch=%d | Player: %s | Team: %s",
+                      s.channel_id, player_name, team["name"])
+            await message.add_reaction('❌')
+            await message.channel.send(
+                f"❌ {message.author.mention} — **{player_name}** was just blocked from you. Pick someone else.\n"
+                f"SBL_VETO | {player_name}"
+            )
+            return
+
+        if s.draft.budget_max is not None:
+            pick_price = _extract_price(pick_raw)
+            if pick_price is not None and team.get("money_spent", 0) + pick_price > s.draft.budget_max:
+                log.info("BUDGET EXCEEDED | ch=%d | Player: %s | Team: %s | spent=%s + %s > cap=%s",
+                          s.channel_id, player_name, team["name"], team.get("money_spent", 0),
+                          pick_price, s.draft.budget_max)
+                await message.add_reaction('❌')
+                await message.channel.send(
+                    f"❌ {message.author.mention} — you ahhh is broke, you can't afford **{player_name}**."
+                )
+                return
+
         log.info(
             "PICK | ch=%d | Overall #%d | Round %d Pick %d | Team: %s | Player: %s",
             s.channel_id, s.draft.overall_pick, s.draft.round_number, s.draft.pick_in_round,
             team["name"], pick_raw,
         )
+
+        # How much time was left on this GM's own clock when they made this
+        # pick — restored (instead of a fresh timer) if this pick later gets
+        # blocked, so blocking someone doesn't hand them a free full reset.
+        remaining_at_pick = None
+        if s.draft.timer_start:
+            _effective_dur = s.draft.effective_timer(s.draft.round_number, s.draft.current_team_idx)
+            _elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(s.draft.timer_start)).total_seconds()
+            remaining_at_pick = max(0, int(_effective_dur - _elapsed))
+
         if s.timer_task and not s.timer_task.done():
             s.timer_task.cancel()
         if s.window_task and not s.window_task.done():
@@ -806,22 +1656,44 @@ async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: 
             s.draft.paused_remaining = None
 
         team["picks"].append(pick_raw)
+        team.setdefault("pick_numbers", []).append(pick_num)
         team["pending_makeup"] = False
 
-        if s.draft.mode == "roundless":
-            price_m = _PRICE_RE.search(pick_raw)
-            if price_m:
-                raw = (price_m.group(1) or price_m.group(2) or price_m.group(3) or "0")
-                try:
-                    dollars = int(float(raw.lstrip("$")))
-                    team["money_spent"] = team.get("money_spent", 0) + dollars
-                except ValueError:
-                    pass
-            team["last_pick_number"] = pick_num
+        price_dollars = _extract_price(pick_raw)
+
+        # Tracked unconditionally, not just in roundless mode — if this draft
+        # ever switches into roundless (e.g. snake for the first two rounds,
+        # then !timermode roundless+sbl), the dynamic order needs accurate
+        # money/last-pick history from every pick that came before the switch.
+        if price_dollars is not None:
+            team["money_spent"] = team.get("money_spent", 0) + price_dollars
+        team["last_pick_number"] = pick_num
+
+        lock_note = ""
+        if s.draft.sbl_enabled:
+            team["emoji"] = _extract_team_emoji(message.content) or team.get("emoji")
+            # protected must come from served_from_queue (whether THIS pick
+            # was actually pulled from the front of the repick queue), not
+            # from sbl_owed_protection — that flag is tracked separately on
+            # the team and can end up cleared (by a reclaim, an admin queue
+            # correction, etc.) without the repick it was meant for ever
+            # having happened, silently losing the protection it should grant.
+            team.pop("sbl_owed_protection", None)
+            team.pop("sbl_barred_player_key", None)
+            s.draft.register_pick_record(
+                pick_num, player_name, player_key, team_idx, price_dollars,
+                protected=served_from_queue, remaining_at_pick=remaining_at_pick,
+            )
+            if wants_lock:
+                if team.get("locks_remaining", SBL_LOCKS_PER_TEAM) > 0:
+                    s.draft.pick_records[str(pick_num)]["locked"] = True
+                    team["locks_remaining"] = team.get("locks_remaining", SBL_LOCKS_PER_TEAM) - 1
+                    lock_note = f"\n🔒 **{player_name}** is now locked — immune to steal/block for the rest of the draft."
+                else:
+                    lock_note = "\n⚠️ You have no locks remaining — this pick was **not** locked."
 
         penalty_note = ""
         if player_name.lower() in PENALTY_PLAYERS:
-            team_idx = s.draft.current_team_idx
             if team_idx not in s.draft.penalty_teams:
                 s.draft.apply_penalty(team_idx)
                 penalty_note = (
@@ -829,17 +1701,21 @@ async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: 
                     f"they will pick **last** every round from Round 6 onward."
                 )
 
-        s.draft.advance()
+        s.draft.advance(served_from_queue=served_from_queue)
         s.draft.save(s.channel_id)
         success = True
 
         await message.add_reaction("✅")
+
+        if lock_note:
+            await message.channel.send(lock_note)
 
         if penalty_note:
             await message.channel.send(penalty_note)
 
         if s.draft.state == "complete":
             await message.channel.send("🏆 **Draft complete! Great picks everyone.**")
+            await _post_draft_recap(s)
             return
 
     except Exception as exc:
@@ -938,16 +1814,49 @@ async def _missed_pick_scanner():
                     continue
 
                 expected_pick = s.draft.overall_pick
+                draft_started = (
+                    datetime.fromisoformat(s.draft.draft_started)
+                    if s.draft.draft_started else None
+                )
 
                 async for msg in channel.history(limit=30):
                     if msg.author.bot:
                         continue
+                    if msg.id in s.processed_msg_ids:
+                        continue
+                    # Never touch a message from before the current draft
+                    # started — e.g. a leftover from a prior draft in this
+                    # same channel that got reset. processed_msg_ids only
+                    # tracks what THIS process has seen since it last
+                    # restarted, so it can't be relied on alone to exclude
+                    # messages that predate a !timereset.
+                    if draft_started and msg.created_at < draft_started:
+                        continue
+
+                    # A steal/block declaration never reaches _try_process_pick
+                    # normally — on_message routes it to _try_process_sbl_action
+                    # instead — so the scanner must do the same, or it'll record
+                    # the raw declaration as a literal pick (e.g. "Steal LeBron
+                    # James" as a player name).
+                    if _has_sbl_intent(msg.content):
+                        already_done = any(
+                            r.emoji in ("🔓", "🚫", "❌", "🔁") and r.me for r in msg.reactions
+                        )
+                        if already_done:
+                            continue
+                        log.info(
+                            "MISSED SBL ACTION RECOVERED | ch=%d | Author: %s | Content: %s",
+                            ch_id, msg.author.display_name, msg.content[:80],
+                        )
+                        await _try_process_sbl_action(s, msg)
+                        break
+
                     match = _PICK_RE.match(msg.content.strip())
                     if not match:
                         continue
                     if int(match.group(1)) != expected_pick:
                         continue
-                    already_done = any(r.emoji == "✅" and r.me for r in msg.reactions)
+                    already_done = any(r.emoji in ("✅", "❌") and r.me for r in msg.reactions)
                     if already_done:
                         break
                     log.info(
@@ -981,9 +1890,11 @@ async def on_message(message: discord.Message):
     if message.author.bot and not _from_draft_list:
         return
 
-    # ── Challenge detection: reply in ATD_CHAT_CHANNEL_ID or its threads ────────
+    # ── Challenge detection: reply in ATD_CHAT_CHANNEL_ID, its threads, or a
+    # remote admin channel ──────────────────────────────────────────────────
     _in_chat = (message.channel.id == ATD_CHAT_CHANNEL_ID
-                or getattr(message.channel, 'parent_id', None) == ATD_CHAT_CHANNEL_ID)
+                or getattr(message.channel, 'parent_id', None) == ATD_CHAT_CHANNEL_ID
+                or message.channel.id in _REMOTE_VIEW_CHANNELS)
     if (_in_chat
             and message.reference
             and message.content.strip().lower() == "challenge"):
@@ -993,7 +1904,7 @@ async def on_message(message: discord.Message):
             return
 
         for ch_id, s in list(_sessions.items()):
-            if s.draft.state != "active" or not s.draft.current_team:
+            if s.draft.state not in ("active", "window_paused") or not s.draft.current_team:
                 continue
             if message.author.id in s.draft.current_team["user_ids"]:
                 continue
@@ -1005,11 +1916,16 @@ async def on_message(message: discord.Message):
             effective_ping_time = s.ping_time
             if effective_ping_time is None and s.draft.timer_start:
                 effective_ping_time = datetime.fromisoformat(s.draft.timer_start)
-            if effective_ping_time is None:
+            # While the window is closed, timer_start is cleared and a fresh
+            # ping for this turn may not have set ping_time either (see
+            # _auto_pause_for_window) — there's no reliable "were they on the
+            # clock yet" timestamp to check in that case, so don't block the
+            # challenge on it.
+            if effective_ping_time is None and s.draft.state != "window_paused":
                 continue
 
             try:
-                if ref_msg.created_at < effective_ping_time:
+                if effective_ping_time is not None and ref_msg.created_at < effective_ping_time:
                     await message.reply(
                         "❌ **Invalid challenge** — the GM typed that message before they were pinged to pick."
                     )
@@ -1033,9 +1949,20 @@ async def on_message(message: discord.Message):
         return
 
     s = _sessions[message.channel.id]
+
+    # A pick message like "2. Steal Michael Jordan" carries steal/block intent —
+    # it must NOT also be treated as a literal pick of a player named "Steal
+    # Michael Jordan", even if SBL isn't enabled for this draft (in which case
+    # it should just be rejected, not silently accepted as a real player name).
+    # Check intent first and, if present, handle it exclusively instead of
+    # falling through to normal pick processing.
+    if _has_sbl_intent(message.content):
+        await _try_process_sbl_action(s, message)
+        return
+
     await _try_process_pick(s, message)
 
-    if s.draft.mode == "roundless" and s.draft.state in ("active", "paused", "window_paused"):
+    if s.draft.state in ("active", "paused", "window_paused"):
         await _try_process_roundless_makeup(s, message)
 
     if (not message.content.startswith('!')
@@ -1063,7 +1990,11 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         return
     if before.content == after.content:
         return
-    await _try_process_pick(_sessions[after.channel.id], after, is_edit=True)
+    s = _sessions[after.channel.id]
+    if _has_sbl_intent(after.content):
+        await _try_process_sbl_action(s, after)
+        return
+    await _try_process_pick(s, after, is_edit=True)
 
 
 @bot.event
@@ -1366,18 +2297,35 @@ async def timerslotedit(ctx, slot: int, *, args: str = ""):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="timermode")
+_VALID_MODES = ("snake", "roundless", "snake+sbl", "roundless+sbl")
+
+
+def _sbl_note(s: "DraftSession") -> str:
+    if not s.draft.sbl_enabled:
+        return ""
+    return (
+        f"\n🎯 **Steal/Block/Lock enabled** — each GM gets "
+        f"{SBL_STEALS_PER_TEAM} steals, {SBL_BLOCKS_PER_TEAM} blocks, {SBL_LOCKS_PER_TEAM} lock. "
+        f"Eligible window: the current round ({s.draft.num_teams} picks). Use `!timersblhelp` for details."
+    )
+
+
+@bot.command(name="timermode", aliases=["timerswitch"])
 @is_commissioner()
 async def timermode(ctx, mode: str = ""):
-    """!timermode roundless | !timermode snake"""
-    s = _get_session(ctx.channel.id)
+    """!timermode snake | roundless | snake+sbl | roundless+sbl"""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     mode = mode.lower()
-    if mode not in ("roundless", "snake"):
+    if mode not in _VALID_MODES:
         await ctx.send(
-            "❌ Usage: `!timermode roundless` or `!timermode snake`\n"
+            "❌ Usage: `!timermode <mode>` where mode is one of:\n"
+            "**snake** — fixed round-based snake order (default)\n"
             "**roundless** — dynamic pick order based on money spent\n"
-            "**snake** — fixed round-based snake order (default)"
+            "**snake+sbl** — snake order plus Steal/Block/Lock\n"
+            "**roundless+sbl** — roundless order plus Steal/Block/Lock"
         )
         return
 
@@ -1385,27 +2333,51 @@ async def timermode(ctx, mode: str = ""):
         await ctx.send("❌ Load a lotto first with `!timerloadlotto`.")
         return
 
+    was_sbl_enabled = s.draft.sbl_enabled
     s.draft.mode = mode
+
+    # SBL just turned on: picks made before this point were never registered
+    # into pick_records (registration is gated behind sbl_enabled), so
+    # they'd otherwise be untargetable even when still within the eligible
+    # window. Backfill them from each team's own pick history.
+    backfilled = 0
+    if s.draft.sbl_enabled and not was_sbl_enabled:
+        for team_idx, team in enumerate(s.draft.teams):
+            for pick_raw, pick_num in zip(team.get("picks", []), team.get("pick_numbers", [])):
+                if str(pick_num) in s.draft.pick_records:
+                    continue
+                s.draft.register_pick_record(
+                    pick_num,
+                    _extract_player_name(pick_raw),
+                    _pick_name_key(pick_raw),
+                    team_idx,
+                    _extract_price(pick_raw),
+                )
+                backfilled += 1
+
     s.draft.save(s.channel_id)
 
-    if mode == "roundless":
-        await ctx.send(
-            f"✅ Switched to **roundless mode**. Pick order now computed dynamically:\n"
-            f"1. Less money spent → picks sooner\n"
-            f"2. Fewer picks made → picks sooner\n"
-            f"3. More time since last pick → picks sooner\n\n"
+    order_note = (
+        f"✅ Switched to **{mode}**.\n"
+        + (
+            "Pick order now computed dynamically:\n"
+            "1. Less money spent → picks sooner\n"
+            "2. Fewer picks made → picks sooner\n"
+            "3. More time since last pick → picks sooner\n\n"
             f"Picks must include price: `{s.draft.overall_pick}. :Emoji: Player Name $42 Year`"
+            if mode.startswith("roundless") else
+            f"Fixed round-based order resumes from pick #{s.draft.overall_pick}."
         )
-    else:
-        await ctx.send(
-            f"✅ Switched to **snake mode**. Fixed round-based order resumes from pick #{s.draft.overall_pick}."
-        )
+        + _sbl_note(s)
+        + (f"\n📋 Backfilled {backfilled} earlier pick(s) so they're steal/block-eligible if still in window." if backfilled else "")
+    )
+    await ctx.send(order_note)
 
 
 @bot.command(name="timerstart")
 @is_commissioner()
 async def timerstart(ctx, *label_parts):
-    """!timerstart [roundless] [label] — begin the draft."""
+    """!timerstart [snake|roundless|snake+sbl|roundless+sbl] [label] — begin the draft."""
     s = _get_session(ctx.channel.id)
 
     if s.draft.state != "lotto":
@@ -1413,8 +2385,8 @@ async def timerstart(ctx, *label_parts):
         return
 
     parts = list(label_parts)
-    if parts and parts[0].lower() == "roundless":
-        s.draft.mode = "roundless"
+    if parts and parts[0].lower() in _VALID_MODES:
+        s.draft.mode = parts[0].lower()
         parts = parts[1:]
     else:
         s.draft.mode = "snake"
@@ -1422,13 +2394,16 @@ async def timerstart(ctx, *label_parts):
     s.draft.state            = "active"
     s.draft.current_round    = 0
     s.draft.current_in_round = 0
+    s.draft.total_picks_made = 0
+    s.draft.pick_records     = {}
+    s.draft.repick_queue     = []
     s.draft.draft_started    = datetime.now(timezone.utc).isoformat()
     s.draft.draft_label      = " ".join(parts) if parts else None
     s.draft.save(s.channel_id)
 
-    mode_note  = "\n🔄 **Roundless mode** — pick order determined by money spent, picks made, and time since last pick." if s.draft.mode == "roundless" else ""
+    mode_note  = "\n🔄 **Roundless mode** — pick order determined by money spent, picks made, and time since last pick." if s.draft.order_mode == "roundless" else ""
     label_note = f" (**{s.draft.draft_label}**)" if s.draft.draft_label else ""
-    await ctx.send(f"🏀 **The draft has started!**{label_note}{mode_note}")
+    await ctx.send(f"🏀 **The draft has started!**{label_note}{mode_note}{_sbl_note(s)}")
     await _start_timer(s)
 
 
@@ -1436,7 +2411,9 @@ async def timerstart(ctx, *label_parts):
 @is_commissioner()
 async def timerpenalty(ctx, pick_number: int):
     """!timerpenalty <pick_number> — manually apply LeBron/MJ penalty to the slot that made pick #N."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("lotto", "active", "paused", "window_paused", "complete"):
         await ctx.send("❌ No draft loaded.")
@@ -1447,7 +2424,7 @@ async def timerpenalty(ctx, pick_number: int):
         await ctx.send("❌ No teams loaded.")
         return
 
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         await ctx.send("❌ Penalty is not applicable in roundless mode.")
         return
 
@@ -1481,7 +2458,9 @@ async def timerpenalty(ctx, pick_number: int):
 @is_commissioner()
 async def timerrebuildorder(ctx):
     """!timerrebuildorder — Rebuild the snake pick order (applies penalty fixes)."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
     if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
         await ctx.send("❌ No draft in progress.")
         return
@@ -1495,13 +2474,15 @@ async def timerrebuildorder(ctx):
 @is_commissioner()
 async def timerjumpto(ctx, pick_number: int):
     """!timerjumpto <pick_number> — jump the draft to a specific overall pick number."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
         await ctx.send("❌ Load a lotto first with `!timerloadlotto`.")
         return
 
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         if pick_number < 1:
             await ctx.send("❌ Pick number must be at least 1.")
             return
@@ -1524,6 +2505,11 @@ async def timerjumpto(ctx, pick_number: int):
 
     s.draft.current_round    = new_round
     s.draft.current_in_round = new_in_round
+    # When SBL is on, overall_pick is driven by total_picks_made rather than
+    # current_round/current_in_round — without this the displayed/effective
+    # pick number silently stays wherever it was before the jump.
+    if s.draft.sbl_enabled:
+        s.draft.total_picks_made = pick_number - 1
     s.draft.paused_remaining = None
     s.draft.timer_start      = None
     s.draft.state            = "active"
@@ -1533,7 +2519,7 @@ async def timerjumpto(ctx, pick_number: int):
     log.info("JUMP | ch=%d | To pick %d | Round %d | In-round %d | Team: %s",
              s.channel_id, pick_number, s.draft.round_number, s.draft.pick_in_round,
              team["name"] if team else "?")
-    loc_str = (f"pick #{pick_number}" if s.draft.mode == "roundless"
+    loc_str = (f"pick #{pick_number}" if s.draft.order_mode == "roundless"
                else f"pick #{pick_number} (Round {s.draft.round_number}, pick {s.draft.pick_in_round})")
     await ctx.send(
         f"⏩ Jumped to **{loc_str}**.\n"
@@ -1546,7 +2532,9 @@ async def timerjumpto(ctx, pick_number: int):
 @is_commissioner()
 async def timersetpick(ctx, pick_number: int, member: discord.Member):
     """!timersetpick <pick_number> @GM — set pick number and force a specific GM to be next."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
         await ctx.send("❌ Load a lotto first with `!timerloadlotto`.")
@@ -1560,7 +2548,7 @@ async def timersetpick(ctx, pick_number: int, member: discord.Member):
         await ctx.send(f"❌ {member.display_name} is not registered as a GM in this draft.")
         return
 
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         s.draft.current_round    = pick_number - 1
         s.draft.current_in_round = 0
     else:
@@ -1573,6 +2561,11 @@ async def timersetpick(ctx, pick_number: int, member: discord.Member):
         s.draft.current_in_round = zero_pick % s.draft.num_teams
 
     s.draft.next_team_override = team_idx
+    # When SBL is on, overall_pick is driven by total_picks_made rather than
+    # current_round/current_in_round — without this the displayed/effective
+    # pick number silently stays wherever it was before the jump.
+    if s.draft.sbl_enabled:
+        s.draft.total_picks_made = pick_number - 1
     s.draft.paused_remaining   = None
     s.draft.timer_start        = None
     s.draft.state              = "active"
@@ -1598,7 +2591,9 @@ async def timersetpick(ctx, pick_number: int, member: discord.Member):
 @is_commissioner()
 async def timeraddowner(ctx, slot: int, member: discord.Member):
     """!timeraddowner <slot#> @user — add a co-GM to a specific lotto slot."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
         await ctx.send("❌ No draft loaded.")
@@ -1626,11 +2621,54 @@ async def timeraddowner(ctx, slot: int, member: discord.Member):
     await ctx.send(f"✅ {member.mention} added to slot **{slot}** — **{team['name']}**.")
 
 
+@bot.command(name="timerremoveowner")
+@is_commissioner()
+async def timerremoveowner(ctx, slot: int, member: discord.Member):
+    """!timerremoveowner <slot#> @user — remove a co-GM from a specific lotto slot."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+
+    if s.draft.state not in ("lotto", "active", "paused", "window_paused"):
+        await ctx.send("❌ No draft loaded.")
+        return
+
+    if slot < 1 or slot > len(s.draft.teams):
+        await ctx.send(f"❌ Invalid slot. Must be between 1 and {len(s.draft.teams)}.")
+        return
+
+    team = s.draft.teams[slot - 1]
+
+    if member.id not in team["user_ids"]:
+        await ctx.send(f"❌ {member.mention} isn't on **{team['name']}**.")
+        return
+
+    if len(team["user_ids"]) <= 1:
+        await ctx.send(
+            f"❌ Can't remove {member.mention} — they're the only owner of **{team['name']}**. "
+            f"Add a replacement with `!timeraddowner` first."
+        )
+        return
+
+    team["user_ids"].remove(member.id)
+    team["name"] = " / ".join(
+        (ctx.guild.get_member(uid).display_name if ctx.guild.get_member(uid) else str(uid))
+        for uid in team["user_ids"]
+    )
+    s.draft.save(s.channel_id)
+
+    log.info("REMOVE OWNER | ch=%d | Slot %d Team: %s | Removed: %s (%d)",
+             s.channel_id, slot, team["name"], member.display_name, member.id)
+    await ctx.send(f"✅ {member.mention} removed from slot **{slot}** — now **{team['name']}**.")
+
+
 @bot.command(name="timerproxy")
 @is_commissioner()
 async def timerproxy(ctx, member: discord.Member):
     """!timerproxy @user — temporarily add @user as a co-picker for the current team."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state != "active":
         await ctx.send("❌ No active draft.")
@@ -1659,7 +2697,9 @@ async def timerproxy(ctx, member: discord.Member):
 @is_commissioner()
 async def timerremoveproxy(ctx, member: discord.Member):
     """!timerremoveproxy @user — remove a proxy picker."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("lotto", "active"):
         await ctx.send("❌ No draft in progress.")
@@ -1680,9 +2720,11 @@ async def timerremoveproxy(ctx, member: discord.Member):
 @bot.command(name="challenge")
 async def challenge_cmd(ctx):
     """Immediately cut the current GM's timer to 10 minutes (3 challenges = instant skip)."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
-    if s.draft.state != "active":
+    if s.draft.state not in ("active", "window_paused"):
         await ctx.send("❌ No active draft.")
         return
     if not s.draft.current_team:
@@ -1696,7 +2738,9 @@ async def challenge_cmd(ctx):
 
 @bot.command(name="timerskip")
 async def timerskip(ctx):
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state != "active":
         await ctx.send("❌ No active draft.")
@@ -1712,7 +2756,7 @@ async def timerskip(ctx):
         await ctx.send(f"❌ Only {_team_mentions(team)} or a commissioner can skip this pick.")
         return
 
-    penalty_note = "" if s.draft.timer_override is not None else " **-10 min** from their future picks."
+    penalty_note = " **-5 min** from their future picks."
     await ctx.send(f"⏩ {_team_mentions(team)} is skipping.{penalty_note}")
     await _do_skip(s, auto=False)
 
@@ -1721,7 +2765,9 @@ async def timerskip(ctx):
 @is_commissioner()
 async def timerunskip(ctx):
     """!timerunskip — undo the most recent skip."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if not s.draft.last_skip:
         await ctx.send("❌ No skip to undo.")
@@ -1765,7 +2811,9 @@ async def timerunskip(ctx):
 
 @bot.command(name="timerstatus")
 async def timerstatus(ctx):
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_viewable_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("active", "paused", "window_paused", "complete"):
         await ctx.send("❌ No active draft.")
@@ -1795,7 +2843,7 @@ async def timerstatus(ctx):
              else discord.Color.orange() if s.draft.state == "paused"
              else discord.Color.blue())
 
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         embed = discord.Embed(title="Draft Status — Roundless", color=color)
         embed.add_field(name="Overall Pick", value=str(s.draft.overall_pick), inline=True)
         embed.add_field(name="Up Now",       value=_team_mentions(team),       inline=True)
@@ -1845,7 +2893,9 @@ async def timerstatus(ctx):
 
 @bot.command(name="timerskiplist")
 async def timerskiplist(ctx):
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("lotto", "active", "paused", "window_paused", "complete"):
         await ctx.send("❌ No draft loaded.")
@@ -1865,7 +2915,7 @@ async def timerskiplist(ctx):
         deduction = skips * SKIP_PENALTY
         as_tag    = " 🔴 **ACTIVE SKIP**" if is_as else ""
 
-        if s.draft.mode == "roundless":
+        if s.draft.order_mode == "roundless":
             from config import ROUNDLESS_TIMER
             effective = max(ROUNDLESS_TIMER - deduction, 0)
             base_min  = ROUNDLESS_TIMER // 60
@@ -2013,7 +3063,9 @@ class BoardView(discord.ui.View):
 
 @bot.command(name="timerboard")
 async def timerboard(ctx):
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_viewable_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("active", "paused", "window_paused", "complete"):
         await ctx.send("❌ No draft in progress.")
@@ -2021,7 +3073,7 @@ async def timerboard(ctx):
 
     COMPLETE_PICKS = 10
 
-    if s.draft.mode == "roundless":
+    if s.draft.order_mode == "roundless":
         order       = s.draft._roundless_sorted_order()
         current_idx = s.draft.current_team_idx
         lines = []
@@ -2061,7 +3113,9 @@ async def timerboard(ctx):
 @is_commissioner()
 async def timersettimer(ctx, minutes: int):
     """!timersettimer <minutes> — override the timer for all future picks. Use 0 to revert to defaults."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state == "complete":
         await ctx.send("❌ Draft is already complete. Use `!timereset` first.")
@@ -2088,7 +3142,9 @@ async def timersettimer(ctx, minutes: int):
 @is_commissioner()
 async def timerset(ctx, member: discord.Member, money: int, picks: int, last_pick: int):
     """!timerset @GM <money> <picks> <last_pick#> — set all three roundless stats at once."""
-    s        = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
     team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
     if team_idx is None:
         await ctx.send(f"❌ {member.display_name} is not in the draft.")
@@ -2112,7 +3168,9 @@ async def timerset(ctx, member: discord.Member, money: int, picks: int, last_pic
 @is_commissioner()
 async def timersetmoney(ctx, member: discord.Member, amount: int):
     """!timersetmoney @GM <dollars>"""
-    s        = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
     team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
     if team_idx is None:
         await ctx.send(f"❌ {member.display_name} is not in the draft.")
@@ -2126,7 +3184,9 @@ async def timersetmoney(ctx, member: discord.Member, amount: int):
 @is_commissioner()
 async def timersetpicks(ctx, member: discord.Member, count: int):
     """!timersetpicks @GM <count>"""
-    s        = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
     team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
     if team_idx is None:
         await ctx.send(f"❌ {member.display_name} is not in the draft.")
@@ -2145,7 +3205,9 @@ async def timersetpicks(ctx, member: discord.Member, count: int):
 @is_commissioner()
 async def timersetlastpick(ctx, member: discord.Member, pick_number: int):
     """!timersetlastpick @GM <pick#>"""
-    s        = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
     team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
     if team_idx is None:
         await ctx.send(f"❌ {member.display_name} is not in the draft.")
@@ -2155,11 +3217,113 @@ async def timersetlastpick(ctx, member: discord.Member, pick_number: int):
     await ctx.send(f"✅ **{s.draft.teams[team_idx]['name']}** last pick number set to **#{pick_number}**.")
 
 
+@bot.command(name="timeraddpick")
+@is_commissioner()
+async def timeraddpick(ctx, member: discord.Member, pick_number: int, *, pick_text: str):
+    """!timeraddpick @GM <pick_number> <player ...> — manually record a pick the
+    bot missed (e.g. a message sent before a bugfix landed). Clears pending_makeup."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    team = s.draft.teams[team_idx]
+
+    pick_text  = pick_text.strip()
+    player_key = _pick_name_key(pick_text)
+    for t in s.draft.teams:
+        for p in t.get("picks", []):
+            if _pick_name_key(p) == player_key:
+                await ctx.send(
+                    f"❌ **{_extract_player_name(pick_text)}** has already been taken by **{t['name']}**."
+                )
+                return
+
+    if pick_number in team.get("pick_numbers", []):
+        await ctx.send(f"❌ **{team['name']}** already has a pick recorded as #{pick_number}.")
+        return
+
+    team.setdefault("picks", []).append(pick_text)
+    team.setdefault("pick_numbers", []).append(pick_number)
+    team["last_pick_number"] = pick_number
+    team["pending_makeup"]   = False
+
+    price = _extract_price(pick_text)
+    if price is not None:
+        team["money_spent"] = team.get("money_spent", 0) + price
+
+    s.draft.save(s.channel_id)
+    log.info("MANUAL ADD PICK | ch=%d | Team: %s | Pick #%d | %s",
+              s.channel_id, team["name"], pick_number, pick_text)
+    await ctx.send(f"✅ Added pick **#{pick_number}** for **{team['name']}**: {pick_text}")
+
+
+@bot.command(name="timerreplacepick")
+@is_commissioner()
+async def timerreplacepick(ctx, member: discord.Member, pick_number: int, *, pick_text: str):
+    """!timerreplacepick @GM <pick_number> <player ...> — overwrite an already-recorded
+    pick that was entered wrong. Adjusts money_spent for the price difference."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+    team = s.draft.teams[team_idx]
+
+    pick_numbers = team.get("pick_numbers", [])
+    if pick_number not in pick_numbers:
+        await ctx.send(
+            f"❌ **{team['name']}** has no pick recorded as #{pick_number} — use `!timeraddpick` instead."
+        )
+        return
+    idx   = pick_numbers.index(pick_number)
+    picks = team.get("picks", [])
+
+    pick_text  = pick_text.strip()
+    player_key = _pick_name_key(pick_text)
+    for t in s.draft.teams:
+        for j, p in enumerate(t.get("picks", [])):
+            if t is team and j == idx:
+                continue  # the slot being replaced — not a conflict with itself
+            if _pick_name_key(p) == player_key:
+                await ctx.send(
+                    f"❌ **{_extract_player_name(pick_text)}** has already been taken by **{t['name']}**."
+                )
+                return
+
+    old_text  = picks[idx]
+    old_price = _extract_price(old_text)
+    new_price = _extract_price(pick_text)
+    picks[idx] = pick_text
+    team["money_spent"] = max(team.get("money_spent", 0) - (old_price or 0) + (new_price or 0), 0)
+
+    # Keep the SBL pick_records entry (a separate table used for steal/block
+    # targeting) in sync — otherwise a later steal of this player would carry
+    # over the stale name/price instead of the correction just made here.
+    if s.draft.sbl_enabled:
+        rec = s.draft.pick_records.get(str(pick_number))
+        if rec:
+            rec["player_name"] = _extract_player_name(pick_text)
+            rec["name_key"]    = player_key
+            rec["price"]       = new_price
+
+    s.draft.save(s.channel_id)
+    log.info("MANUAL REPLACE PICK | ch=%d | Team: %s | Pick #%d | %r -> %r",
+              s.channel_id, team["name"], pick_number, old_text, pick_text)
+    await ctx.send(f"✅ Pick **#{pick_number}** for **{team['name']}** replaced:\n~~{old_text}~~ → {pick_text}")
+
+
 @bot.command(name="timeraddskip")
 @is_commissioner()
 async def timeraddskip(ctx, member: discord.Member, count: int = 1):
     """!timeraddskip @GM [count]"""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     # Prefer the currently active slot for this member; fall back to first slot they own
     cur = s.draft.current_team_idx
@@ -2183,12 +3347,471 @@ async def timeraddskip(ctx, member: discord.Member, count: int = 1):
     )
 
 
+# ── Budget cap ────────────────────────────────────────────────────────────────
+
+@bot.command(name="timersetbudget")
+@is_commissioner()
+async def timersetbudget(ctx, amount: int = None):
+    """!timersetbudget <amount> — cap total money_spent per team; omit amount to clear the cap."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    if amount is None:
+        s.draft.budget_max = None
+        s.draft.save(s.channel_id)
+        await ctx.send("✅ Budget cap cleared — no spending limit.")
+        return
+    if amount <= 0:
+        await ctx.send("❌ Usage: `!timersetbudget <amount>` (positive number), or omit to clear the cap.")
+        return
+    s.draft.budget_max = amount
+    s.draft.save(s.channel_id)
+    await ctx.send(f"✅ Budget cap set to **${amount}** per team. Picks or steals that would exceed it are rejected.")
+
+
+# ── Steal / Block / Lock (SBL) commands ─────────────────────────────────────
+
+@bot.command(name="timersblstatus")
+async def timersblstatus(ctx):
+    """!timersblstatus — show each GM's remaining steals/blocks/locks."""
+    s = await _resolve_viewable_session(ctx)
+    if s is None:
+        return
+    if not s.draft.sbl_enabled:
+        await ctx.send("❌ Steal/Block/Lock isn't enabled for this draft.")
+        return
+
+    lines = []
+    for t in s.draft.teams:
+        lines.append(
+            f"**{t['name']}** — 🔓 steals: {t.get('steals_remaining', SBL_STEALS_PER_TEAM)} "
+            f"| 🚫 blocks: {t.get('blocks_remaining', SBL_BLOCKS_PER_TEAM)} "
+            f"| 🔒 locks: {t.get('locks_remaining', SBL_LOCKS_PER_TEAM)}"
+        )
+    embed = discord.Embed(
+        title="Steal / Block / Lock — Remaining Charges",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Eligible window: current round ({s.draft.num_teams} picks) — currently round {s.draft.sbl_window(s.draft.overall_pick) + 1}")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="timersbladjust")
+@is_commissioner()
+async def timersbladjust(ctx, member: discord.Member, kind: str, amount: int):
+    """!timersbladjust @GM steals|blocks|locks <n> — manual correction."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    if not s.draft.sbl_enabled:
+        await ctx.send("❌ Steal/Block/Lock isn't enabled for this draft.")
+        return
+
+    kind = kind.lower().rstrip('s') + 's'  # normalize steal/steals -> "steals"
+    field_map = {
+        "steals": "steals_remaining",
+        "blocks": "blocks_remaining",
+        "locks":  "locks_remaining",
+    }
+    if kind not in field_map:
+        await ctx.send("❌ Usage: `!timersbladjust @GM steals|blocks|locks <n>`")
+        return
+
+    team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+
+    s.draft.teams[team_idx][field_map[kind]] = amount
+    s.draft.save(s.channel_id)
+    await ctx.send(f"✅ **{s.draft.teams[team_idx]['name']}** {kind} set to **{amount}**.")
+
+
+# ── Direct pick/queue overrides ─────────────────────────────────────────────
+# These exist for exactly the kind of tangled steal/block chains that
+# !timerjumpto alone can't fix: reassigning a pick that ended up on the
+# wrong roster, forcing a priority makeup turn without a real steal/block
+# to trigger it, and inspecting/clearing the repick queue directly.
+
+@bot.command(name="timerreassignpick")
+@is_commissioner()
+async def timerreassignpick(ctx, pick_number: int, member: discord.Member):
+    """!timerreassignpick <pick_number> @GM — move an existing pick to a
+    different GM's roster, moving its price between the two teams' money_spent
+    too. Marks it as a steal from the old owner (stolen_from_team_idx) so a
+    future block on it reclaims correctly, and clears any lock/protected flag."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+
+    rec = s.draft.pick_records.get(str(pick_number))
+    if not rec:
+        await ctx.send(f"❌ No pick record found for #{pick_number}.")
+        return
+
+    new_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
+    if new_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+
+    old_idx = rec["team_idx"]
+    if old_idx == new_idx:
+        await ctx.send(f"❌ **{s.draft.teams[old_idx]['name']}** already owns pick #{pick_number}.")
+        return
+
+    old_team = s.draft.teams[old_idx]
+    new_team = s.draft.teams[new_idx]
+    price    = rec.get("price")
+
+    old_team["picks"] = [p for p in old_team.get("picks", []) if _pick_name_key(p) != rec["name_key"]]
+    if pick_number in old_team.get("pick_numbers", []):
+        old_team["pick_numbers"].remove(pick_number)
+    if price is not None:
+        old_team["money_spent"] = max(old_team.get("money_spent", 0) - price, 0)
+
+    raw = f"{rec['player_name']} ${price}" if price is not None else rec['player_name']
+    new_team.setdefault("picks", []).append(raw)
+    new_team.setdefault("pick_numbers", []).append(pick_number)
+    if price is not None:
+        new_team["money_spent"] = new_team.get("money_spent", 0) + price
+
+    rec["team_idx"]             = new_idx
+    rec["is_steal_result"]      = True
+    rec["stolen_from_team_idx"] = old_idx
+    rec["locked"]               = False
+    rec["protected"]            = False
+
+    s.draft.save(s.channel_id)
+    log.info("FORCE REASSIGN PICK | ch=%d | Pick #%d | %s | %s -> %s",
+              s.channel_id, pick_number, rec["player_name"], old_team["name"], new_team["name"])
+    await ctx.send(
+        f"✅ Pick **#{pick_number}** (**{rec['player_name']}**) moved from "
+        f"**{old_team['name']}** to **{new_team['name']}**."
+    )
+
+
+@bot.command(name="timerforcequeue")
+@is_commissioner()
+async def timerforcequeue(ctx, member: discord.Member, pick_number: int):
+    """!timerforcequeue @GM <pick_number> — force a priority makeup turn for
+    @GM at pick_number, ahead of the normal rotation, without a real steal/
+    block to trigger it (e.g. finishing a botched manual correction). Always
+    interrupts whoever's currently on the clock, same as a real block/steal."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    if not s.draft.sbl_enabled:
+        await ctx.send("❌ Steal/Block/Lock isn't enabled for this draft.")
+        return
+
+    team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
+    if team_idx is None:
+        await ctx.send(f"❌ {member.display_name} is not in the draft.")
+        return
+
+    team = s.draft.teams[team_idx]
+    team["sbl_owed_protection"] = True
+    s.draft.repick_queue = [e for e in s.draft.repick_queue if e[0] != team_idx]
+    s.draft.repick_queue.insert(0, (team_idx, pick_number))
+
+    if s.timer_task and not s.timer_task.done():
+        s.timer_task.cancel()
+    if s.window_task and not s.window_task.done():
+        s.window_task.cancel()
+    await _delete_active_ping(s)
+    if s.draft.state in ("window_paused", "paused"):
+        s.draft.state            = "active"
+        s.draft.paused_remaining = None
+
+    s.draft.save(s.channel_id)
+    log.info("FORCE QUEUE | ch=%d | Team: %s | Pick #%d", s.channel_id, team["name"], pick_number)
+    await ctx.send(f"✅ **{team['name']}** forced to the front of the queue for pick **#{pick_number}**.")
+    await _start_timer(s)
+
+
+@bot.command(name="timerclearqueue")
+@is_commissioner()
+async def timerclearqueue(ctx, *, target: str):
+    """!timerclearqueue @GM — remove @GM's entries from the repick queue.
+    !timerclearqueue all — clear the entire queue. Whichever team ends up
+    on the clock afterward gets interrupted/re-pinged immediately."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+
+    target = target.strip()
+    removed: list[tuple[int, int]]
+    if target.lower() == "all":
+        removed = list(s.draft.repick_queue)
+        s.draft.repick_queue = []
+    else:
+        try:
+            member = await commands.MemberConverter().convert(ctx, target)
+        except commands.BadArgument:
+            await ctx.send("❌ Usage: `!timerclearqueue @GM` or `!timerclearqueue all`.")
+            return
+        team_idx = next((i for i, t in enumerate(s.draft.teams) if member.id in t["user_ids"]), None)
+        if team_idx is None:
+            await ctx.send(f"❌ {member.display_name} is not in the draft.")
+            return
+        removed = [e for e in s.draft.repick_queue if e[0] == team_idx]
+        s.draft.repick_queue = [e for e in s.draft.repick_queue if e[0] != team_idx]
+
+    if not removed:
+        await ctx.send("⚠️ Nothing to remove — the queue is already clear of that.")
+        return
+
+    # Removing the queue entry cancels the obligation it represents — leaving
+    # sbl_owed_protection/sbl_barred_player_key set would falsely block that
+    # team's next real steal/pick attempt with "you were just blocked/stolen
+    # from" even though there's no queue entry left backing that claim.
+    for team_idx, _ in removed:
+        team = s.draft.teams[team_idx]
+        team.pop("sbl_owed_protection", None)
+        team.pop("sbl_barred_player_key", None)
+
+    if s.timer_task and not s.timer_task.done():
+        s.timer_task.cancel()
+    if s.window_task and not s.window_task.done():
+        s.window_task.cancel()
+    await _delete_active_ping(s)
+    if s.draft.state in ("window_paused", "paused"):
+        s.draft.state            = "active"
+        s.draft.paused_remaining = None
+
+    s.draft.save(s.channel_id)
+    desc = ", ".join(f"{s.draft.teams[t]['name']} (#{n})" for t, n in removed)
+    log.info("CLEAR QUEUE | ch=%d | Removed: %s", s.channel_id, desc)
+    await ctx.send(f"✅ Removed from queue: {desc}")
+    await _start_timer(s)
+
+
+@bot.command(name="timerqueuestatus")
+async def timerqueuestatus(ctx):
+    """!timerqueuestatus — show the current repick queue, front to back."""
+    s = await _resolve_viewable_session(ctx)
+    if s is None:
+        return
+
+    if not s.draft.repick_queue:
+        await ctx.send("📭 Repick queue is empty.")
+        return
+
+    lines = [
+        f"**{i + 1}.** {s.draft.teams[team_idx]['name']} — pick **#{pick_num}**"
+        for i, (team_idx, pick_num) in enumerate(s.draft.repick_queue)
+    ]
+    embed = discord.Embed(
+        title="🔁 Repick Queue",
+        description="\n".join(lines),
+        color=discord.Color.orange(),
+    )
+    embed.set_footer(text="Front of the queue is on the clock now, ahead of the normal rotation.")
+    await ctx.send(embed=embed)
+
+
+class _SBLProxyMessage:
+    """Lightweight stand-in for discord.Message, used only by !timersblfor so
+    it can reuse _try_process_sbl_action's exact logic instead of duplicating
+    the steal/block/lock rules in a second place."""
+    def __init__(self, ctx: commands.Context, content: str):
+        self._real     = ctx.message
+        self.content    = content
+        self.id         = ctx.message.id
+        self.channel    = ctx.channel
+        self.author     = ctx.author
+        self.mentions   = []
+        self.reference  = None
+
+    async def add_reaction(self, emoji):
+        try:
+            await self._real.add_reaction(emoji)
+        except discord.HTTPException:
+            pass
+
+    async def reply(self, text):
+        await self._real.reply(text)
+
+
+@bot.command(name="timersblfor")
+@is_commissioner()
+async def timersblfor(ctx, member: discord.Member, *, action_text: str):
+    """!timersblfor @GM <block|steal|lock ...> — perform a steal/block/lock on
+    behalf of an absentee/AFK GM, charged against THEIR remaining steals/
+    blocks/locks (not the commissioner's own team). Name the player directly
+    in the text — e.g. `!timersblfor @Solid block Kevin McHale`."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+
+    action_text = action_text.strip()
+    if not _has_sbl_intent(action_text):
+        await ctx.send(
+            "❌ Must contain clear steal/block/lock intent, e.g. "
+            "`!timersblfor @GM block Kevin McHale`."
+        )
+        return
+
+    proxy = _SBLProxyMessage(ctx, action_text)
+    await _try_process_sbl_action(s, proxy, override_acting_member=member)
+
+
+@bot.command(name="timerunlock")
+@is_commissioner()
+async def timerunlock(ctx, pick_number: int):
+    """!timerunlock <pick_number> — remove the lock flag from a specific pick
+    (e.g. it was locked by mistake), making that player stealable/blockable
+    again. Refunds the lock charge to whichever team currently owns the pick."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    if not s.draft.sbl_enabled:
+        await ctx.send("❌ Steal/Block/Lock isn't enabled for this draft.")
+        return
+
+    rec = s.draft.pick_records.get(str(pick_number))
+    if not rec:
+        await ctx.send(f"❌ No pick record found for #{pick_number}.")
+        return
+    if not rec.get("locked"):
+        await ctx.send(f"❌ Pick #{pick_number} (**{rec['player_name']}**) isn't locked.")
+        return
+
+    rec["locked"] = False
+    team = s.draft.teams[rec["team_idx"]]
+    team["locks_remaining"] = team.get("locks_remaining", SBL_LOCKS_PER_TEAM) + 1
+    s.draft.save(s.channel_id)
+
+    log.info("MANUAL UNLOCK | ch=%d | Pick #%d | Player: %s | Refunded to: %s",
+              s.channel_id, pick_number, rec["player_name"], team["name"])
+    await ctx.send(
+        f"🔓 Pick **#{pick_number}** (**{rec['player_name']}**) is no longer locked — "
+        f"eligible for steal/block again. Lock charge refunded to **{team['name']}**."
+    )
+
+
+@bot.command(name="timerlock")
+@is_commissioner()
+async def timerlock(ctx, pick_number: int):
+    """!timerlock <pick_number> — manually mark a pick as locked (e.g. the 🔒
+    marker was in the wrong spot in the pick message and didn't auto-detect).
+    Spends a lock charge from whichever team currently owns the pick."""
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
+    if not s.draft.sbl_enabled:
+        await ctx.send("❌ Steal/Block/Lock isn't enabled for this draft.")
+        return
+
+    rec = s.draft.pick_records.get(str(pick_number))
+    if not rec:
+        await ctx.send(f"❌ No pick record found for #{pick_number}.")
+        return
+    if rec.get("locked"):
+        await ctx.send(f"❌ Pick #{pick_number} (**{rec['player_name']}**) is already locked.")
+        return
+
+    team = s.draft.teams[rec["team_idx"]]
+    if team.get("locks_remaining", SBL_LOCKS_PER_TEAM) <= 0:
+        await ctx.send(f"❌ **{team['name']}** has no lock charges remaining.")
+        return
+
+    rec["locked"] = True
+    team["locks_remaining"] = team.get("locks_remaining", SBL_LOCKS_PER_TEAM) - 1
+    s.draft.save(s.channel_id)
+
+    log.info("MANUAL LOCK | ch=%d | Pick #%d | Player: %s | Team: %s",
+              s.channel_id, pick_number, rec["player_name"], team["name"])
+    await ctx.send(
+        f"🔒 Pick **#{pick_number}** (**{rec['player_name']}**) is now locked — "
+        f"immune to steal/block for the rest of the draft. Charge spent by **{team['name']}**."
+    )
+
+
+@bot.command(name="timersblhelp")
+async def timersblhelp(ctx):
+    """!timersblhelp — explain the Steal/Block/Lock ruleset."""
+    embed = discord.Embed(title="🎯 Steal / Block / Lock", color=discord.Color.gold())
+    embed.add_field(
+        name="Enabling",
+        value=(
+            "`!timermode snake+sbl` / `!timermode roundless+sbl` — switch an active draft\n"
+            "`!timerstart snake+sbl` / `!timerstart roundless+sbl` — start a draft with SBL on"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Charges (per GM, for the whole draft)",
+        value=f"🔓 {SBL_STEALS_PER_TEAM} steals · 🚫 {SBL_BLOCKS_PER_TEAM} blocks · 🔒 {SBL_LOCKS_PER_TEAM} lock",
+        inline=False,
+    )
+    embed.add_field(
+        name="Steal — on your own turn",
+        value=(
+            "Type a message containing \"steal\"/\"stolen\" and the player's name "
+            "(e.g. `steal LeBron James`), or just reply \"steal\" to their pick message. "
+            "Only works on your own turn, on a player picked in the **current round** "
+            "(one pick per team), who isn't locked or protected. The victim goes "
+            "back on the clock immediately after your pick."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Block — anytime, any GM",
+        value=(
+            "Type a message containing \"block\" and the player's name "
+            "(e.g. `block LeBron James`). Not turn-gated — usable anytime a target is "
+            "eligible. The player is removed entirely (goes back into the pool) and the "
+            "victim GM is queued for an emergency repick.\n"
+            "**Exception:** if you block a player who was stolen *from you*, you get them "
+            "back on your own roster directly instead of them going to the pool."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Lock — when you make your own pick",
+        value="Append 🔒 (or the word \"lock\") to your numbered pick to spend a lock charge and make it permanently safe from steal/block.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Rules",
+        value=(
+            "• A pick can only be hit (blocked/stolen) once — the resulting repick is permanently safe.\n"
+            "• If you're blocked/stolen from, your next pick must be an original pick (no steal).\n"
+            "• If your steal gets blocked, you get the steal charge back. If it gets re-stolen, you don't.\n"
+            "• A stolen player keeps their original price."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Admin corrections",
+        value=(
+            "`!timersbladjust @GM steals|blocks|locks <n>` — set a GM's remaining charges\n"
+            "`!timerlock <pick#>` — manually lock a pick that the 🔒 marker missed, spends the charge\n"
+            "`!timerunlock <pick#>` — remove a mistaken lock, refunds the charge\n"
+            "`!timersblfor @GM block/steal/lock <player>` — perform a steal/block/lock on behalf of "
+            "an absentee GM, charged against THEIR remaining charges (not yours)\n"
+            "`!timerreassignpick <pick#> @GM` — move an existing pick to a different GM's roster "
+            "(moves the price too, marks it stolen-from the old owner)\n"
+            "`!timerforcequeue @GM <pick#>` — force a priority makeup turn for @GM, ahead of the "
+            "normal rotation, without a real steal/block to trigger it\n"
+            "`!timerclearqueue @GM` / `!timerclearqueue all` — remove entries from the repick queue\n"
+            "`!timerqueuestatus` — show the current repick queue"
+        ),
+        inline=False,
+    )
+    await ctx.send(embed=embed)
+
+
 # ── Admin ─────────────────────────────────────────────────────────────────────
 
 @bot.command(name="timerpause")
 @is_commissioner()
 async def timerpause(ctx):
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state == "paused":
         await ctx.send("❌ Draft is already paused. Use `!timerresume` to continue.")
@@ -2230,7 +3853,9 @@ async def timerpause(ctx):
 @bot.command(name="timerresume")
 @is_commissioner()
 async def timerresume(ctx):
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state != "paused":
         await ctx.send("❌ Draft is not paused.")
@@ -2257,7 +3882,9 @@ async def timerresume(ctx):
 @is_commissioner()
 async def removeskip(ctx, member: discord.Member, count: int = 1):
     """!removeskip @GM [count] — remove one or more skips from a GM."""
-    s = _get_session(ctx.channel.id)
+    s = await _resolve_command_session(ctx)
+    if s is None:
+        return
 
     if s.draft.state not in ("active", "paused", "window_paused"):
         await ctx.send("❌ No active draft.")
@@ -2359,8 +3986,8 @@ async def timerhelp(ctx):
             "`!timersetup @u1 @u2 …` — Manually register participants\n"
             "`!timerlotto` — Randomly shuffle draft order\n"
             "`!timerorder 3 1 2 …` — Set draft order manually\n"
-            "`!timermode roundless|snake` — Switch draft mode\n"
-            "`!timerstart [roundless] [label]` — Begin the draft\n"
+            "`!timermode snake|roundless|snake+sbl|roundless+sbl` — Switch draft mode\n"
+            "`!timerstart [mode] [label]` — Begin the draft (mode defaults to snake)\n"
         ),
         inline=False,
     )
@@ -2369,7 +3996,7 @@ async def timerhelp(ctx):
         value=(
             "`!timerstatus` — Show current pick and time remaining\n"
             "`!timerboard` — Show all picks so far\n"
-            "`!timerskip` — Skip your turn (−10 min on future picks)\n"
+            "`!timerskip` — Skip your turn (−5 min on future picks)\n"
             "`!timerunskip` — Undo the last skip\n"
             "`!timerskiplist` — Show all teams' skip penalties\n"
             "`!timerskiphistory [@user]` — All-time skip leaderboard or per-GM history\n"
@@ -2386,15 +4013,19 @@ async def timerhelp(ctx):
             "`!timersetpick <pick#> @GM` — Jump and force a specific GM next\n"
             "`!timersettimer <min>` — Override timer (0 = revert to defaults)\n"
             "`!timeraddowner <slot#> @user` — Add a co-GM to a specific lotto slot\n"
+            "`!timerremoveowner <slot#> @user` — Remove a co-GM from a specific lotto slot\n"
             "`!timerproxy @user` / `!timerremoveproxy @user` — Add/remove a proxy picker\n"
             "`!timeraddskip @GM [n]` / `!removeskip @GM` — Add/remove skips\n"
             "`!timerset @GM <money> <picks> <last#>` — Set all roundless stats at once\n"
             "`!timersetmoney` / `!timersetpicks` / `!timersetlastpick` — Set individual stats\n"
+            "`!timeraddpick @GM <pick#> <player ...>` — Manually record a pick the bot missed\n"
+            "`!timerreplacepick @GM <pick#> <player ...>` — Overwrite a wrongly-recorded pick\n"
+            "`!timersetbudget <amount>` — Cap total spend per team (omit amount to clear)\n"
             "`!timereset` — Cancel and wipe this channel's draft\n"
         ),
         inline=False,
     )
-    if s.draft.mode == "roundless" and s.draft.state != "idle":
+    if s.draft.order_mode == "roundless" and s.draft.state != "idle":
         embed.add_field(
             name="Pick format (roundless)",
             value=f"`{s.draft.overall_pick}. :YourEmoji: Player Name $Price Year`",
@@ -2404,6 +4035,12 @@ async def timerhelp(ctx):
         embed.add_field(
             name="Pick format",
             value=f"`{s.draft.overall_pick}. :YourEmoji: Player Name Year`",
+            inline=False,
+        )
+    if s.draft.sbl_enabled:
+        embed.add_field(
+            name="Steal / Block / Lock",
+            value="`!timersblstatus` — remaining charges · `!timersblhelp` — full rules",
             inline=False,
         )
     await ctx.send(embed=embed)

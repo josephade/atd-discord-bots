@@ -41,7 +41,7 @@ CHAMPIONS = {
     43: {"w": ["Bony", "Cruz", "valter", "dallama"],                  "ru": ["Benzo"]},
     44: {"w": ["Hayden", "JSoapz"],                                   "ru": ["Benzo"]},
     45: {"w": ["Nate", "JSoapz", "shadow"],                           "ru": ["Ferra", "Hilol", "bobby", "collins"]},
-    46: {"w": ["Kay", "r3"],                                          "ru": ["Benzo"]},
+    46: {"w": ["Kay", "r3", "Crispy"],                                          "ru": ["Benzo"]},
     47: {"w": ["Matisse Thybulle", "jakit"],                          "ru": ["AJ", "unknown-user"]},
     # 48 = Football
     49: {"w": [],                                                     "ru": ["zenon", "Ferra"]},
@@ -64,7 +64,7 @@ CHAMPIONS = {
     66: {"w": ["AJ", "Benzo"],                                        "ru": []},
     67: {"w": ["Francis"],                                            "ru": ["JSoapz"]},
     68: {"w": ["Kay"],                                                "ru": []},
-    69: {"w": ["Benzo"],                                              "ru": ["Silveryo"]},
+    69: {"w": ["Benzo"],                                              "ru": ["Gooby", "Zenon"]},
     70: {"w": [],                                                     "ru": []},
     71: {"w": ["Francis"],                                            "ru": ["Gooby"]},
     72: {"w": [],                                                     "ru": ["TR", "Mk"]},
@@ -76,7 +76,7 @@ CHAMPIONS = {
     78: {"w": ["Francis"],                                            "ru": ["Gooby", "jan"]},
     79: {"w": ["sorslab", "Qrganic"],                                 "ru": ["Mk", "AntGotNext"]},
     80: {"w": ["Gooby"],                                           "ru": ["Hayden", "manu"]},
-    81: {"w": ["fearlessgolem", "Axyr"],                              "ru": ["Deleted User"]},
+    81: {"w": ["fearlessgolem", "Axyr"],                              "ru": ["Kay"]},
     82: {"w": ["Kay"],                                                "ru": ["udon"]},
     83: {"w": ["Admiral Ackbar"],                                     "ru": ["Mk", "AntGotNext"]},
     84: {"w": ["Ceo"],                                                "ru": ["Bony"]},
@@ -101,4 +101,12 @@ CHAMPIONS = {
     102:{"w": ["Klaw"],                                                 "ru": ["Elpolo"]},
     103:{"w": ["Hayden", "Hilol"],                                      "ru": ["JSoapz"]},
     104:{"w": ["Bony"],                                                  "ru": ["Admiral Ackbar"]},
+    105:{"w": ["HT", "Gooby"],                                          "ru": ["M.", "Axyr"]},
+}
+
+# Drafts whose championship is kept on record (still shown in !rings and the
+# profile Championships tab) but excluded from win-count totals — e.g. a
+# ghost draft that produced a technically-real but not-a-real-ring result.
+MICKEY_RINGS = {
+    89: "This is a mickey ring due to ghost draft and will not be counted as a real ring.",
 }

@@ -177,24 +177,32 @@ def _fetch_roster_names(force: bool = False) -> set:
 
 
 def _player_available(player_name: str, availability: dict, roster_names: set | None = None) -> bool:
-    """Check availability — color sheet first, roster text as fallback."""
+    """Check availability — taken if EITHER source says so.
+
+    The color sheet (PLAYERS_SHEET_NAME) is maintained by ATD Sheet Bot's
+    fuzzy name-matching, which can silently miss a name it doesn't
+    recognize (seen in practice — odd punctuation, nicknames, etc.), and
+    would then leave that player looking "available" here forever. The
+    roster sheet (ROSTER_SHEET_NAME) is written directly by Team Sheet Bot
+    and is the more reliable ground truth, so it's always checked too — not
+    just as a fallback when the color sheet is entirely missing."""
     name_lower = player_name.lower().strip()
 
-    # Option 1: Color-based check (PLAYERS_SHEET_NAME — black background = drafted)
-    if availability:
-        if name_lower in availability:
-            return availability[name_lower]
-        for sheet_name, avail in availability.items():
-            if name_lower in sheet_name:
-                return avail
-
-    # Option 2: Text-based roster check (ROSTER_SHEET_NAME — fallback when color sheet unavailable)
+    # Roster sheet — ground truth, written directly by Team Sheet Bot.
     if roster_names is not None:
         if name_lower in roster_names:
             return False
         for roster_name in roster_names:
             if name_lower in roster_name:
                 return False
+
+    # Color sheet — maintained by ATD Sheet Bot's fuzzy matching.
+    if availability:
+        if name_lower in availability:
+            return availability[name_lower]
+        for sheet_name, avail in availability.items():
+            if name_lower in sheet_name:
+                return avail
 
     log.warning("Player '%s' not found in either sheet — assuming available", player_name)
     return True
@@ -239,6 +247,8 @@ def _format_pick(pick: dict) -> str:
         parts.append(f"'{pick['year'][-2:]}")
     if pick.get("price") is not None:
         parts.append(f"${pick['price']}")
+    if pick.get("lock"):
+        parts.append("🔒")
     return " ".join(parts)
 
 
@@ -263,6 +273,9 @@ def _build_pick_message(pick_num: int, emoji: str, pick: dict) -> str:
         parts.append(f"'{pick['year'][-2:]}")
     if pick.get("price") is not None:
         parts.append(f"${pick['price']}")
+    if pick.get("lock"):
+        # Timer Bot's lock marker must be the trailing token in the message.
+        parts.append("lock")
     return " ".join(parts)
 
 
@@ -290,12 +303,19 @@ async def _lookup_emoji_from_lotto(user_id: int) -> str | None:
     return None
 
 
-async def _do_auto_pick(channel: discord.TextChannel, user: discord.User, pick_num: int):
+async def _do_auto_pick(channel: discord.TextChannel, user: discord.User, pick_num: int,
+                         extra_excluded: set[str] | None = None):
     async with _autopick_lock:
-        await _do_auto_pick_inner(channel, user, pick_num)
+        await _do_auto_pick_inner(channel, user, pick_num, extra_excluded or set())
 
 
-async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, pick_num: int):
+async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, pick_num: int,
+                               extra_excluded: set[str]):
+    """extra_excluded: player names (lowercase) to skip for THIS call only —
+    e.g. a player the user was just barred from repicking after being
+    blocked/stolen from (Timer Bot-side rule, not a global availability
+    fact, so it can't just go in _drafted_this_session — that would
+    incorrectly hide the player from every OTHER team's auto-pick too)."""
     global _last_autopick
     uid       = str(user.id)
     user_data = _data.get(uid, {})
@@ -349,19 +369,22 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
                 pass
             return
 
-    # Option 1: color-based check (PLAYERS_SHEET_NAME). Force-refresh every pick.
+    # Fetch BOTH sources every pick, independently — not one as a fallback for
+    # the other. The color sheet can silently miss a name ATD Sheet Bot's
+    # fuzzy matcher didn't recognize; the roster sheet (written directly by
+    # Team Sheet Bot) is what catches that. See _player_available().
     availability = {}
-    roster_names = None
+    roster_names = set()
     try:
         availability = _fetch_availability(force=True)
         log.info("AUTO-PICK | fetched %d player entries from PLAYERS sheet", len(availability))
     except Exception as e:
-        log.error("AUTO-PICK | PLAYERS sheet fetch failed — falling back to ROSTER sheet: %s", e)
-        try:
-            roster_names = _fetch_roster_names(force=True)
-            log.info("AUTO-PICK | fetched %d entries from ROSTER sheet (fallback)", len(roster_names))
-        except Exception as e2:
-            log.error("AUTO-PICK | ROSTER sheet fetch also failed: %s", e2)
+        log.error("AUTO-PICK | PLAYERS sheet fetch failed: %s", e)
+    try:
+        roster_names = _fetch_roster_names(force=True)
+        log.info("AUTO-PICK | fetched %d entries from ROSTER sheet", len(roster_names))
+    except Exception as e:
+        log.error("AUTO-PICK | ROSTER sheet fetch also failed: %s", e)
 
     # Walk list — find first available player
     chosen_idx  = None
@@ -370,7 +393,10 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
 
     for idx, pick in enumerate(picks):
         name_lower = pick["player"].lower()
-        if _player_available(pick["player"], availability, roster_names):
+        if name_lower in extra_excluded:
+            skipped.append(pick["player"])
+            log.info("AUTO-PICK | %s | '%s' barred for this repick — skipping", user.display_name, pick["player"])
+        elif _player_available(pick["player"], availability, roster_names):
             chosen_idx  = idx
             chosen_pick = pick
             break
@@ -449,6 +475,19 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 _PICK_NUM_RE = re.compile(r"Pick\s+(\d+)", re.IGNORECASE)
 
+# A steal/block declaration (e.g. "3. steal LeBron James $34") must not be
+# treated as a literal pick announcement by the real-time tracker below —
+# Timer Bot is the sole referee for these; this bot only reacts to its
+# SBL_BLOCK/SBL_VETO confirmations (see the on_message handler).
+_SBL_STEAL_INTENT_RE = re.compile(r'\b(steal|steals|stole|stolen|stealing)\b', re.IGNORECASE)
+_SBL_BLOCK_INTENT_RE = re.compile(r'\b(block|blocks|blocked|blocking)\b', re.IGNORECASE)
+
+
+def _has_sbl_intent(content: str) -> bool:
+    is_steal = bool(_SBL_STEAL_INTENT_RE.search(content))
+    is_block = bool(_SBL_BLOCK_INTENT_RE.search(content))
+    return is_steal != is_block
+
 
 @bot.event
 async def on_ready():
@@ -489,7 +528,7 @@ async def _backfill_drafted_session(channel: discord.TextChannel):
             for p in user_data.get("picks", [])
         }
         async for msg in channel.history(limit=500):
-            if re.match(r'^\d+\s*\.', msg.content.strip()):
+            if re.match(r'^\d+\s*\.', msg.content.strip()) and not _has_sbl_intent(msg.content):
                 content_lower = msg.content.lower()
                 for name in all_pick_names:
                     if name in content_lower and name not in _drafted_this_session:
@@ -506,19 +545,31 @@ async def on_message(message: discord.Message):
     global _last_autopick
 
     # ── Timer bot rejection — retry with next available pick ──────────────────
-    # Fires when the timer bot replies "already been taken — pick someone else."
+    # Fires on either rejection Timer Bot sends for an auto-posted pick:
+    #   "**Player** has already been taken ... pick someone else." (real dupe —
+    #     globally unavailable, safe to blacklist for everyone)
+    #   "**Player** was just blocked from you ... pick someone else." (SBL veto —
+    #     barred only for THIS specific team's repick, NOT a global fact, so it
+    #     must not go in _drafted_this_session or it'd wrongly hide the player
+    #     from every other team's auto-pick too)
     if (
         message.author.bot
         and message.channel.id == DRAFT_CHANNEL_ID
         and bot.user in message.mentions
-        and "has already been taken" in message.content
         and "pick someone else" in message.content.lower()
+        and ("has already been taken" in message.content or "was just blocked from you" in message.content)
         and _last_autopick
     ):
+        retry_excluded: set[str] = set()
         m = re.search(r'[—–-]\s*\*{0,2}(.+?)\*{0,2}\s+has already been taken', message.content)
         if m:
             _drafted_this_session.add(m.group(1).strip().lower())
             log.info("REJECTION | '%s' confirmed taken — retrying", m.group(1).strip())
+        else:
+            m = re.search(r'\*\*(.+?)\*\*\s+was just blocked from you', message.content)
+            if m:
+                retry_excluded.add(m.group(1).strip().lower())
+                log.info("REJECTION | '%s' barred for this repick — retrying (not globally excluded)", m.group(1).strip())
         retry_user     = _last_autopick["user"]
         retry_pick_num = _last_autopick["pick_num"]
         _last_autopick = None
@@ -527,7 +578,30 @@ async def on_message(message: discord.Message):
         existing = _clear_tasks.get(retry_uid)
         if existing and not existing.done():
             existing.cancel()
-        asyncio.create_task(_do_auto_pick(message.channel, retry_user, retry_pick_num))
+        asyncio.create_task(_do_auto_pick(message.channel, retry_user, retry_pick_num, retry_excluded))
+        return
+
+    # ── Timer bot SBL_BLOCK / SBL_VETO — player back in the pool ──────────────
+    # A blocked (or veto'd, i.e. an invalid repick that got undone) player
+    # becomes draftable again. _player_available() already re-checks the live
+    # sheet on every auto-pick, so this isn't needed for auto-pick correctness
+    # — it just keeps _drafted_this_session accurate for the real-time
+    # tracker's own cross-off/DM logic, so a later re-pick of this player
+    # isn't silently ignored as "already handled".
+    if (
+        message.author.bot
+        and message.channel.id == DRAFT_CHANNEL_ID
+        and (not TIMER_BOT_ID or message.author.id == TIMER_BOT_ID)
+        and ("SBL_BLOCK |" in message.content or "SBL_VETO |" in message.content)
+    ):
+        for line in message.content.splitlines():
+            line = line.strip()
+            if line.startswith("SBL_BLOCK |") or line.startswith("SBL_VETO |"):
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 2:
+                    freed = parts[1].strip().lower()
+                    _drafted_this_session.discard(freed)
+                    log.info("SBL FREED | '%s' available again", parts[1].strip())
         return
 
     # ── Timer bot ping detection (draft channel only) ─────────────────────────
@@ -564,6 +638,7 @@ async def on_message(message: discord.Message):
     if (
         message.channel.id == DRAFT_CHANNEL_ID
         and re.match(r'^\d+\s*\.', message.content.strip())
+        and not _has_sbl_intent(message.content)
     ):
         content_lower = message.content.lower()
         picker_name = message.author.display_name
@@ -1201,6 +1276,40 @@ async def cmd_removepick(ctx, position: int):
     await ctx.send(f"✅ Removed **#{position}**: {_format_pick(removed)}")
 
 
+@bot.command(name="lockpick")
+async def cmd_lockpick(ctx, position: int):
+    """!lockpick 3 — toggle the lock flag on pick #3. If that player is the one
+    auto-picked for you, the pick is posted with Timer Bot's lock marker
+    attached, spending your lock charge (each GM only gets 1 for the draft —
+    Timer Bot rejects the lock, not the pick, if you're out)."""
+    if not _dm_only(ctx):
+        await ctx.send("Please DM this command to me directly.")
+        return
+
+    uid   = str(ctx.author.id)
+    picks = _data.get(uid, {}).get("picks", [])
+
+    if not picks:
+        await ctx.send("Your pick list is empty.")
+        return
+    if position < 1 or position > len(picks):
+        await ctx.send(f"Invalid position. You have {len(picks)} picks (1–{len(picks)}).")
+        return
+
+    pick = picks[position - 1]
+    pick["lock"] = not pick.get("lock", False)
+    _data[uid]["picks"] = picks
+    _save_data(_data)
+
+    if pick["lock"]:
+        await ctx.send(
+            f"🔒 **#{position}: {pick['player']}** will be locked in if drafted for you. "
+            f"Remember — you only get 1 lock for the whole draft."
+        )
+    else:
+        await ctx.send(f"🔓 **#{position}: {pick['player']}** un-flagged — will draft normally.")
+
+
 @bot.command(name="mylist")
 async def cmd_mylist(ctx):
     """!mylist — view your current pick list."""
@@ -1239,6 +1348,46 @@ async def cmd_mylist(ctx):
         embed.add_field(name="Pick List", value=preview, inline=False)
 
     await ctx.send(embed=embed)
+
+
+@bot.command(name="steal")
+async def cmd_steal(ctx, *, text: str):
+    """!steal Player Name [lock] — relay a steal attempt into the draft
+    channel on your behalf, as if you'd typed it there yourself. Timer Bot
+    validates everything (your turn, charges remaining, eligibility) exactly
+    the same way — this just saves you from needing to be in the channel.
+    Add "lock" at the end to also lock the stolen player in."""
+    if not _dm_only(ctx):
+        await ctx.send("Please DM this command to me directly.")
+        return
+
+    channel = bot.get_channel(DRAFT_CHANNEL_ID)
+    if not channel:
+        await ctx.send("❌ Couldn't find the draft channel — contact the commissioner.")
+        return
+
+    relayed = text.strip()
+    await channel.send(f"{ctx.author.mention} steal {relayed}")
+    await ctx.send(f"📨 Relayed **steal {relayed}** to the draft channel — check there for Timer Bot's response.")
+
+
+@bot.command(name="block")
+async def cmd_block(ctx, *, text: str):
+    """!block Player Name — relay a block attempt into the draft channel on
+    your behalf. Not turn-gated — works anytime a target is eligible, same
+    as typing it live."""
+    if not _dm_only(ctx):
+        await ctx.send("Please DM this command to me directly.")
+        return
+
+    channel = bot.get_channel(DRAFT_CHANNEL_ID)
+    if not channel:
+        await ctx.send("❌ Couldn't find the draft channel — contact the commissioner.")
+        return
+
+    relayed = text.strip()
+    await channel.send(f"{ctx.author.mention} block {relayed}")
+    await ctx.send(f"📨 Relayed **block {relayed}** to the draft channel — check there for Timer Bot's response.")
 
 
 @bot.command(name="wipelists")
@@ -1346,6 +1495,7 @@ async def cmd_help(ctx):
             "`!addpick Player Name ['year] [$price]` — append one pick\n"
             "`!insertpick 1 Player Name` — insert at a specific position\n"
             "`!removepick 3` — remove pick at position 3\n"
+            "`!lockpick 3` — flag/unflag pick #3 to be locked in if it's drafted for you\n"
             "`!clearpicks` — clear everything"
         ),
         inline=False,
@@ -1356,6 +1506,16 @@ async def cmd_help(ctx):
             "`!mylist` — view your current list\n"
             "`!pause` — stop auto-drafting (if you come online)\n"
             "`!resume` — turn auto-drafting back on"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="4️⃣  Steal / Block (only if the draft has SBL enabled)",
+        value=(
+            "`!steal Player Name` — relay a steal attempt on your turn\n"
+            "`!block Player Name` — relay a block attempt, anytime\n"
+            "Both post into the draft channel exactly as if you'd typed them there — "
+            "Timer Bot validates and responds the same way either way."
         ),
         inline=False,
     )

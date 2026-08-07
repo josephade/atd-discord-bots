@@ -69,15 +69,32 @@ class DraftState:
         self.draft_label:        str | None = None  # e.g. "ATD 101"
         self.draft_started:      str | None = None  # ISO-8601 UTC when !timerstart ran
         self.last_skip:          dict | None = None # undo state
-        self.mode:               str = "snake"      # "snake" | "roundless"
+        self.mode:               str = "snake"      # "snake" | "roundless" | "snake+sbl" | "roundless+sbl"
         self.timer_override:     int | None = None  # override all round timers (seconds); None = use config
         self.next_team_override: int | None = None  # force a specific team idx to be current for one pick
+        self.budget_max:         int | None = None  # per-team total spending cap; None = no cap enforced
+
+        # ── Steal / Block / Lock (SBL) state ────────────────────────────────
+        self.total_picks_made:   int = 0            # monotonic counter; drives overall_pick when sbl_enabled
+        self.pick_records:       dict = {}          # str(pick_number) -> record, see draft.py docstring below
+        self.repick_queue:       list[tuple[int, int]] = []  # (team_idx, reopened_pick_num) owed an emergency repick, FIFO — front is current when sbl_enabled
+        self.next_timer_override_secs: int | None = None  # force the next _start_timer duration (e.g. restoring a blocked GM's remaining time instead of a fresh clock); consumed once
 
     # ── Convenience properties ────────────────────────────────────────────────
 
     @property
     def num_teams(self) -> int:
         return len(self.teams)
+
+    @property
+    def order_mode(self) -> str:
+        """Underlying pick-order algorithm, independent of the SBL ruleset: 'snake' | 'roundless'."""
+        return self.mode.split("+")[0]
+
+    @property
+    def sbl_enabled(self) -> bool:
+        """Whether the Steal/Block/Lock ruleset is layered on top of the order mode."""
+        return self.mode.endswith("+sbl")
 
     PICKS_TO_COMPLETE = 10  # teams with this many picks are done and excluded from the queue
 
@@ -110,7 +127,9 @@ class DraftState:
     def current_team_idx(self) -> int | None:
         if self.next_team_override is not None:
             return self.next_team_override
-        if self.mode == "roundless":
+        if self.sbl_enabled and self.repick_queue:
+            return self.repick_queue[0][0]
+        if self.order_mode == "roundless":
             order = self._roundless_sorted_order()
             return order[0] if order else None
         if (not self.pick_order
@@ -126,7 +145,11 @@ class DraftState:
 
     @property
     def overall_pick(self) -> int:
-        if self.mode == "roundless":
+        if self.sbl_enabled:
+            if self.repick_queue:
+                return self.repick_queue[0][1]  # reopened original pick number
+            return self.total_picks_made + 1
+        if self.order_mode == "roundless":
             return self.current_round + 1   # current_round doubles as pick counter
         return self.current_round * self.num_teams + self.current_in_round + 1
 
@@ -140,19 +163,38 @@ class DraftState:
 
     # ── Mutation ──────────────────────────────────────────────────────────────
 
-    def advance(self):
-        """Move to the next pick.  In roundless mode, just increments the counter."""
+    def advance(self, served_from_queue: bool = False):
+        """Move to the next pick.  In roundless mode, just increments the counter.
+
+        served_from_queue: True if the pick that just happened was served from
+        repick_queue (an SBL emergency repick reusing the original voided
+        pick's number) rather than the normal order. Callers must determine
+        this themselves, by checking whether repick_queue[0] matched the
+        picking team *before* they made any other repick_queue changes of
+        their own (e.g. queuing a fresh victim) — by the time advance() runs,
+        repick_queue may already contain unrelated entries added as part of
+        this same action, so it can't be inferred here. Repicks reuse a pick
+        number rather than consuming a new one, so total_picks_made and
+        current_round/current_in_round are left untouched — nobody who was
+        already waiting their turn loses or gains a slot, and the next fresh
+        pick continues exactly where the numbering left off.
+        """
         self.next_team_override = None  # always clear after a pick is made
-        if self.mode == "roundless":
-            self.current_round += 1
-            return
-        # Snake mode
-        self.current_in_round += 1
-        if self.current_in_round >= self.num_teams:
-            self.current_in_round = 0
-            self.current_round += 1
-        if self.current_round >= ROUNDS:
-            self.state = "complete"
+
+        if served_from_queue:
+            if self.repick_queue:
+                self.repick_queue.pop(0)
+        else:
+            self.total_picks_made += 1
+            if self.order_mode == "roundless":
+                self.current_round += 1
+            else:
+                self.current_in_round += 1
+                if self.current_in_round >= self.num_teams:
+                    self.current_in_round = 0
+                    self.current_round += 1
+                if self.current_round >= ROUNDS:
+                    self.state = "complete"
 
     def apply_penalty(self, team_idx: int):
         """Register a LeBron/MJ team and rebuild pick order from round 6 onward."""
@@ -162,11 +204,13 @@ class DraftState:
 
     def effective_timer(self, round_num: int, team_idx: int) -> int:
         """Base timer for this pick minus accumulated skip penalties (min 0).
-        Skip penalties are not applied when timer_override is set (fixed timer mode)."""
+        Applies even when timer_override (fixed timer mode) is set — a fixed
+        base duration doesn't mean skips go unpenalized, just that the base
+        itself is a flat value instead of round/mode-dependent."""
         from config import SKIP_PENALTY
         if self.timer_override is not None:
-            return self.timer_override  # fixed timer — no skip deductions
-        if self.mode == "roundless":
+            base = self.timer_override
+        elif self.order_mode == "roundless":
             from config import ROUNDLESS_TIMER
             base = ROUNDLESS_TIMER
         else:
@@ -179,6 +223,58 @@ class DraftState:
         """Returns True if this team has hit the AS threshold and should be skipped instantly."""
         from config import AS_THRESHOLD
         return self.teams[team_idx].get("skip_count", 0) >= AS_THRESHOLD
+
+    # ── Steal / Block / Lock ──────────────────────────────────────────────────
+    #
+    # pick_records maps str(pick_number) -> {
+    #     "player_name": str,        # display name
+    #     "name_key":     str,       # normalized key for matching
+    #     "team_idx":     int,       # CURRENT owner
+    #     "locked":       bool,      # GM spent a lock charge on this pick — permanently immune
+    #     "protected":    bool,      # this is a repick made after being hit once — permanently immune
+    #     "is_steal_result": bool,   # current owner obtained this via a steal (for refund-on-block)
+    #     "stolen_from_team_idx": int | None,  # who it was stolen from (lets them block-reclaim it)
+    #     "price":        int | None,
+    # }
+    #
+    # Note: a pick that gets stolen (not blocked) is NOT itself immune afterward —
+    # it can be re-stolen or blocked later (see rule: "if your steal is stolen you
+    # do not get it back"). Only a *repick made after being hit* is permanently safe.
+
+    def sbl_window(self, pick_number: int) -> int:
+        """A 'round' for steal/block eligibility = one pick per team, same as a
+        real draft round — everyone has picked once before the window closes.
+        This applies even in roundless mode, independent of the dynamic order."""
+        teams = self.num_teams or 1
+        return (pick_number - 1) // teams
+
+    def sbl_eligible(self, pick_number: int) -> bool:
+        """Whether a pick is still within the active steal/block window."""
+        return self.sbl_window(pick_number) == self.sbl_window(self.overall_pick)
+
+    def register_pick_record(self, pick_number: int, player_name: str, name_key: str,
+                              team_idx: int, price: int | None = None, protected: bool = False,
+                              remaining_at_pick: int | None = None):
+        self.pick_records[str(pick_number)] = {
+            "player_name": player_name,
+            "name_key": name_key,
+            "team_idx": team_idx,
+            "locked": False,
+            "protected": protected,
+            "is_steal_result": False,
+            "stolen_from_team_idx": None,  # set on the record if it's later stolen
+            "price": price,
+            "remaining_at_pick": remaining_at_pick,  # seconds left on their clock when they made this pick — restored (not a fresh timer) if this pick later gets blocked
+        }
+
+    def queue_repick(self, team_idx: int, reopened_pick_num: int):
+        """Queue team_idx for an emergency repick that reuses reopened_pick_num
+        (the number of the pick that just got blocked/stolen). Inserted at the
+        FRONT, not appended — the most recently-created obligation takes
+        priority and gets pinged immediately, ahead of whatever was already
+        queued (e.g. a block that reverses a steal shouldn't sit behind the
+        stealer's own still-pending original pick)."""
+        self.repick_queue.insert(0, (team_idx, reopened_pick_num))
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -199,6 +295,11 @@ class DraftState:
                 "mode":             self.mode,
                 "timer_override":     self.timer_override,
                 "next_team_override": self.next_team_override,
+                "budget_max":         self.budget_max,
+                "total_picks_made":  self.total_picks_made,
+                "pick_records":      self.pick_records,
+                "repick_queue":      self.repick_queue,
+                "next_timer_override_secs": self.next_timer_override_secs,
             }, f, indent=2)
 
     @classmethod
@@ -223,4 +324,9 @@ class DraftState:
         ds.mode             = d.get("mode", "snake")
         ds.timer_override     = d.get("timer_override")
         ds.next_team_override = d.get("next_team_override")
+        ds.budget_max         = d.get("budget_max")
+        ds.total_picks_made   = d.get("total_picks_made", 0)
+        ds.pick_records       = d.get("pick_records", {})
+        ds.repick_queue       = [tuple(x) for x in d.get("repick_queue", [])]
+        ds.next_timer_override_secs = d.get("next_timer_override_secs")
         return ds

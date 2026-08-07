@@ -5,9 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py config.py draft.py adp.py ./
-
-# Draft state persisted to a Fly volume mounted at /data
-ENV STATE_DIR=/data
+COPY bot.py config.py ./
 
 CMD ["python", "bot.py"]

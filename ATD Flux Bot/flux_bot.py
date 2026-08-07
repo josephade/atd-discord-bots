@@ -10,6 +10,7 @@ from discord.ext import commands
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
+from rapidfuzz import fuzz, process
 
 creds_b64 = os.environ["GOOGLE_CREDENTIALS_B64"]
 creds_json = base64.b64decode(creds_b64).decode("utf-8")
@@ -380,6 +381,154 @@ async def flux(ctx, vol: int):
 
 
 @bot.command()
+async def fluxplayers(ctx, vol: int, rounds: int, *, players_raw: str):
+    """!fluxplayers <vol> <rounds> Player One, Player Two, ...
+    Runs <rounds> new rounds of flux, but only the listed players actually
+    move — everyone else's price is carried forward unchanged for those
+    same rounds, so the sheet stays column-aligned with a normal !flux."""
+    user = ctx.author
+    log.info(f"FluxPlayers attempt | user={user} | vol={vol} | rounds={rounds} | channel={ctx.channel.id}")
+
+    if not isinstance(user, discord.Member) or not has_commish_role(user):
+        log.warning(f"FluxPlayers denied (not commish) | user={user}")
+        await ctx.send(
+            "Unfortunately, you are not a commish. "
+            "Ping a commish to assist you in fluxing"
+        )
+        return
+
+    if vol not in (3, 4, 5):
+        await ctx.send("❌ Flux must be 3, 4, or 5. If you would like a different flux, please contact the developer.")
+        return
+
+    if rounds < 1:
+        await ctx.send("❌ Rounds must be at least 1.")
+        return
+
+    result = get_ws(ctx.channel.id)
+    if not result:
+        await ctx.send("❌ This channel is not linked to a sheet. Use `!fluxtrack` to set one up.")
+        return
+    sh, ws = result
+
+    requested = [p.strip() for p in players_raw.split(",") if p.strip()]
+    if not requested:
+        await ctx.send(
+            "❌ List at least one player, comma-separated.\n"
+            "Usage: `!fluxplayers <vol> <rounds> Player One, Player Two`"
+        )
+        return
+
+    rows = ws.get_all_values()
+    header = rows[0]
+    row_count = len(rows)
+
+    if "Player" not in header:
+        await ctx.send("❌ Couldn't find a **Player** column in this sheet.")
+        return
+    player_col = header.index("Player")
+    value_col = col_letter_by_name(header, "Value")
+
+    # Match requested names against the sheet: exact (case-insensitive)
+    # first, then fuzzy, so a small typo doesn't just silently no-op.
+    sheet_names = [
+        rows[i][player_col].strip() if len(rows[i]) > player_col else ""
+        for i in range(1, row_count)
+    ]
+    by_lower = {n.lower(): i for i, n in enumerate(sheet_names) if n}
+
+    selected_rows = set()   # 0-indexed into sheet_names / rows[1:]
+    not_found = []
+    for name in requested:
+        idx = by_lower.get(name.lower())
+        if idx is None:
+            match = process.extractOne(name, sheet_names, scorer=fuzz.token_sort_ratio)
+            if match and match[1] >= 85:
+                idx = sheet_names.index(match[0])
+            else:
+                not_found.append(name)
+                continue
+        selected_rows.add(idx)
+
+    if not selected_rows:
+        await ctx.send(f"❌ None of those players were found in the **Player** column: {', '.join(requested)}")
+        return
+
+    existing = get_existing_rounds(header)
+    next_round = 2 if not existing else max(existing) + 1
+
+    if next_round + rounds - 1 > 11:
+        await ctx.send(f"❌ Rounds {next_round}–{next_round + rounds - 1} would pass the max round (11).")
+        return
+
+    matched_names = ", ".join(sorted(sheet_names[i] for i in selected_rows))
+    await ctx.send(
+        f"⏳ **Flux in progress** — rounds {next_round}–{next_round + rounds - 1} for "
+        f"**{len(selected_rows)}** player(s): {matched_names}…"
+    )
+
+    start_col = ws.col_count + 1
+    ensure_columns(ws, start_col + rounds - 1)
+
+    prev_letter = value_col  # what Round 2 (the first new round) moves off of
+    for r_offset in range(rounds):
+        this_round = next_round + r_offset
+        new_col = start_col + r_offset
+        ws.update_cell(1, new_col, f"Round {this_round}")
+        new_letter = rowcol_to_a1(1, new_col)[0]
+
+        if this_round == 2:
+            flux_formula = ROUND_2_TEMPLATE.format(VOL=vol, VAL=value_col)
+            passthrough = f'=INDIRECT("{value_col}"&ROW())'
+        else:
+            flux_formula = ROUND_3_PLUS_TEMPLATE.format(VOL=vol, VAL=value_col, PREV=prev_letter)
+            passthrough = f'=INDIRECT("{prev_letter}"&ROW())'
+
+        cell_values = [
+            [flux_formula if (i - 1) in selected_rows else passthrough]
+            for i in range(1, row_count)
+        ]
+        ws.update(
+            f"{new_letter}2:{new_letter}{row_count}",
+            cell_values,
+            value_input_option="USER_ENTERED",
+        )
+
+        ws.spreadsheet.batch_update({
+            "requests": [{
+                "copyPaste": {
+                    "source": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": row_count,
+                        "startColumnIndex": new_col - 1,
+                        "endColumnIndex": new_col,
+                    },
+                    "destination": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": row_count,
+                        "startColumnIndex": new_col - 1,
+                        "endColumnIndex": new_col,
+                    },
+                    "pasteType": "PASTE_VALUES",
+                }
+            }]
+        })
+
+        log.info(f"FluxPlayers round {this_round} done | vol={vol} | players={len(selected_rows)} | user={user}")
+        prev_letter = new_letter
+
+    msg = (
+        f"✅ **Flux complete** — rounds {next_round}–{next_round + rounds - 1} generated for "
+        f"**{len(selected_rows)}** player(s) (±{vol}); everyone else held steady."
+    )
+    if not_found:
+        msg += f"\n⚠️ Not found in sheet: {', '.join(not_found)}"
+    await ctx.send(msg)
+
+
+@bot.command()
 async def undoflux(ctx):
     user = ctx.author
     log.info(f"UndoFlux attempt | user={user}")
@@ -458,6 +607,9 @@ async def fluxhelp(ctx):
             "`!flux 3` – Generate next round with ±3 volatility\n"
             "`!flux 4` – Generate next round with ±4 volatility\n"
             "`!flux 5` – Generate next round with ±5 volatility\n"
+            "`!fluxplayers <vol> <rounds> Player One, Player Two` – Flux only "
+            "the listed players for <rounds> rounds (±vol); everyone else's "
+            "price is held steady for those same rounds\n"
             "`!undoflux` – Undo the most recent round\n"
             "`!fluxhelp` – Show this help message"
         ),

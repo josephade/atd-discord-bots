@@ -23,6 +23,11 @@ TEAM_BUDGET = int(os.getenv('TEAM_BUDGET', '100'))
 # Set: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-team-sheet-bot
 DRAFT_LIST_BOT_ID = int(os.getenv('DRAFT_LIST_BOT_ID', 0)) or None
 
+# User ID of the ATD Timer Bot — its Steal/Block/Lock confirmation messages
+# (lines starting with "SBL_STEAL |" / "SBL_BLOCK |") are trusted and acted on.
+# Set: fly secrets set TIMER_BOT_ID=<id> --app atd-team-sheet-bot
+TIMER_BOT_ID = int(os.getenv('TIMER_BOT_ID', 0)) or None
+
 # If the service account JSON is provided as an env var (e.g. on Fly.io),
 # write it to a temp file so oauth2client can read it normally.
 _sa_json_env = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')

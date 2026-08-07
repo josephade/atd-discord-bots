@@ -7,9 +7,13 @@ import asyncio
 import time
 import json
 import os
+import io
 from datetime import datetime
+import requests
 import requests.exceptions
-from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID, TEAM_BUDGET
+import fitz  # PyMuPDF — rasterizes the sheet's own PDF export for !matchup
+from PIL import Image, ImageChops
+from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID, TEAM_BUDGET, TIMER_BOT_ID
 from player_positions import PLAYER_POSITIONS
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
 
@@ -138,6 +142,24 @@ def _remove_channel_sheet(channel_id: int):
     _channel_sheet_map.pop(channel_id, None)
     _channel_managers.pop(channel_id, None)
     _persist_channel_map()
+
+
+# Per-team dollar budget shown on !roster, applies across every channel this
+# bot manages. Overridable at runtime via !setbudget; falls back to the
+# TEAM_BUDGET config default until set.
+_budget_override: int | None = _config.get("budget")
+
+
+def _get_budget() -> int:
+    return _budget_override if _budget_override is not None else TEAM_BUDGET
+
+
+def _set_budget(amount: int):
+    global _budget_override
+    _budget_override = amount
+    cfg = _load_config()
+    cfg["budget"] = amount
+    _save_config(cfg)
 
 
 def _get_manager(channel_id: int) -> "SheetManager | None":
@@ -464,7 +486,7 @@ class SheetManager:
         if price:
             # Strip "$" and write as a number so SUM formulas work in Sheets
             try:
-                price_num = int(float(re.sub(r'[^\d.]', '', price)))
+                price_num = int(float(re.sub(r'[^\d.-]', '', price)))
             except (ValueError, TypeError):
                 price_num = price
             updates.append({
@@ -492,6 +514,62 @@ class SheetManager:
         return True, (
             f"**{player_name}** ({used_position} — {slot_label}) added to "
             f"**{team_name}** (row {target_row})"
+        )
+
+    def _find_player_cell(self, player_name, all_data):
+        """Scan all_data for player_name (exact then partial), return (row, col)
+        1-indexed, or (None, None). col is the player-name column."""
+        name_lower = player_name.lower().strip()
+        for row_idx, row in enumerate(all_data):
+            for col_idx, cell in enumerate(row):
+                if cell.strip().lower() == name_lower:
+                    return row_idx + 1, col_idx + 1
+        for row_idx, row in enumerate(all_data):
+            for col_idx, cell in enumerate(row):
+                if name_lower in cell.strip().lower():
+                    return row_idx + 1, col_idx + 1
+        return None, None
+
+    def remove_player(self, player_name):
+        """SBL block: clear a player's name/year/price cells wherever they currently sit."""
+        all_data = self._call('get_all_values')
+        row, col = self._find_player_cell(player_name, all_data)
+        if not row:
+            return False, f"**{player_name}** was not found on any roster."
+
+        updates = [
+            {'range': gspread.utils.rowcol_to_a1(row, col), 'values': [['']]},
+            {'range': gspread.utils.rowcol_to_a1(row, col + 1), 'values': [['']]},
+            {'range': gspread.utils.rowcol_to_a1(row, col + 2), 'values': [['']]},
+        ]
+        self._call('batch_update', updates)
+        print(f"[SBL] Removed {player_name} (row {row})")
+        return True, None
+
+    def steal_player(self, player_name, new_team_name):
+        """SBL steal: move a player's row to an open slot on new_team_name, keeping year/price."""
+        all_data = self._call('get_all_values')
+        row, col = self._find_player_cell(player_name, all_data)
+        if not row:
+            return False, f"**{player_name}** was not found on any roster."
+
+        row_data  = all_data[row - 1]
+        col_idx   = col - 1  # 0-indexed name column
+        year_cell  = row_data[col_idx + 1] if (col_idx + 1) < len(row_data) else ""
+        price_cell = row_data[col_idx + 2] if (col_idx + 2) < len(row_data) else ""
+
+        updates = [
+            {'range': gspread.utils.rowcol_to_a1(row, col), 'values': [['']]},
+            {'range': gspread.utils.rowcol_to_a1(row, col + 1), 'values': [['']]},
+            {'range': gspread.utils.rowcol_to_a1(row, col + 2), 'values': [['']]},
+        ]
+        self._call('batch_update', updates)
+        print(f"[SBL] Stole {player_name} — clearing old slot (row {row}) before re-adding to {new_team_name}")
+
+        return self.add_player(
+            new_team_name, player_name,
+            year=year_cell.strip() or None,
+            price=price_cell.strip() or None,
         )
 
     def get_roster(self, team_name):
@@ -536,6 +614,53 @@ class SheetManager:
             })
 
         return team_name, roster
+
+    def find_team_position(self, team_name):
+        """Public wrapper around _find_team_cell for callers (like !matchup)
+        that need the team's (row, col) without re-reading the whole roster."""
+        return self._find_team_cell(team_name)
+
+    def get_matchup_range(self, team_row: int, col_idx_1based: int):
+        """Return (spreadsheet_id, gid, a1_range) covering a team's header row
+        + 10 roster rows across its name/year (+price, if used) columns —
+        used by !matchup to export a real image of exactly this block of the
+        sheet.
+
+        Different tabs lay teams out differently: some have a blank spacer
+        column between teams, some have a price column, some have neither and
+        butt team blocks directly against each other. So the end column is
+        computed two ways at once:
+          1. Stop *before* any column whose header cell is itself a known
+             team name — otherwise we'd swallow the next team's block whole
+             (happens on tabs with zero gap between teams).
+          2. Never include a column that's entirely blank — Sheets' PDF
+             export doesn't clip cleanly there, it bleeds into whatever comes
+             after it instead of stopping (happens on tabs with a blank
+             spacer column between teams)."""
+        header_row = self._call('row_values', team_row)
+        known_teams = {v.strip().lower() for v in EMOJI_TEAM_MAP.values()}
+
+        def _cell(col):
+            return header_row[col - 1].strip() if 0 < col <= len(header_row) else ''
+
+        last_col = col_idx_1based + 1  # name + year always included
+        for c in range(col_idx_1based + 2, col_idx_1based + 6):
+            val = _cell(c)
+            if not val:
+                break
+            # Every team block is immediately followed by a "Year" column —
+            # a far more reliable next-team signal than matching this cell's
+            # text against the static EMOJI_TEAM_MAP name list, which doesn't
+            # cover every spelling/label used across 100+ draft tabs. If the
+            # NEXT cell reads "Year", this cell is almost certainly the next
+            # team's name column, not something that belongs to this block.
+            if val.lower() in known_teams or _cell(c + 1).lower() == 'year':
+                break
+            last_col = c
+
+        start_a1 = gspread.utils.rowcol_to_a1(team_row, col_idx_1based)
+        end_a1   = gspread.utils.rowcol_to_a1(team_row + 10, last_col)
+        return self._spreadsheet_id, self.ws.id, f"{start_a1}:{end_a1}"
 
     def undo_last(self):
         """
@@ -806,8 +931,101 @@ async def on_ready():
         print(f"📋 {ch_name} → '{entry['tab']}' (sheet: {entry['sheet_id']}) — will connect on first use")
 
 
+# A pick message carrying steal/block intent (e.g. "7. steals Stephen Curry")
+# must NOT be parsed as a literal pick of a player named "Steals Stephen
+# Curry" — Timer Bot handles these and broadcasts a clean SBL_STEAL/SBL_BLOCK
+# confirmation that _handle_sbl_confirmation() reacts to instead.
+_SBL_STEAL_INTENT_RE = re.compile(r'\b(steal|steals|stole|stolen|stealing)\b', re.IGNORECASE)
+_SBL_BLOCK_INTENT_RE = re.compile(r'\b(block|blocks|blocked|blocking)\b', re.IGNORECASE)
+
+
+def _has_sbl_intent(content: str) -> bool:
+    is_steal = bool(_SBL_STEAL_INTENT_RE.search(content))
+    is_block = bool(_SBL_BLOCK_INTENT_RE.search(content))
+    return is_steal != is_block
+
+
+def _resolve_team_from_emoji(emoji_text: str) -> str | None:
+    """Mirror parse_message()'s emoji → sheet-team-name resolution. Timer Bot
+    has no concept of the sheet's team names (or emoji_map.py at all) — it
+    only tracks GMs by Discord name — so SBL confirmations forward the raw
+    team emoji instead, and it's resolved here the same way a normal pick is."""
+    if not emoji_text:
+        return None
+    emoji_match = _CUSTOM_EMOJI_RE.search(emoji_text)
+    if emoji_match:
+        return EMOJI_TEAM_MAP.get(emoji_match.group(1))
+    for char, team_name in UNICODE_EMOJI_MAP.items():
+        if char in emoji_text:
+            return team_name
+    return None
+
+
+async def _handle_sbl_confirmation(message):
+    """React to ATD Timer Bot's Steal/Block/Lock confirmation messages.
+    Lines look like:
+      SBL_STEAL | <player> | <from_team_emoji> | <to_team_emoji> | <price>
+      SBL_BLOCK | <player> | <team_emoji>
+    """
+    manager = await _get_manager_async(message.channel.id)
+    if not manager:
+        return
+
+    for line in message.content.splitlines():
+        line = line.strip()
+        if line.startswith("SBL_STEAL |"):
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 4:
+                continue
+            _, player, _from_emoji, to_emoji = parts[0], parts[1], parts[2], parts[3]
+            to_team = _resolve_team_from_emoji(to_emoji)
+            if not to_team:
+                print(f"[SBL] ❌ Steal failed: couldn't resolve destination team from emoji '{to_emoji}'")
+                await message.channel.send(
+                    f"⚠️ SBL steal sheet update failed: couldn't resolve a team from **{to_emoji}**. "
+                    f"Check `emoji_map.py`."
+                )
+                continue
+            loop = asyncio.get_event_loop()
+            success, result = await loop.run_in_executor(None, manager.steal_player, player, to_team)
+            if success:
+                print(f"[SBL] ✅ Steal applied: {player} -> {to_team}")
+            else:
+                print(f"[SBL] ❌ Steal failed: {result}")
+                await message.channel.send(f"⚠️ SBL steal sheet update failed: {result}")
+
+        elif line.startswith("SBL_BLOCK |") or line.startswith("SBL_VETO |"):
+            # SBL_VETO: Timer Bot rejected a pick (e.g. repicking the player
+            # you were just blocked on) that this bot already added, since it
+            # parses the raw message independently and has no visibility into
+            # Timer Bot's rules. Undo it the same way a block removes a player.
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 2:
+                continue
+            player = parts[1]
+            loop = asyncio.get_event_loop()
+            success, result = await loop.run_in_executor(None, manager.remove_player, player)
+            tag = "Block" if line.startswith("SBL_BLOCK") else "Veto"
+            if success:
+                print(f"[SBL] ✅ {tag} applied: {player} removed")
+            elif tag == "Veto" and result and "was not found" in result:
+                # Nothing to undo — this bot never added the player in the
+                # first place, so the veto is a benign no-op here.
+                print(f"[SBL] ℹ️ Veto no-op: {player} was never on a roster")
+            else:
+                print(f"[SBL] ❌ {tag} failed: {result}")
+                await message.channel.send(f"⚠️ SBL {tag.lower()} sheet update failed: {result}")
+
+
 @bot.event
 async def on_message(message):
+    # Timer Bot's Steal/Block/Lock confirmations drive sheet updates directly —
+    # handled separately from the normal bot-message filter below.
+    if TIMER_BOT_ID and message.author.id == TIMER_BOT_ID:
+        if any(tag in message.content for tag in ("SBL_STEAL |", "SBL_BLOCK |", "SBL_VETO |")):
+            await _handle_sbl_confirmation(message)
+        return
+
     # Let the Draft List Bot's picks through; ignore all other bot messages.
     _from_draft_list = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
     if message.author.bot and not _from_draft_list:
@@ -821,6 +1039,11 @@ async def on_message(message):
     # Only handle pick messages in channels that have a sheet mapping
     manager = await _get_manager_async(message.channel.id)
     if not manager:
+        return
+
+    # Steal/block declarations (however they're phrased) are Timer Bot's to
+    # referee — don't record them as a literal pick here.
+    if _has_sbl_intent(message.content):
         return
 
     print(f"\n[Msg] #{message.channel.name} | {message.author.display_name}: {message.content[:120]}")
@@ -946,6 +1169,36 @@ async def cmd_setsheet(ctx, *, args: str):
         await ctx.send(f"❌ Failed to switch sheet: {e}")
 
 
+@bot.command(name='setsheetall')
+async def cmd_setsheetall(ctx, *, args: str):
+    """Map EVERY currently-mapped channel (plus this one) to a worksheet tab
+    at once. Usage: !setsheetall [SpreadsheetID_or_URL] Tab Name"""
+    sid, tab = _extract_spreadsheet_id(args)
+    sid = sid or SPREADSHEET_ID
+    if not tab:
+        await ctx.send("❌ Please provide a tab name. Usage: `!setsheetall [SpreadsheetID] Tab Name`")
+        return
+
+    channel_ids = set(_channel_sheet_map.keys())
+    channel_ids.add(ctx.channel.id)
+
+    try:
+        loop = asyncio.get_event_loop()
+        ws = await loop.run_in_executor(None, connect_sheets, tab, sid)
+    except gspread.exceptions.WorksheetNotFound:
+        await ctx.send(f"❌ No worksheet tab named **{tab}** found. Check the spelling.")
+        return
+    except Exception as e:
+        await ctx.send(f"❌ Failed to switch sheet: {e}")
+        return
+
+    for ch_id in channel_ids:
+        _set_channel_sheet(ch_id, tab, sid)
+        _channel_managers[ch_id] = SheetManager(ws, sid, ch_id)
+
+    await ctx.send(f"✅ **{len(channel_ids)} channel(s)** now write to worksheet **{tab}**.")
+
+
 @bot.command(name='addchannel')
 async def cmd_addchannel(ctx, channel: discord.TextChannel, *, args: str):
     """Map a channel to a worksheet tab. Usage: !addchannel #channel [SpreadsheetID_or_URL] Tab Name"""
@@ -976,6 +1229,16 @@ async def cmd_removechannel(ctx, channel: discord.TextChannel):
     await ctx.send(f"✅ Removed mapping for **#{channel.name}**. The bot will no longer process picks there.")
 
 
+@bot.command(name='setbudget')
+async def cmd_setbudget(ctx, amount: int):
+    """Set the per-team budget shown on !roster, across every channel. Usage: !setbudget <amount>"""
+    if amount <= 0:
+        await ctx.send("❌ Budget must be a positive number.")
+        return
+    _set_budget(amount)
+    await ctx.send(f"✅ Budget set to **${amount}** across all channels.")
+
+
 @bot.command(name='channels')
 async def cmd_channels(ctx):
     """List all channel→sheet mappings."""
@@ -994,6 +1257,7 @@ async def cmd_channels(ctx):
         description="\n".join(lines),
         color=discord.Color.blue(),
     )
+    embed.set_footer(text=f"Per-team budget: ${_get_budget()}")
     await ctx.send(embed=embed)
 
 
@@ -2094,13 +2358,14 @@ async def cmd_roster(ctx, *, team_input: str):
         if not e["player"] or not e["price"]:
             continue
         try:
-            spent += int(float(re.sub(r'[^\d.]', '', e["price"])))
+            spent += int(float(re.sub(r'[^\d.-]', '', e["price"])))
         except (ValueError, TypeError):
             pass
-    remaining = TEAM_BUDGET - spent
+    team_budget = _get_budget()
+    remaining   = team_budget - spent
 
     embed = discord.Embed(title=f"{title_prefix} {result_name}", description=gm_line, color=color)
-    embed.add_field(name="💰 Budget", value=f"${remaining} remaining (${spent}/${TEAM_BUDGET} spent)", inline=False)
+    embed.add_field(name="💰 Budget", value=f"${remaining} remaining (${spent}/${team_budget} spent)", inline=False)
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
 
@@ -2123,6 +2388,184 @@ async def cmd_roster(ctx, *, team_input: str):
     footer_icon = "✅" if filled == 10 else "🔄"
     embed.set_footer(text=f"{footer_icon} {filled}/10 slots filled")
     await ctx.send(embed=embed)
+
+
+# ── !matchup ────────────────────────────────────────────────────────────────
+
+_EXPORT_SCOPE = [
+    'https://spreadsheets.google.com/feeds',
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+]
+
+
+def _get_export_token() -> str:
+    """Fresh OAuth access token for the service account, used to call Sheets'
+    authenticated range-export endpoint (works with normal file sharing —
+    no 'Publish to web' required, unlike /pubhtml)."""
+    creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, _EXPORT_SCOPE)
+    return creds.get_access_token().access_token
+
+
+def _autocrop_whitespace(img: "Image.Image") -> "Image.Image":
+    bg = Image.new("RGB", img.size, (255, 255, 255))
+    diff = ImageChops.difference(img.convert("RGB"), bg)
+    bbox = diff.getbbox()
+    return img.crop(bbox) if bbox else img
+
+
+def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: str) -> "Image.Image":
+    """Export a specific cell range from the LIVE Google Sheet as an actual
+    rendered image — via Sheets' authenticated PDF export (real cells, real
+    colours/fonts/borders, not a reconstruction) rasterized with PyMuPDF."""
+    resp = requests.get(
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export",
+        params={
+            "format": "pdf",
+            "gid": gid,
+            "range": a1_range,
+            "size": "A4",
+            "portrait": "true",
+            "fitw": "true",
+            "gridlines": "false",
+            "printtitle": "false",
+            "sheetnames": "false",
+            "pagenum": "false",
+            "fzr": "false",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    doc = fitz.open(stream=resp.content, filetype="pdf")
+    pix = doc[0].get_pixmap(dpi=200)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    doc.close()
+    return _autocrop_whitespace(img)
+
+
+def _compose_matchup_image(img1: "Image.Image", img2: "Image.Image") -> bytes:
+    """Place two cropped team screenshots side by side."""
+    h = max(img1.height, img2.height)
+
+    def _pad(img):
+        if img.height == h:
+            return img
+        canvas = Image.new("RGB", (img.width, h), (255, 255, 255))
+        canvas.paste(img, (0, 0))
+        return canvas
+
+    img1, img2 = _pad(img1), _pad(img2)
+    combined = Image.new("RGB", (img1.width + img2.width, h), (255, 255, 255))
+    combined.paste(img1, (0, 0))
+    combined.paste(img2, (img1.width, 0))
+
+    buf = io.BytesIO()
+    combined.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _resolve_team_name_from_emoji(token: str):
+    """Resolve a single emoji (custom or unicode) or team-name token to a sheet
+    team name. Mirrors the resolution chain used by !roster. Returns
+    (team_name, emoji_match_or_None)."""
+    emoji_match = _CUSTOM_EMOJI_RE.search(token)
+    team_name = None
+    if emoji_match:
+        lookup = emoji_match.group(1)
+    else:
+        for char, tname in UNICODE_EMOJI_MAP.items():
+            if char in token:
+                team_name = tname
+                break
+        lookup = token.strip()
+
+    if not team_name:
+        team_name = EMOJI_TEAM_MAP.get(lookup)
+    if not team_name:
+        lookup_lower = lookup.lower()
+        for ename, tname in EMOJI_TEAM_MAP.items():
+            if ename.lower() == lookup_lower:
+                team_name = tname
+                break
+    if not team_name:
+        for tname in set(EMOJI_TEAM_MAP.values()):
+            if tname.lower() == lookup.lower():
+                team_name = tname
+                break
+    # Deliberately no "lookup is a substring of some team name" fallback
+    # here — an emoji's internal Discord name only needs to coincidentally
+    # contain a short fragment of an unrelated team name (e.g. an emoji
+    # named "kyrie" matching inside "Golden State Valkyries") to silently
+    # resolve to the wrong team entirely. Better to fail clearly below than
+    # guess wrong.
+    if not team_name:
+        team_name = lookup
+    return team_name, emoji_match
+
+
+@bot.command(name='matchup')
+async def cmd_matchup(ctx, *, args: str = ''):
+    """Post a real screenshot of two teams' cells from the Google Sheet, side
+    by side. Usage: !matchup <emoji1> <emoji2>"""
+    parts = args.split()
+    if len(parts) != 2:
+        await ctx.send("❌ Usage: `!matchup <team1 emoji> <team2 emoji>`")
+        return
+
+    team1_name, _ = _resolve_team_name_from_emoji(parts[0])
+    team2_name, _ = _resolve_team_name_from_emoji(parts[1])
+
+    # Only ever search the sheet this channel is actually configured for —
+    # a fallback that tried every other channel's sheet used to let this
+    # silently return a team from a completely different tab/draft than the
+    # one being asked about.
+    manager = await _get_manager_async(ctx.channel.id)
+    if manager is None:
+        await ctx.send("❌ No sheet mapping configured for this channel. Use `!addchannel` or `!setsheet` first.")
+        return
+
+    loop = asyncio.get_event_loop()
+
+    async def _locate(team_name):
+        row, col = await loop.run_in_executor(None, manager.find_team_position, team_name)
+        if row:
+            return manager, row, col
+        return None, f"Team **{team_name}** was not found in this channel's sheet.", None
+
+    try:
+        async with ctx.channel.typing():
+            mgr1, row1, col1 = await _locate(team1_name)
+            mgr2, row2, col2 = await _locate(team2_name)
+    except Exception as exc:
+        await ctx.send(_friendly_sheet_error(exc))
+        return
+
+    if mgr1 is None:
+        await ctx.send(f"❌ {row1}")
+        return
+    if mgr2 is None:
+        await ctx.send(f"❌ {row2}")
+        return
+
+    try:
+        async with ctx.channel.typing():
+            token = await loop.run_in_executor(None, _get_export_token)
+
+            sid1, gid1, rng1 = mgr1.get_matchup_range(row1, col1)
+            sid2, gid2, rng2 = mgr2.get_matchup_range(row2, col2)
+
+            img1 = await loop.run_in_executor(None, _export_team_range_png, sid1, gid1, rng1, token)
+            img2 = await loop.run_in_executor(None, _export_team_range_png, sid2, gid2, rng2, token)
+
+            image_bytes = await loop.run_in_executor(None, _compose_matchup_image, img1, img2)
+    except Exception as exc:
+        print(f"[matchup] Export failed: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
+        return
+
+    file = discord.File(io.BytesIO(image_bytes), filename="matchup.png")
+    await ctx.send(content=f"**{team1_name} vs {team2_name}**", file=file)
 
 
 class HelpView(discord.ui.View):
@@ -2340,8 +2783,10 @@ async def cmd_sheethelp(ctx):
             "`!sheetundo` — Undo the last player addition in this channel\n"
             "`!reload` — Force-reconnect this channel to Google Sheets\n"
             "`!setsheet <Tab Name>` — Map this channel to a worksheet tab\n"
+            "`!setsheetall <Tab Name>` — Map EVERY mapped channel to a worksheet tab at once\n"
             "`!addchannel #channel <Tab Name>` — Map another channel to a worksheet tab\n"
             "`!removechannel #channel` — Remove a channel's sheet mapping\n"
+            "`!setbudget <amount>` — Set the per-team budget shown on !roster, across all channels\n"
             "`!channels` — List all channel → sheet mappings"
         ),
         inline=False,
@@ -2393,8 +2838,10 @@ async def cmd_help(ctx):
             "`!sheetundo` — Undo the last player addition in this channel\n"
             "`!reload` — Reconnect this channel to Google Sheets\n"
             "`!setsheet <Tab Name>` — Map this channel to a worksheet tab\n"
+            "`!setsheetall <Tab Name>` — Map EVERY mapped channel to a worksheet tab at once\n"
             "`!addchannel #channel <Tab Name>` — Map another channel to a tab\n"
             "`!removechannel #channel` — Remove a channel mapping\n"
+            "`!setbudget <amount>` — Set the per-team budget shown on !roster, across all channels\n"
             "`!channels` — Show all channel → sheet mappings\n"
             "`!sheetinfo` — This summary\n"
             "`!sheethelp` — Full guide with all details"
