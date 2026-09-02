@@ -210,7 +210,9 @@ def _player_available(player_name: str, availability: dict, roster_names: set | 
 
 # ── Pick text helpers ─────────────────────────────────────────────────────────
 _PRICE_RE = re.compile(r"\$\s*(\d+(?:\.\d+)?)")
-_YEAR_RE  = re.compile(r"'(\d{2})\b|(\d{4})-(\d{2,4})\b|\b(\d{4})\b")
+# Alternatives: 'YY (apostrophe) | YYYY-YY(YY) | bare YYYY | YY-YY (no apostrophe,
+# e.g. "22-23" — same short-form GMs use without thinking to add the apostrophe).
+_YEAR_RE  = re.compile(r"'(\d{2})\b|(\d{4})-(\d{2,4})\b|\b(\d{4})\b|\b(\d{2})-(\d{2})\b")
 
 
 def _parse_pick_line(text: str) -> dict:
@@ -236,6 +238,12 @@ def _parse_pick_line(text: str) -> dict:
             year = f"{ym.group(2)}-{ym.group(3)}"
         elif ym.group(4):
             year = ym.group(4)
+        elif ym.group(5) and ym.group(6):
+            # Same century-cutoff convention Team Sheet Bot's _normalize_year
+            # uses for this same short form: 46-99 -> 1900s, 00-45 -> 2000s.
+            start   = int(ym.group(5))
+            century = 1900 if start >= 46 else 2000
+            year    = f"{century + start}-{ym.group(6)}"
         text = (text[: ym.start()] + text[ym.end() :]).strip()
 
     return {"player": text, "year": year, "price": price}
@@ -337,6 +345,18 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
         return
 
     emoji = user_data.get("emoji", "")
+    resolved = _resolve_emoji_input(emoji)
+    if resolved != emoji:
+        # A `:name:` shorthand that failed to resolve when it was first set
+        # (e.g. the bot wasn't yet in the emoji's server, or the cache wasn't
+        # warm) gets one more chance here — cheap, and only ever an upgrade:
+        # a plain string that already resolved, or already a real mention,
+        # comes back unchanged.
+        log.info("AUTO-PICK | %s | emoji re-resolved: %r -> %r", user.display_name, emoji, resolved)
+        emoji = resolved
+        _data[uid]["emoji"] = emoji
+        _save_data(_data)
+
     if not _is_valid_emoji(emoji):
         log.info("AUTO-PICK | %s | no emoji set — searching lotto message", user.display_name)
         found = await _lookup_emoji_from_lotto(user.id)
@@ -426,13 +446,16 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
     # Mark as drafted BEFORE posting so no concurrent path can pick the same player
     _drafted_this_session.add(chosen_pick["player"].lower())
 
+    # Set BEFORE posting (not after) — the gateway can echo our own message back
+    # into on_message before channel.send() even returns, and the real-time pick
+    # tracker below relies on _last_autopick already pointing at this user to know
+    # the announcement it just saw is its own auto-pick, not a manual pick to react to.
+    _last_autopick = {"user": user, "pick_num": pick_num}
+
     # Post the pick
     pick_msg = _build_pick_message(pick_num, emoji, chosen_pick)
     await channel.send(pick_msg)
     log.info("AUTO-PICK | %s | Pick #%d | %s", user.display_name, pick_num, pick_msg)
-
-    # Store so the rejection handler can retry if the timer bot rejects this pick
-    _last_autopick = {"user": user, "pick_num": pick_num}
 
     # Remove the chosen pick so retries can find the next available player.
     # The rest of the list is cleared after 30 s — long enough for the timer bot
@@ -473,6 +496,25 @@ intents.members         = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+
+def _resolve_emoji_input(raw: str) -> str:
+    """A real `<a?:name:id>` mention or native unicode emoji passes through unchanged.
+    A plain `:name:` shorthand — what you get typing colons by hand in a DM, where
+    Discord's autocomplete (which inserts the real mention) needs Nitro to reach
+    another server's emoji — gets resolved by name against every custom emoji this
+    bot can see and swapped for the real mention, since Discord never renders bare
+    `:name:` text as an emoji on its own. Left as-is if no match is found."""
+    s = raw.strip()
+    m = re.match(r'^:([A-Za-z0-9_~]+):$', s)
+    if not m:
+        return s
+    name = m.group(1).lower()
+    for e in bot.emojis:
+        if e.name.lower() == name:
+            return str(e)
+    return s
+
+
 _PICK_NUM_RE = re.compile(r"Pick\s+(\d+)", re.IGNORECASE)
 
 # A steal/block declaration (e.g. "3. steal LeBron James $34") must not be
@@ -489,9 +531,29 @@ def _has_sbl_intent(content: str) -> bool:
     return is_steal != is_block
 
 
+def _reresolve_stored_emojis():
+    """One-time self-heal: a `:name:` shorthand saved before this bot could resolve
+    guild emojis (e.g. typed by hand in a Nitro-less DM) is stuck as literal text
+    forever unless something re-checks it now that bot.emojis is populated."""
+    fixed = 0
+    for uid, user_data in _data.items():
+        raw = (user_data.get("emoji") or "").strip()
+        if not raw:
+            continue
+        resolved = _resolve_emoji_input(raw)
+        if resolved != raw:
+            user_data["emoji"] = resolved
+            fixed += 1
+            log.info("EMOJI SELF-HEAL | uid=%s | %r -> %r", uid, raw, resolved)
+    if fixed:
+        _save_data(_data)
+    log.info("EMOJI SELF-HEAL | checked %d users, fixed %d", len(_data), fixed)
+
+
 @bot.event
 async def on_ready():
     log.info("ATD Draft List Bot ready — %s", bot.user)
+    _reresolve_stored_emojis()
     channel = bot.get_channel(DRAFT_CHANNEL_ID)
     if channel:
         asyncio.create_task(_backfill_drafted_session(channel))
@@ -641,12 +703,27 @@ async def on_message(message: discord.Message):
         and not _has_sbl_intent(message.content)
     ):
         content_lower = message.content.lower()
-        picker_name = message.author.display_name
+
+        # An auto-posted pick is announced under THIS bot's own account, so
+        # message.author is us, not the GM it was picked for — _do_auto_pick_inner
+        # already updated that GM's own list and sent their confirmation DM, so
+        # attribute the announcement to them (not to us) and skip re-processing
+        # their list here, which would otherwise race _do_auto_pick_inner's own
+        # pop of the same entry and/or DM them a confusing "drafted by <this bot>".
+        auto_pick_uid = None
+        if message.author.id == bot.user.id and _last_autopick:
+            auto_pick_uid = str(_last_autopick["user"].id)
+            picker_name = _last_autopick["user"].display_name
+        else:
+            picker_name = message.author.display_name
+
         log.info("PICK DETECTED | channel=%d author=%s content=%.80s",
                  message.channel.id, picker_name, message.content.strip())
 
         # Track against all registered users' pick lists
         for uid, user_data in _data.items():
+            if uid == auto_pick_uid:
+                continue
             picks = user_data.get("picks", [])
             if not picks:
                 continue
@@ -870,15 +947,25 @@ async def cmd_setemoji(ctx, member_or_emoji: str = None, *, rest: str = ""):
         await ctx.send("❌ Provide an emoji. Example: `!setemoji <:YourEmoji:123456>`")
         return
 
+    resolved = _resolve_emoji_input(emoji_str)
+    warning = ""
+    if resolved == emoji_str and re.match(r'^:[A-Za-z0-9_~]+:$', emoji_str):
+        warning = (
+            f"\n⚠️ I couldn't find a custom emoji named `{emoji_str.strip(':')}` to match that against, "
+            f"so it'll show up as plain text `{emoji_str}` instead of an actual emoji. "
+            f"Type `!setemoji` in the **server** and pick the emoji from Discord's autocomplete instead."
+        )
+    emoji_str = resolved
+
     uid = str(target_member.id)
     _ensure_user(uid)
     _data[uid]["emoji"] = emoji_str
     _save_data(_data)
 
     if target_member.id == ctx.author.id:
-        await ctx.send(f"✅ Your team emoji is set to {emoji_str}")
+        await ctx.send(f"✅ Your team emoji is set to {emoji_str}{warning}")
     else:
-        await ctx.send(f"✅ Set **{target_member.display_name}**'s team emoji to {emoji_str}")
+        await ctx.send(f"✅ Set **{target_member.display_name}**'s team emoji to {emoji_str}{warning}")
 
 
 @bot.command(name="listsheets")
@@ -1082,6 +1169,10 @@ async def cmd_alllists(ctx):
         fetched = bot.get_user(int(uid))
         name    = (member or fetched).display_name if (member or fetched) else f"User {uid}"
 
+        raw_emoji = _resolve_emoji_input(raw_emoji)
+        if raw_emoji != user_data.get("emoji", ""):
+            _data[uid]["emoji"] = raw_emoji
+            _save_data(_data)
         emoji_display = raw_emoji if _is_valid_emoji(raw_emoji) else "(not set)"
         status_icon   = "▶️" if enabled else "⏸️"
         status_text   = "Active" if enabled else "Paused"
@@ -1120,13 +1211,23 @@ def _dm_only(ctx) -> bool:
 @bot.command(name="setup")
 async def cmd_setup(ctx, *, emoji_str: str = ""):
     """!setup <:emoji:id> — register your team emoji (works in server or DM)."""
+    raw = emoji_str.strip()
+    resolved = _resolve_emoji_input(raw)
+    warning = ""
+    if raw and resolved == raw and re.match(r'^:[A-Za-z0-9_~]+:$', raw):
+        warning = (
+            f"\n⚠️ I couldn't find a custom emoji named `{raw.strip(':')}` to match that against, "
+            f"so it'll show up as plain text `{raw}` instead of an actual emoji. "
+            f"Type `!setup` in the **server** and pick the emoji from Discord's autocomplete instead."
+        )
+
     uid = str(ctx.author.id)
     _ensure_user(uid)
-    _data[uid]["emoji"] = emoji_str.strip()
+    _data[uid]["emoji"] = resolved
     _save_data(_data)
-    display = emoji_str.strip() or "(none)"
+    display = resolved or "(none)"
     await ctx.send(
-        f"✅ Team emoji set to `{display}`.\n"
+        f"✅ Team emoji set to `{display}`.{warning}\n"
         f"Now add your picks with `!setlist` or `!addpick`."
     )
 
@@ -1321,6 +1422,11 @@ async def cmd_mylist(ctx):
     user_data = _data.get(uid, {})
     picks     = user_data.get("picks", [])
     raw_emoji = (user_data.get("emoji") or "").strip()
+    raw_emoji = _resolve_emoji_input(raw_emoji)
+    if raw_emoji != user_data.get("emoji", ""):
+        _ensure_user(uid)
+        _data[uid]["emoji"] = raw_emoji
+        _save_data(_data)
     enabled   = user_data.get("enabled", True)
 
     emoji_display = raw_emoji if _is_valid_emoji(raw_emoji) else "(not set — use `!setup <:emoji:id>` in the server)"
