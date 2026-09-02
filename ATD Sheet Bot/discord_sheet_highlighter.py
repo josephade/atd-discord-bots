@@ -41,14 +41,15 @@ ROW_START_COL = os.getenv("ROW_HILIGHT_START", "A").upper()
 ROW_END_COL = os.getenv("ROW_HILIGHT_END", "D").upper()
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", 75))
 
-# Number of teams in the current draft — a "round" ends every ROUND_SIZE
-# picks, at which point any still-green (steal-able) highlights convert to
-# blue (safe from steal/block).
-ROUND_SIZE = int(os.getenv("ROUND_SIZE", 30))
-
 # User ID of the ATD Draft List Bot — its picks are processed like regular user picks.
 # Set: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-sheet-bot
 DRAFT_LIST_BOT_ID = int(os.getenv("DRAFT_LIST_BOT_ID", 0)) or None
+
+# Additional bot user IDs to trust the same way as DRAFT_LIST_BOT_ID (e.g. ATD
+# Draft Theme Bot, posting anonymized picks on a hidden GM's behalf).
+# Comma-separated. Set: fly secrets set EXTRA_TRUSTED_BOT_IDS=<id1>,<id2> --app atd-sheet-bot
+EXTRA_TRUSTED_BOT_IDS = {int(x) for x in os.getenv("EXTRA_TRUSTED_BOT_IDS", "").split(",") if x.strip()}
+TRUSTED_BOT_IDS = ({DRAFT_LIST_BOT_ID} if DRAFT_LIST_BOT_ID else set()) | EXTRA_TRUSTED_BOT_IDS
 
 # User ID of the ATD Timer Bot — its "SBL_BLOCK |" confirmation messages
 # un-highlight the blocked player so they become available again.
@@ -131,8 +132,6 @@ def save_state():
                 "stack": s["stack"],
                 "redo_stack": s["redo_stack"],
                 "pick_info": s["pick_info"],
-                "colors": s.get("colors", {}),
-                "pending_repick_blue": s.get("pending_repick_blue", False),
             }
         with open(STATE_FILE, "w") as f:
             json.dump(serializable, f, indent=2)
@@ -147,18 +146,11 @@ def load_state():
             data = json.load(f)
         for ch_id_str, s in data.items():
             ch_id = int(ch_id_str)
-            # Colors is a new field — anything already highlighted from
-            # before this feature existed is treated as blue (not pending
-            # a round-end conversion).
-            colors = {k: "blue" for k in s["highlighted"]}
-            colors.update(s.get("colors", {}))
             thread_state[ch_id] = {
                 "highlighted": set(s["highlighted"]),
                 "stack": [tuple(x) for x in s["stack"]],
-                "redo_stack": [tuple(x) if len(x) == 3 else (x[0], x[1], "blue") for x in s["redo_stack"]],
+                "redo_stack": [tuple(x[:2]) for x in s["redo_stack"]],
                 "pick_info": {k: tuple(v) for k, v in s["pick_info"].items()},
-                "colors": colors,
-                "pending_repick_blue": s.get("pending_repick_blue", False),
             }
         log.info(f"[STATE] Loaded state for {len(thread_state)} channels")
     except Exception as e:
@@ -192,11 +184,6 @@ NAME_COL_INDEX = col_to_index(NAME_COL_LETTER)
 NONLETTER_RE = re.compile(r"[^A-Za-z\s]")
 WHITESPACE_RE = re.compile(r"\s+")
 MENTION_RE = re.compile(r"<@!?\d+>")
-
-# Mirrors Timer Bot's own lock-marker detection (🔒 emoji, custom lock emoji,
-# or the trailing word "lock"/"locked") so this bot can tell a locked pick
-# apart from a steal-able one using the same message it already reads.
-LOCK_MARKER_RE = re.compile(r'\s*(?:🔒|<a?:lock:\d+>|\block(?:ed)?\b)\s*$', re.IGNORECASE)
 
 def normalize(s: str) -> str:
     s = NONLETTER_RE.sub(" ", s)
@@ -237,28 +224,6 @@ async def apply_highlight(sh, ws, row: int, color: dict):
         }]
     })
 
-async def apply_highlight_batch(sh, ws, rows: List[int], color: dict):
-    """Same as apply_highlight but for many rows in a single API call —
-    used for converting a whole round's green highlights to blue at once."""
-    if not rows:
-        return
-    start = col_to_index(ROW_START_COL) - 1
-    end = col_to_index(ROW_END_COL)
-    requests = [{
-        "repeatCell": {
-            "range": {
-                "sheetId": ws.id,
-                "startRowIndex": row - 1,
-                "endRowIndex": row,
-                "startColumnIndex": start,
-                "endColumnIndex": end,
-            },
-            "cell": {"userEnteredFormat": {"backgroundColor": color}},
-            "fields": "userEnteredFormat.backgroundColor",
-        }
-    } for row in rows]
-    await batch_update_with_retry(sh, {"requests": requests})
-
 async def clear_highlight(sh, ws, row: int):
     start = col_to_index(ROW_START_COL) - 1
     end = col_to_index(ROW_END_COL)
@@ -288,8 +253,7 @@ player_cache: Dict[int, tuple] = {}
 
 load_state()
 
-HIGHLIGHT_COLOR       = {"red": 0.286, "green": 0.518, "blue": 0.910}  # blue — locked, or safe from an earlier round
-HIGHLIGHT_COLOR_GREEN = {"red": 0.0, "green": 1.0, "blue": 0.0}        # #00ff00 — steal/block-able this round
+HIGHLIGHT_COLOR = {"red": 0.286, "green": 0.518, "blue": 0.910}  # blue
 
 def get_state(channel_id: int):
     if channel_id not in thread_state:
@@ -298,32 +262,8 @@ def get_state(channel_id: int):
             "stack": [],
             "redo_stack": [],
             "pick_info": {},  # player_key -> (pick_number, picker_name)
-            "colors": {},     # player_key -> "green" | "blue"
-            "pending_repick_blue": False,  # next pick is a forced repick after a steal/block — blue, not green
         }
     return thread_state[channel_id]
-
-def _color_value(color_name: str) -> dict:
-    return HIGHLIGHT_COLOR_GREEN if color_name == "green" else HIGHLIGHT_COLOR
-
-async def _maybe_close_round(sh, ws, channel_id: int, state: Dict):
-    """Every ROUND_SIZE picks, any still-green highlights are safe from
-    steal/block for the rest of the draft — convert them all to blue."""
-    if len(state["stack"]) == 0 or len(state["stack"]) % ROUND_SIZE != 0:
-        return
-    rows = []
-    keys_to_flip = []
-    for name, row in state["stack"]:
-        key = f"{ws.title}:{name.lower()}"
-        if state["colors"].get(key) == "green":
-            rows.append(row)
-            keys_to_flip.append(key)
-    if not rows:
-        return
-    await apply_highlight_batch(sh, ws, rows, HIGHLIGHT_COLOR)
-    for key in keys_to_flip:
-        state["colors"][key] = "blue"
-    log.info(f"[ROUND_END] channel={channel_id} converted {len(rows)} pick(s) green -> blue")
 
 def get_sheet(channel_id: int):
     if channel_id in sheet_cache:
@@ -433,7 +373,6 @@ async def _handle_sbl_block(message: discord.Message):
 
         state["highlighted"].discard(key)
         state["pick_info"].pop(key, None)
-        state["colors"].pop(key, None)
         state["stack"] = [(n, r) for (n, r) in state["stack"] if n != name]
         await clear_highlight(sh, ws, row)
         save_state()
@@ -446,26 +385,13 @@ async def on_message(message: discord.Message):
 
     # Timer Bot's Steal/Block/Lock confirmations drive un-highlighting directly.
     if TIMER_BOT_ID and message.author.id == TIMER_BOT_ID:
-        # A steal or block always sends whoever lost their player straight to
-        # the front of the line for a forced repick (Timer Bot always
-        # interrupts for this) — that repick isn't a normal in-round pick, so
-        # it should highlight blue, not green. Covers plain steals, plain
-        # blocks, and a block-of-a-steal (reclaim), which is sent in the same
-        # "SBL_STEAL |" shape as a real steal.
-        if "SBL_STEAL |" in message.content or "SBL_BLOCK |" in message.content:
-            channel_id = message.channel.id
-            if get_sheet(channel_id):
-                state = get_state(channel_id)
-                state["pending_repick_blue"] = True
-                save_state()
-                log.info(f"[SBL] channel={channel_id} next pick will be forced blue (repick)")
         if "SBL_BLOCK |" in message.content or "SBL_VETO |" in message.content:
             await _handle_sbl_block(message)
         return
 
     # Let the Draft List Bot's picks through; ignore all other bot messages.
-    _from_draft_list = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
-    if message.author.bot and not _from_draft_list:
+    _from_trusted_bot = message.author.id in TRUSTED_BOT_IDS
+    if message.author.bot and not _from_trusted_bot:
         return
 
     # Allow replies (remove the strict message type check)
@@ -598,11 +524,6 @@ async def on_message(message: discord.Message):
     # ============ KEY FIX: Check both message content AND referenced message ============
     content_to_check = MENTION_RE.sub("", message.content).strip()
 
-    # Whether THIS GM's own pick message declares a lock — checked before any
-    # referenced-message text gets appended below, since that would move
-    # what's at the "end" of the string and break the trailing-marker match.
-    wants_lock = bool(LOCK_MARKER_RE.search(content_to_check))
-
     # Debug log original content
     log.info(f"[DEBUG] Original content: '{content_to_check}'")
 
@@ -728,8 +649,6 @@ async def on_message(message: discord.Message):
         state["highlighted"].clear()
         state["stack"].clear()
         state["redo_stack"].clear()
-        state["colors"].clear()
-        state["pending_repick_blue"] = False
         save_state()
         log.info(f"[RESET] channel={channel_id} by={message.author}")
         await message.reply("🧹 ATD memory reset.")
@@ -742,10 +661,9 @@ async def on_message(message: discord.Message):
             return
         name, row = state["stack"].pop()
         key = f"{ws.title}:{name.lower()}"
-        color = state["colors"].pop(key, "blue")
         state["highlighted"].discard(key)
         state["pick_info"].pop(name.lower(), None)
-        state["redo_stack"].append((name, row, color))
+        state["redo_stack"].append((name, row))
         await clear_highlight(sh, ws, row)
         save_state()
         log.info(f"[UNDO] channel={channel_id} player='{name}' by={message.author}")
@@ -757,15 +675,13 @@ async def on_message(message: discord.Message):
         if not state["redo_stack"]:
             await message.reply("⚠️ Nothing to redo.")
             return
-        name, row, color = state["redo_stack"].pop()
+        name, row = state["redo_stack"].pop()
         key = f"{ws.title}:{name.lower()}"
         state["highlighted"].add(key)
         state["stack"].append((name, row))
         pick_number = len(state["stack"])
         state["pick_info"][name.lower()] = (pick_number, message.author.display_name)
-        state["colors"][key] = color
-        await apply_highlight(sh, ws, row, _color_value(color))
-        await _maybe_close_round(sh, ws, channel_id, state)
+        await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
         save_state()
         log.info(f"[REDO] channel={channel_id} player='{name}' by={message.author}")
         await message.reply(f"🔁 Redid highlight for **{name}**")
@@ -776,19 +692,16 @@ async def on_message(message: discord.Message):
         if not is_commish(message.author):
             await message.reply("❌ Only commissioners can use the rehighlight command.")
             return
-        
+
         if not state["stack"]:
             await message.reply("⚠️ No picks have been made yet.")
             return
-        
+
         await message.reply("🔄 Re-highlighting all picks...")
-        
-        # Re-apply highlight to all players in the stack, preserving each
-        # one's green/blue state rather than flattening everything to blue.
+
         for name, row in state["stack"]:
-            key = f"{ws.title}:{name.lower()}"
-            await apply_highlight(sh, ws, row, _color_value(state["colors"].get(key, "blue")))
-        
+            await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
+
         log.info(f"[REHIGHLIGHT] channel={channel_id} re-highlighted {len(state['stack'])} picks by={message.author}")
         await message.reply(f"✅ Re-highlighted **{len(state['stack'])}** picks.")
         return
@@ -798,21 +711,21 @@ async def on_message(message: discord.Message):
         if not is_commish(message.author):
             await message.reply("❌ Only commissioners can use the force command.")
             return
-        
+
         parts = content.split(maxsplit=1)
         if len(parts) < 2:
             await message.reply(f"Usage: `{CMD_FORCE} <player name>`")
             return
-        
+
         force_name = parts[1]
         match = find_best_match(force_name, names, row_map, keys, key_to_name)
         if not match:
             await message.reply(f"❌ Could not find player matching '{force_name}'")
             return
-        
+
         name, row = match
         key = f"{ws.title}:{name.lower()}"
-        
+
         if key in state["highlighted"]:
             pick_number, picker_name = state["pick_info"].get(key, ("?", "unknown"))
             await message.reply(
@@ -820,23 +733,16 @@ async def on_message(message: discord.Message):
                 f"by **{picker_name}**."
             )
             return
-        
+
         pick_number = len(state["stack"]) + 1
         picker_name = message.author.display_name
-        wants_lock = bool(LOCK_MARKER_RE.search(force_name))
-        is_forced_repick = state.get("pending_repick_blue", False)
-        color_name = "blue" if (wants_lock or is_forced_repick) else "green"
-        if is_forced_repick:
-            state["pending_repick_blue"] = False
 
         state["highlighted"].add(key)
         state["stack"].append((name, row))
         state["redo_stack"].clear()
         state["pick_info"][key] = (pick_number, picker_name)
-        state["colors"][key] = color_name
 
-        await apply_highlight(sh, ws, row, _color_value(color_name))
-        await _maybe_close_round(sh, ws, channel_id, state)
+        await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
         save_state()
         await message.reply(f"✅ Force highlighted **{name}** at pick **{pick_number}**")
         log.info(f"[FORCE] channel={channel_id} player='{name}' by={message.author}")
@@ -884,19 +790,13 @@ async def on_message(message: discord.Message):
     state["redo_stack"].clear()
 
     state["pick_info"][key] = (pick_number, picker_name)
-    is_forced_repick = state.get("pending_repick_blue", False)
-    color_name = "blue" if (wants_lock or is_forced_repick) else "green"
-    state["colors"][key] = color_name
-    if is_forced_repick:
-        state["pending_repick_blue"] = False
 
     log.info(
         f"[HIGHLIGHT] channel={channel_id} sheet={ws.title} "
-        f"player='{name}' row={row} locked={wants_lock} forced_repick={is_forced_repick} by={message.author}"
+        f"player='{name}' row={row} by={message.author}"
     )
 
-    await apply_highlight(sh, ws, row, _color_value(color_name))
-    await _maybe_close_round(sh, ws, channel_id, state)
+    await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
     save_state()
     await message.add_reaction("✅")
 

@@ -29,14 +29,27 @@ ROUNDLESS_TIMER = 2700  # 45 minutes per pick in roundless (money-based) mode
 # when it's their turn — no timer given.
 AS_THRESHOLD = 3
 
+# R3-8 and roundless mode (both 45 min base) use a fixed step-down timer per
+# skip instead of the flat -5 min/skip formula: 1st skip -> 35 min, 2nd -> 20
+# min, 3rd -> 10 min, 4th+ -> Active Skip (see STEPPED_AS_THRESHOLD below).
+STEPPED_SKIP_SCHEDULE = {1: 2100, 2: 1200, 3: 600}  # skip_count -> seconds
+STEPPED_AS_THRESHOLD = 4
+
 # Players that trigger the "pick at the end of rounds 6-10" penalty
-# TEMPORARILY DISABLED for budget draft — re-enable when done
-# PENALTY_PLAYERS = {"lebron james", "michael jordan"}
-PENALTY_PLAYERS = set()
+PENALTY_PLAYERS = {"lebron james", "michael jordan"}
 
 # User ID of the ATD Draft List Bot — its picks are trusted (treated like a commissioner pick).
 # Set this as a Fly.io secret: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-timer-bot
 DRAFT_LIST_BOT_ID = int(os.getenv("DRAFT_LIST_BOT_ID", 0)) or None
+
+# Additional bot user IDs to trust the same way as DRAFT_LIST_BOT_ID (e.g. ATD
+# Draft Theme Bot, posting anonymized picks on a hidden GM's behalf).
+# Comma-separated. Set: fly secrets set EXTRA_TRUSTED_BOT_IDS=<id1>,<id2> --app atd-timer-bot
+EXTRA_TRUSTED_BOT_IDS = {int(x) for x in os.getenv("EXTRA_TRUSTED_BOT_IDS", "").split(",") if x.strip()}
+
+# Every bot user ID whose picks are trusted like a commissioner's — check
+# membership in this set instead of comparing to DRAFT_LIST_BOT_ID alone.
+TRUSTED_BOT_IDS = ({DRAFT_LIST_BOT_ID} if DRAFT_LIST_BOT_ID else set()) | EXTRA_TRUSTED_BOT_IDS
 
 # ── Steal / Block / Lock (SBL) 
 # Enabled via !timermode snake+sbl or !timermode roundless+sbl / !timerstart [mode]+sbl

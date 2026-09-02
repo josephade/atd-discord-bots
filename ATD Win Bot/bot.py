@@ -3,12 +3,16 @@ from discord.ext import commands
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
+import io
 import json
 import os
 import re
 import difflib
 import time
 import unicodedata
+import requests
+import fitz
+from PIL import Image, ImageChops
 from collections import Counter
 from config import DISCORD_TOKEN, DISCORD_GUILD_ID, SPREADSHEET_ID, ROSTER_SHEET_ID, STATE_DIR, SERVICE_ACCOUNT_FILE
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
@@ -90,6 +94,31 @@ def _save_lottos(data: dict):
     os.makedirs(os.path.dirname(LOTTOS_FILE), exist_ok=True)
     with open(LOTTOS_FILE, 'w') as f:
         json.dump(data, f, indent=2)
+
+# ── Champions storage ──────────────────────────────────────────────────────────
+# champions.py is the static, checked-in historical baseline. !rings edits are
+# layered on top as a small JSON file on the persistent volume (same pattern as
+# profiles/lottos) rather than rewriting the source file, and applied straight
+# into the CHAMPIONS dict below — since every other reader (profile embeds,
+# !rings itself, ...) already holds a reference to that same dict object,
+# mutating it in place means they pick up edits with no changes on their end.
+
+CHAMPIONS_OVERRIDES_FILE = os.path.join(STATE_DIR, 'champions_overrides.json')
+
+def _load_champions_overrides() -> dict:
+    try:
+        with open(CHAMPIONS_OVERRIDES_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_champions_overrides(data: dict):
+    os.makedirs(os.path.dirname(CHAMPIONS_OVERRIDES_FILE), exist_ok=True)
+    with open(CHAMPIONS_OVERRIDES_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+for _num_str, _entry in _load_champions_overrides().items():
+    CHAMPIONS[int(_num_str)] = _entry
 
 def _parse_lotto_drafters(drafters_part: str) -> list:
     names = []
@@ -271,6 +300,163 @@ def _find_team_roster(tab_data: list, team_query: str):
                     players.append({'name': player, 'year': yr})
                 return cell, players
     return None, []
+
+def _find_team_roster_with_pos(tab_data: list, team_query: str):
+    """Same match as _find_team_roster, but also returns the 1-indexed
+    (row, col) of the team's header cell — needed to compute an export
+    range for a real sheet screenshot."""
+    if not tab_data:
+        return None, [], None, None
+    q = team_query.strip().lower()
+    for row_idx, row in enumerate(tab_data):
+        for col in range(len(row)):
+            cell      = row[col].strip() if len(row) > col else ''
+            year_cell = row[col + 1].strip() if len(row) > col + 1 else ''
+            if year_cell.lower() != 'year' or not cell:
+                continue
+            if cell.lower() == q or q in cell.lower() or cell.lower() in q:
+                players = []
+                for data_row in tab_data[row_idx + 1:]:
+                    player = data_row[col].strip() if len(data_row) > col else ''
+                    yr     = data_row[col + 1].strip() if len(data_row) > col + 1 else ''
+                    if not player or yr.lower() == 'year':
+                        break
+                    players.append({'name': player, 'year': yr})
+                return cell, players, row_idx + 1, col + 1
+    return None, [], None, None
+
+def _fetch_draft_tab_ws(draft_num: str):
+    """Same lookup as _fetch_draft_tab, but returns the live worksheet
+    object itself (needed for its gid) instead of just title+values."""
+    creds  = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, SCOPE)
+    client = gspread.authorize(creds)
+    sh     = client.open_by_key(ROSTER_SHEET_ID)
+    target = f"ATD {draft_num}".upper()
+    for ws in sh.worksheets():
+        if ws.title.upper().startswith(target):
+            return ws, ws.get_all_values()
+    return None, None
+
+# ── Team screenshot export (real sheet image, like Team Sheet Bot's !matchup) ──
+
+_EXPORT_SCOPE = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+
+def _get_export_token() -> str:
+    """Fresh OAuth access token for the service account, used to call Sheets'
+    authenticated range-export endpoint (works with normal file sharing —
+    no 'Publish to web' required, unlike /pubhtml)."""
+    creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, _EXPORT_SCOPE)
+    return creds.get_access_token().access_token
+
+def _autocrop_whitespace(img: "Image.Image", threshold: int = 60) -> "Image.Image":
+    """Crop away white margin, including the faint anti-aliased near-white
+    fringe PDF rasterization leaves right at the true edge of a filled cell.
+    Cropping on ANY nonzero diff from pure white keeps that fringe (it reads
+    as "content"), which shows up as a thin white outline around the block.
+    Ignoring near-white pixels below `threshold` trims past the fringe
+    instead of hugging it."""
+    rgb = img.convert("RGB")
+    bg = Image.new("RGB", rgb.size, (255, 255, 255))
+    diff = ImageChops.difference(rgb, bg).convert("L")
+    mask = diff.point(lambda p: 255 if p > threshold else 0)
+    bbox = mask.getbbox()
+    return img.crop(bbox) if bbox else img
+
+def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: str) -> "Image.Image":
+    """Export a specific cell range from the LIVE Google Sheet as an actual
+    rendered image — via Sheets' authenticated PDF export, rasterized with
+    PyMuPDF. Same mechanism ATD Team Sheet Bot's !matchup uses."""
+    resp = requests.get(
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export",
+        params={
+            "format": "pdf", "gid": gid, "range": a1_range,
+            "size": "A4", "portrait": "true", "fitw": "true",
+            "gridlines": "false", "printtitle": "false", "sheetnames": "false",
+            "pagenum": "false", "fzr": "false",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    doc = fitz.open(stream=resp.content, filetype="pdf")
+    pix = doc[0].get_pixmap(dpi=200)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    doc.close()
+    return _autocrop_whitespace(img)
+
+def _hidden_columns_for_ws(ws) -> set:
+    """1-indexed column numbers hidden by the user on this tab. Many tabs
+    hide the price column between teams — Google's PDF export substitutes
+    the next *visible* column to fill the gap when a hidden column is part
+    of the requested range, silently pulling in the neighboring team. So a
+    hidden column must never be included in an export range."""
+    try:
+        meta = ws.spreadsheet.fetch_sheet_metadata(
+            params={'fields': 'sheets(properties(sheetId),data(columnMetadata))'})
+    except Exception as e:
+        print(f"[team screenshot] Could not fetch column metadata: {e}")
+        return set()
+    hidden = set()
+    for s in meta.get('sheets', []):
+        if s['properties']['sheetId'] != ws.id:
+            continue
+        for i, col in enumerate(s.get('data', [{}])[0].get('columnMetadata', []), start=1):
+            if col.get('hiddenByUser'):
+                hidden.add(i)
+    return hidden
+
+def _team_export_range(ws, tab_data: list, team_row: int, col_idx_1based: int) -> str:
+    """Return the A1 range covering a team's header row + 10 roster rows
+    across its name/year (+price, if visible) columns, for exporting a real
+    screenshot of just that team's block. See get_matchup_range in ATD Team
+    Sheet Bot's bot.py for the original version of this same logic."""
+    known_teams = {v.strip().lower() for v in EMOJI_TEAM_MAP.values()}
+    hidden_cols = _hidden_columns_for_ws(ws)
+    header_row  = tab_data[team_row - 1] if 0 < team_row <= len(tab_data) else []
+
+    def _cell(col):
+        return header_row[col - 1].strip() if 0 < col <= len(header_row) else ''
+
+    last_col = col_idx_1based + 1  # name + year always included
+    for c in range(col_idx_1based + 2, col_idx_1based + 6):
+        val = _cell(c)
+        if not val:
+            break
+        if val.lower() in known_teams or _cell(c + 1).lower() == 'year':
+            break
+        if c not in hidden_cols:
+            last_col = c
+
+    start_a1 = gspread.utils.rowcol_to_a1(team_row, col_idx_1based)
+    end_a1   = gspread.utils.rowcol_to_a1(team_row + 10, last_col)
+    return f"{start_a1}:{end_a1}"
+
+async def _try_send_team_screenshot(ctx, draft_num: str, team_query: str, caption: str) -> bool:
+    """Best-effort: locate team_query in the live ATD <draft_num> roster tab
+    and send a real screenshot of just its block. Returns True on success so
+    the caller can fall back to the existing text embed if anything about
+    the live sheet lookup/export fails."""
+    try:
+        loop = asyncio.get_running_loop()
+        ws, tab_data = await loop.run_in_executor(None, _fetch_draft_tab_ws, draft_num)
+        if not tab_data:
+            return False
+        actual_name, players, row, col = await loop.run_in_executor(
+            None, _find_team_roster_with_pos, tab_data, team_query)
+        if row is None:
+            return False
+        a1_range = await loop.run_in_executor(None, _team_export_range, ws, tab_data, row, col)
+        token = await loop.run_in_executor(None, _get_export_token)
+        img = await loop.run_in_executor(None, _export_team_range_png, ROSTER_SHEET_ID, ws.id, a1_range, token)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        file = discord.File(buf, filename="team.png")
+        await ctx.send(content=caption, file=file)
+        return True
+    except Exception as e:
+        print(f"[team screenshot] failed for ATD {draft_num} / {team_query!r}: {e}")
+        return False
 
 # ── Win sheet helpers ─────────────────────────────────────────────────────────
 
@@ -1419,6 +1605,34 @@ async def cmd_linkprofile(ctx, *, name: str = ''):
     )
     await ctx.send(embed=embed)
 
+# ── !unlinkprofile ────────────────────────────────────────────────────────────
+
+@bot.command(name='unlinkprofile')
+async def cmd_unlinkprofile(ctx):
+    if not _in_channel(ctx):
+        return
+
+    uid      = str(ctx.author.id)
+    profiles = _load_profiles()
+    existing = profiles.get(uid, {})
+    if not existing.get('sheet_name'):
+        await ctx.send(embed=_err("❌ You don't have a profile linked. Use `!linkprofile <name>` to link one."))
+        return
+
+    old_name = existing.pop('sheet_name')
+    if existing:
+        profiles[uid] = existing
+    else:
+        profiles.pop(uid, None)
+    _save_profiles(profiles)
+
+    embed = discord.Embed(
+        title="✅ Profile Unlinked",
+        description=f"Your Discord account is no longer linked to **{old_name}**.\nUse `!linkprofile <name>` to link a different one.",
+        color=C_PROFILE
+    )
+    await ctx.send(embed=embed)
+
 # ── !sigteam ──────────────────────────────────────────────────────────────────
 
 @bot.command(name='sigteam')
@@ -1710,6 +1924,44 @@ async def cmd_setlotto(ctx, *, args: str = ''):
         print(f"[setlotto error] {e}")
         await ctx.send(embed=_err(f"⚠️ Error processing lotto: {e}"))
 
+# ── !deletelotto ──────────────────────────────────────────────────────────────
+
+@bot.command(name='deletelotto')
+async def cmd_deletelotto(ctx, *, args: str = ''):
+    """!deletelotto ATD 104 — wipe a draft's stored lotto entirely so
+    !setlotto can rebuild it from scratch (setlotto only merges/updates
+    existing teams, it never clears stale ones on its own)."""
+    if not _in_channel(ctx):
+        return
+    if not args:
+        await ctx.send(embed=_err("Usage: `!deletelotto ATD 104`"))
+        return
+
+    m = re.match(r'(?i)(?:ATD\s*)?(\d+)', args.strip())
+    if not m:
+        await ctx.send(embed=_err("❌ Usage: `!deletelotto ATD 104`"))
+        return
+
+    draft_num = m.group(1)
+    draft_key = f"ATD {draft_num}"
+
+    lottos = _load_lottos()
+    existing = lottos.get(draft_key)
+    if not existing:
+        await ctx.send(embed=_err(f"❌ No stored lotto found for **{draft_key}**."))
+        return
+
+    team_count = len(existing)
+    del lottos[draft_key]
+    _save_lottos(lottos)
+
+    embed = discord.Embed(
+        title=f"🗑️ Lotto Deleted — {draft_key}",
+        description=f"Removed **{team_count}** team(s). Use `!setlotto {draft_key}` to rebuild it.",
+        color=C_GREEN,
+    )
+    await ctx.send(embed=embed)
+
 # ── !gmplayers ────────────────────────────────────────────────────────────────
 
 @bot.command(name='gmplayers')
@@ -1775,7 +2027,7 @@ async def cmd_team(ctx, *, args: str = ''):
         return
 
     draft_num  = m.group(1)
-    team_query = m.group(2).strip()
+    team_query = _resolve_emoji(m.group(2).strip())
 
     async with ctx.typing():
         loop = asyncio.get_running_loop()
@@ -1801,7 +2053,14 @@ async def cmd_team(ctx, *, args: str = ''):
         return ''
 
     emoji_str = _emoji_display_local(actual_name)
-    roster    = '\n'.join(f"{i:>2}. {p['name']:<24} {p.get('year','')}" for i, p in enumerate(players, 1))
+
+    async with ctx.typing():
+        sent = await _try_send_team_screenshot(
+            ctx, draft_num, actual_name, caption=f"{emoji_str}  **{actual_name}** — ATD {draft_num}".strip())
+    if sent:
+        return
+
+    roster = '\n'.join(f"{i:>2}. {p['name']:<24} {p.get('year','')}" for i, p in enumerate(players, 1))
 
     embed = discord.Embed(
         title=f"{emoji_str}  {actual_name}",
@@ -2025,7 +2284,15 @@ async def cmd_gmteam(ctx, *, args: str = ''):
         else:
             name, draft_num = args.strip(), None
 
-    q = name.strip().lower()
+    # Resolve to the canonical Win Sheet name (e.g. "aidan" -> "Aidan(Ayedaen)") before
+    # matching against lotto drafters — otherwise _drafter_match only expands variants
+    # from parens already present in the typed query, missing entries recorded under a
+    # different half of a "Real(Alias)" name than the one the user happened to type.
+    async with ctx.typing():
+        raw = await _get_raw()
+    drafters, _, _ = _parse(raw)
+    resolved_d = _find(drafters, name)
+    q = (resolved_d['name'] if resolved_d else name).strip().lower()
 
     def _emoji_display(team_name):
         q = team_name.strip().lower()
@@ -2050,7 +2317,9 @@ async def cmd_gmteam(ctx, *, args: str = ''):
                 break
 
         if not found_team:
-            await ctx.send(embed=_err(f"❌ **{name}** has no team in **{draft_key}**."))
+            await ctx.send(embed=_err(
+                f"❌ No drafter named **{name}** was found, use `!team ATD {draft_num} <Team-Name>`"
+            ))
             return
 
         emoji_str  = _emoji_display(found_team)
@@ -2058,7 +2327,15 @@ async def cmd_gmteam(ctx, *, args: str = ''):
                       if q not in d.lower() and d.lower() not in q and d.strip().lower() != 'deleted user']
         co_str     = f"\nCo-owners: {', '.join(co_owners)}" if co_owners else ''
         players    = found_entry.get('players', [])
-        roster     = '\n'.join(f"{i:>2}. {p['name']:<22} {p['year']}" for i, p in enumerate(players, 1))
+
+        async with ctx.typing():
+            sent = await _try_send_team_screenshot(
+                ctx, draft_num, found_team,
+                caption=f"{emoji_str}  **{found_team}** — {draft_key}  ·  {name}{co_str}".strip())
+        if sent:
+            return
+
+        roster = '\n'.join(f"{i:>2}. {p['name']:<22} {p['year']}" for i, p in enumerate(players, 1))
 
         embed = discord.Embed(
             title=f"{emoji_str}  {found_team}",
@@ -2177,10 +2454,165 @@ async def cmd_seed(ctx, *, name: str = ''):
     await ctx.send(embed=view.get_embed(), view=view)
 
 # ── !rings ────────────────────────────────────────────────────────────────────
+# Bare `!rings` — public, unchanged: paginated all-time champions list.
+# `!rings ATD <num>` — admin only: interactive editor for that draft's 1st/2nd
+# place, same stage-then-save pattern as !edit's GM editor.
+
+class _RingsEditModal(discord.ui.Modal, title='Edit Champions'):
+    def __init__(self, current_w: str, current_ru: str, view: 'discord.ui.View'):
+        super().__init__()
+        self._view = view
+        self.w_input = discord.ui.TextInput(
+            label='1st Place (comma-separated)',
+            placeholder='e.g. JSoapz, Bony',
+            default=current_w,
+            required=False,
+            max_length=500,
+        )
+        self.ru_input = discord.ui.TextInput(
+            label='2nd Place (comma-separated)',
+            placeholder='e.g. dallama',
+            default=current_ru,
+            required=False,
+            max_length=500,
+        )
+        self.add_item(self.w_input)
+        self.add_item(self.ru_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self._view.pending_w   = [n.strip() for n in self.w_input.value.split(',') if n.strip()]
+        self._view.pending_ru  = [n.strip() for n in self.ru_input.value.split(',') if n.strip()]
+        self._view.has_pending = True
+        await interaction.response.defer()
+        await self._view.message.edit(embed=self._view._build_embed(), view=self._view)
+
+
+class _RingsEditView(discord.ui.View):
+    def __init__(self, draft_num: int, author_id: int):
+        super().__init__(timeout=1800)
+        self.draft_num   = draft_num
+        self.author_id   = author_id
+        self.message     = None
+        entry            = CHAMPIONS.get(draft_num, {})
+        self.pending_w   = list(entry.get('w', []))
+        self.pending_ru  = list(entry.get('ru', []))
+        self.has_pending = False
+        self._rebuild()
+
+    def _build_embed(self):
+        w_str  = ' & '.join(self.pending_w) if self.pending_w else '—'
+        ru_str = ' & '.join(self.pending_ru) if self.pending_ru else '—'
+        embed = discord.Embed(
+            title=f'🏆  ATD {self.draft_num} — Champions',
+            description=f'🥇 **1st Place:** {w_str}\n🥈 **2nd Place:** {ru_str}',
+            color=C_BLUE if self.has_pending else C_GOLD,
+        )
+        footer = 'Unsaved changes — click 💾 Save to apply.' if self.has_pending \
+            else 'Click ✏️ Edit to change, then 💾 Save to apply.'
+        embed.set_footer(text=footer)
+        return embed
+
+    def _rebuild(self):
+        self.clear_items()
+        edit = discord.ui.Button(label='✏️  Edit', style=discord.ButtonStyle.primary, row=0)
+        edit.callback = self._on_edit
+        self.add_item(edit)
+        save = discord.ui.Button(label='💾  Save', style=discord.ButtonStyle.green, row=0)
+        save.callback = self._on_save
+        self.add_item(save)
+        cxl = discord.ui.Button(label='✖  Cancel', style=discord.ButtonStyle.red, row=0)
+        cxl.callback = self._on_cancel
+        self.add_item(cxl)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message('❌ Only the admin who opened this editor can use it.', ephemeral=True)
+            return False
+        return True
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            _RingsEditModal(', '.join(self.pending_w), ', '.join(self.pending_ru), self)
+        )
+
+    async def _on_save(self, interaction: discord.Interaction):
+        if not self.has_pending:
+            await interaction.response.send_message('No changes to save.', ephemeral=True)
+            return
+        CHAMPIONS[self.draft_num] = {'w': self.pending_w, 'ru': self.pending_ru}
+        overrides = _load_champions_overrides()
+        overrides[str(self.draft_num)] = {'w': self.pending_w, 'ru': self.pending_ru}
+        _save_champions_overrides(overrides)
+
+        w_str  = ' & '.join(self.pending_w) if self.pending_w else '—'
+        ru_str = ' & '.join(self.pending_ru) if self.pending_ru else '—'
+        embed = discord.Embed(
+            title='✅ Saved',
+            description=f'🥇 1st: {w_str}\n🥈 2nd: {ru_str}\nSaved to **ATD {self.draft_num}**.',
+            color=C_GREEN,
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+        self.stop()
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        embed = discord.Embed(title='✖  Cancelled', description='No changes were saved.', color=discord.Color.red())
+        await interaction.response.edit_message(embed=embed, view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
 
 @bot.command(name='rings')
-async def cmd_rings(ctx):
+async def cmd_rings(ctx, *, args: str = ''):
     if not _in_channel(ctx):
+        return
+
+    args = args.strip()
+    if args.lower() == 'ranked':
+        loop   = asyncio.get_event_loop()
+        counts = await loop.run_in_executor(None, _build_ring_counts)
+        drafter_total = len(counts)
+
+        # Extra breakout row, alongside (not instead of) JSoapz's full
+        # all-time total: his championship count restricted to the
+        # "Post Historic" era, ATD 40 onward.
+        js = counts.get('JSoapz')
+        if js:
+            post_drafts = [d for d in js['drafts'] if d >= 40]
+            if post_drafts:
+                counts['JSoapz(Post Pre Historic)'] = {'count': len(post_drafts), 'drafts': post_drafts}
+
+        ranking = sorted(counts.items(), key=lambda x: x[1]['count'], reverse=True)
+        lines = [f"{i:>2}. {name:<26} {info['count']:>2}x" for i, (name, info) in enumerate(ranking, 1)]
+
+        view = PlayerListView(
+            title="🏆 Rings — Ranked",
+            lines=lines,
+            subtitle=f"`{drafter_total} drafters have won at least one championship`",
+            per_page=20,
+        )
+        await ctx.send(embed=view.get_embed(), view=view)
+        return
+
+    if args:
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send(embed=_err('❌ `!rings ATD <number>` is admin only.'))
+            return
+        m = re.search(r'(\d+)', args)
+        if not m:
+            await ctx.send(embed=_err('Usage: `!rings ATD 105`'))
+            return
+        draft_num = int(m.group(1))
+        view = _RingsEditView(draft_num, ctx.author.id)
+        msg  = await ctx.send(embed=view._build_embed(), view=view)
+        view.message = msg
         return
 
     lines = []
@@ -2237,10 +2669,43 @@ def _dedupe_names(names: list, threshold: float = 0.88) -> list:
     return [max(cluster, key=lambda n: (counts[n], -len(n))) for cluster in clusters]
 
 
+def _derive_champion_roster(num: int) -> list[tuple[str, list]]:
+    """Best-effort auto-fill for a draft that has a winner recorded via
+    !rings (CHAMPIONS) but no manually-curated CHAMPION_TEAMS entry yet —
+    resolves the winning GM(s) to their actual team + roster live from
+    lottos.json, the same drafter-matching !gmteam/!findbest already use.
+    Returns [(team_name, players), ...], normally one team even for a
+    duo/trio-owned champion (all owners resolve to the same team there);
+    more than one only if the recorded winners are genuinely on separate
+    teams. Empty if lottos.json has no data for this draft yet."""
+    winners = CHAMPIONS.get(num, {}).get('w', [])
+    if not winners:
+        return []
+    teams_data = _load_lottos().get(f"ATD {num}", {})
+    if not teams_data:
+        return []
+
+    matched: dict[str, list] = {}
+    for winner in winners:
+        for team_name, entry in teams_data.items():
+            if team_name in matched:
+                continue
+            if _drafter_match(winner, entry.get('drafters', [])):
+                matched[team_name] = entry.get('players', [])
+    return list(matched.items())
+
+
 def _all_winning_teams():
     """Yield (draft_label, team_name, players) for every winning team on
-    record, expanding multi-winner (team draft) entries into one per team."""
+    record, expanding multi-winner (team draft) entries into one per team.
+    CHAMPION_TEAMS (manually curated — mainly older drafts predating
+    lottos.json tracking) takes priority; any draft recorded as a champion
+    via !rings but missing from there falls back to _derive_champion_roster,
+    so !winner <player> picks up a new champion automatically instead of
+    needing a code change + redeploy each time."""
+    seen_nums = set()
     for num in sorted(CHAMPION_TEAMS.keys(), key=lambda k: (int(str(k).split('-')[0]), str(k))):
+        seen_nums.add(int(str(num).split('-')[0]))
         entry = CHAMPION_TEAMS[num]
         label = f"ATD {num}"
         if 'teams' in entry:
@@ -2248,6 +2713,14 @@ def _all_winning_teams():
                 yield label, t['team'], t['players']
         else:
             yield label, entry['team'], entry['players']
+
+    for num in sorted(CHAMPIONS.keys()):
+        if num in seen_nums:
+            continue
+        label = f"ATD {num}"
+        for team_name, players in _derive_champion_roster(num):
+            if players:
+                yield label, team_name, players
 
 
 def _build_win_counts() -> dict:
@@ -2279,6 +2752,36 @@ def _build_win_counts() -> dict:
     return merged
 
 
+def _build_ring_counts() -> dict:
+    """canonical drafter/GM name -> {'count': int, 'drafts': [draft_num, ...]}
+    across every ATD championship on record (CHAMPIONS['w'] — the person who
+    actually won the draft, not a player on their roster), with
+    near-duplicate spellings of the same drafter merged together."""
+    raw_counts = {}
+    for num, data in CHAMPIONS.items():
+        for name in data.get('w', []):
+            info = raw_counts.setdefault(name, {'count': 0, 'drafts': []})
+            info['count'] += 1
+            info['drafts'].append(num)
+
+    canonical_names = _dedupe_names(list(raw_counts.keys()))
+    canon_lookup = {}
+    for canon in canonical_names:
+        for raw in raw_counts:
+            if difflib.SequenceMatcher(None, raw.lower(), canon.lower()).ratio() >= 0.88 or raw == canon:
+                canon_lookup.setdefault(canon, []).append(raw)
+
+    merged = {}
+    for canon, raws in canon_lookup.items():
+        total = 0
+        drafts = []
+        for raw in set(raws):
+            total += raw_counts[raw]['count']
+            drafts.extend(raw_counts[raw]['drafts'])
+        merged[canon] = {'count': total, 'drafts': sorted(drafts)}
+    return merged
+
+
 @bot.command(name='winner')
 async def cmd_winner(ctx, *, args: str = ''):
     if not _in_channel(ctx):
@@ -2290,6 +2793,9 @@ async def cmd_winner(ctx, *, args: str = ''):
 
     if not args:
         counts = await loop.run_in_executor(None, _build_win_counts)
+        drafts_tracked = await loop.run_in_executor(
+            None, lambda: len({label for label, _, _ in _all_winning_teams()})
+        )
 
         ranking = sorted(counts.items(), key=lambda x: x[1]['count'], reverse=True)
         lines = []
@@ -2301,7 +2807,7 @@ async def cmd_winner(ctx, *, args: str = ''):
         view = PlayerListView(
             title="🏆 Most Championships — Players",
             lines=lines,
-            subtitle=f"`{len(counts)} unique players have won at least once  ·  {len(CHAMPION_TEAMS)} drafts tracked`",
+            subtitle=f"`{len(counts)} unique players have won at least once  ·  {drafts_tracked} drafts tracked`",
             per_page=20,
         )
         await ctx.send(embed=view.get_embed(), view=view)
@@ -2345,6 +2851,15 @@ async def cmd_winner(ctx, *, args: str = ''):
     d_suffix = f"-D{m.group(3)}" if m.group(3) else None
     key = f"{num}{d_suffix}" if d_suffix else num
     entry = CHAMPION_TEAMS.get(key, CHAMPION_TEAMS.get(num))
+
+    if not entry and not d_suffix:
+        # No manually-curated entry — fall back to deriving it live from
+        # !rings' winner record + lottos.json (see _derive_champion_roster).
+        derived = _derive_champion_roster(num)
+        if len(derived) == 1:
+            entry = {"team": derived[0][0], "players": derived[0][1]}
+        elif len(derived) > 1:
+            entry = {"teams": [{"team": t, "players": p} for t, p in derived]}
 
     if not entry:
         await ctx.send(embed=_err(f"❌ No winner recorded for ATD {num}."))
@@ -2398,7 +2913,10 @@ async def cmd_loser(ctx):
                 name for key, name in all_players.items()
                 if key not in winners and not _fuzzy_matches_any(name, winners_list)
             ]
-            return sorted(_dedupe_names(raw_never_won))
+            # Lower ADP (drafted earlier on average) ranks higher — surfaces
+            # the biggest "should've won by now" names first instead of
+            # burying them alphabetically.
+            return sorted(_dedupe_names(raw_never_won), key=_get_adp)
 
         loop = asyncio.get_event_loop()
         never_won = await loop.run_in_executor(None, _compute_never_won)
@@ -2987,6 +3505,7 @@ async def cmd_winhelp(ctx):
     ))
     embed.add_field(name="⚙️ Admin", inline=False, value=(
         "`!setlotto ATD <num>` — Import a draft lotto (paste lines below)\n"
+        "`!deletelotto ATD <num>` — Wipe a draft's stored lotto so !setlotto can rebuild it clean\n"
         "`!importlottos` — Upload a lottos.json file (attach to message)\n"
         "`!refreshrosters` — Pull latest rosters from the Google Sheet\n"
         "`!edit ATD <num>` — Interactive GM editor for a draft\n"

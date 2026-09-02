@@ -1,4 +1,4 @@
-app = "atd-win-bot"
+app = "atd-rotation-bot"
 primary_region = "ewr"
 
 [build]
@@ -7,10 +7,10 @@ primary_region = "ewr"
   STATE_DIR = "/data"
 
 [[mounts]]
-  source      = "atd_win_bot_data"
+  source      = "atd_rotation_bot_data"
   destination = "/data"
 
 [[vm]]
-  memory = "512mb"
+  memory = "256mb"
   cpu_kind = "shared"
   cpus = 1

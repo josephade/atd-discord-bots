@@ -215,8 +215,9 @@ PLAYER_POSITIONS = {
     "Jamal Mashburn":            "SF/SG",
     "Eddie Johnson":             "SG/PG",
     "Paul Pierce":               "SF/SG",
+    "Randy Smith":               "SG/SF",
 
-    # ── Small Forwards 
+    # ── Small Forwards
     "LeBron James":              "PF/SF/PG",
     "Kevin Durant":              "SF/PF",
     "Ron Artest":                "SF/PF",

@@ -277,6 +277,7 @@ EMOJI_TEAM_MAP = {
     "CarolinaPanthers":            "Carolina Panthers",
     "oneaboveall":                 "One Above All",
     "texas_am_aggies":             "Texas A&M Aggies",
+    "SetonHallPirates":            "Seton Hall Pirates",
     "WCU":                         "Western Carolina Catamounts",
     "saints":                      "New Orleans Saints",
     "heat~2":                      "Miami Heat",
@@ -351,6 +352,8 @@ EMOJI_TEAM_MAP = {
     "chi3": "Chicago Bulls",
     "Patriots": "New England Patriots",
     "Nuggets": "Denver Nuggets",
+    "Blazers": "Portland Trail Blazers",
+    "mavs": "Dallas Mavericks",
 }
 
 # Unicode (built-in Discord) emojis → team names.
@@ -736,4 +739,8 @@ UNICODE_EMOJI_MAP = {
     "IM":  "Isle of Man",
     "🇧🇹": "Bhutan",
     "BT":  "Bhutan",
+    "PORF": "Portland Fire",
+    "Hofstra": "Hofstra Pride",
+    "GSV": "Golden State Valkyries",
+    "St_Johns_University": "St. John's Red Storm",
 }

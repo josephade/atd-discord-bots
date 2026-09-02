@@ -1553,4 +1553,19 @@ CHAMPION_TEAMS = {
             {"name": "Andrew Bogut",       "year": "2009-10"},
         ],
     },
+    108: {
+        "team": "Philadelphia 76ers",
+        "players": [
+            {"name": "Jason Kidd",         "year": "2002-03"},
+            {"name": "Dwyane Wade",        "year": "2008-09"},
+            {"name": "Mitch Richmond",     "year": "1996-97"},
+            {"name": "Lauri Markkanen",    "year": "2022-23"},
+            {"name": "Willis Reed",        "year": "1969-70"},
+            {"name": "Donovan Mitchell",   "year": "2023-24"},
+            {"name": "Kirk Hinrich",       "year": "2006-07"},
+            {"name": "Bob Dandridge",      "year": "1978-79"},
+            {"name": "Sam Perkins",        "year": "1994-95"},
+            {"name": "Artis Gilmore",      "year": "1974-75"},
+        ],
+    },
 }

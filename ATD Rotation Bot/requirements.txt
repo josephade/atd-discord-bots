@@ -1,4 +1,6 @@
 discord.py
 aiohttp
-beautifulsoup4
+gspread
+oauth2client
 python-dotenv
+Pillow

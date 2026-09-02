@@ -23,10 +23,21 @@ TEAM_BUDGET = int(os.getenv('TEAM_BUDGET', '100'))
 # Set: fly secrets set DRAFT_LIST_BOT_ID=<id> --app atd-team-sheet-bot
 DRAFT_LIST_BOT_ID = int(os.getenv('DRAFT_LIST_BOT_ID', 0)) or None
 
+# Additional bot user IDs to trust the same way as DRAFT_LIST_BOT_ID (e.g. ATD
+# Draft Theme Bot, posting anonymized picks on a hidden GM's behalf).
+# Comma-separated. Set: fly secrets set EXTRA_TRUSTED_BOT_IDS=<id1>,<id2> --app atd-team-sheet-bot
+EXTRA_TRUSTED_BOT_IDS = {int(x) for x in os.getenv('EXTRA_TRUSTED_BOT_IDS', '').split(',') if x.strip()}
+TRUSTED_BOT_IDS = ({DRAFT_LIST_BOT_ID} if DRAFT_LIST_BOT_ID else set()) | EXTRA_TRUSTED_BOT_IDS
+
 # User ID of the ATD Timer Bot — its Steal/Block/Lock confirmation messages
 # (lines starting with "SBL_STEAL |" / "SBL_BLOCK |") are trusted and acted on.
 # Set: fly secrets set TIMER_BOT_ID=<id> --app atd-team-sheet-bot
 TIMER_BOT_ID = int(os.getenv('TIMER_BOT_ID', 0)) or None
+
+# User ID of the ATD Flux Bot — its "Flux is done" confirmation drives the
+# Rising Budget Flux per-channel budget bump.
+# Set: fly secrets set FLUX_BOT_ID=<id> --app atd-team-sheet-bot
+FLUX_BOT_ID = int(os.getenv('FLUX_BOT_ID', 0)) or None
 
 # If the service account JSON is provided as an env var (e.g. on Fly.io),
 # write it to a temp file so oauth2client can read it normally.

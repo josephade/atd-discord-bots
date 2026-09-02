@@ -5,6 +5,7 @@ Also supports roundless (money-based dynamic pick order) mode.
 """
 import json
 import os
+import random
 from datetime import datetime, timezone
 
 from config import ROUNDS
@@ -20,14 +21,15 @@ HISTORY_FILE = os.path.join(_state_dir, "skip_history.json")
 
 # ATD snake direction per round (0-indexed).
 # True = reversed (picks N→1), False = forward (picks 1→N).
-# TEMPORARILY DISABLED flips for budget draft — re-enable when done
 # Normal ATD (with flips on rounds 3 and 6):
-# _REVERSED = [False, True, True, False, True, True, False, True, False, True]
-# Standard snake (no flips):
-_REVERSED = [False, True, False, True, False, True, False, True, False, True]
+_REVERSED_FLIPS    = [False, True, True, False, True, True, False, True, False, True]
+# "snake+budget" mode's rule is "no 3rd/6th round flip" — standard alternating snake:
+_REVERSED_NO_FLIPS = [False, True, False, True, False, True, False, True, False, True]
 
 
-def build_snake_order(num_teams: int, penalty_teams: list[int] = None) -> list[list[int]]:
+def build_snake_order(num_teams: int, penalty_teams: list[int] = None,
+                       base_order: list[int] = None, start_round: int = 0,
+                       existing_order: list[list[int]] = None, flips: bool = True) -> list[list[int]]:
     """
     Build the full pick order for all rounds.
     Returns a list of ROUNDS lists, each containing team indices in pick order.
@@ -35,13 +37,26 @@ def build_snake_order(num_teams: int, penalty_teams: list[int] = None) -> list[l
     penalty_teams: indices of teams that drafted LeBron or MJ.
     From round 6 onward, those teams are moved to the END of each round.
     If multiple penalty teams exist, their relative snake order is preserved.
+
+    base_order: the team-index sequence used as a forward round's order,
+    before any snake reversal. Defaults to range(num_teams); pass a shuffled
+    permutation to draw a fresh lottery (see reroll_from_round below).
+
+    start_round / existing_order: build only rounds start_round..ROUNDS-1,
+    prefixed with existing_order's rounds before start_round left untouched.
+    Lets a mid-draft re-lottery leave already-drafted rounds exactly as-is.
+
+    flips: True for the real ATD pattern (extra reversal on rounds 3 and 6);
+    False for plain alternating snake — pass (mode != "snake+budget").
     """
     penalty_teams = penalty_teams or []
-    order = []
+    base_order = base_order if base_order is not None else list(range(num_teams))
+    order = list(existing_order[:start_round]) if existing_order else []
+    reversed_pattern = _REVERSED_FLIPS if flips else _REVERSED_NO_FLIPS
 
-    for r in range(ROUNDS):
-        rev = _REVERSED[r] if r < len(_REVERSED) else (r % 2 == 1)
-        seq = list(range(num_teams))
+    for r in range(start_round, ROUNDS):
+        rev = reversed_pattern[r] if r < len(reversed_pattern) else (r % 2 == 1)
+        seq = list(base_order)
         if rev:
             seq.reverse()
 
@@ -54,6 +69,86 @@ def build_snake_order(num_teams: int, penalty_teams: list[int] = None) -> list[l
         order.append(seq)
 
     return order
+
+
+def reroll_from_round(pick_order: list[list[int]], num_teams: int, start_round: int,
+                       penalty_teams: list[int] = None, flips: bool = True) -> list[list[int]]:
+    """Draw a brand new lottery for rounds start_round..ROUNDS-1 (0-indexed),
+    leaving every round before start_round exactly as already drafted. Used
+    by !timerlottoreroll for themes like Rising Budget Flux, where pick
+    order is re-drawn every two rounds.
+
+    A plain uniform shuffle can land a team right back near where they just
+    were, which defeats the point of a reroll — so the new draw is
+    constrained to keep every team out of the third of the order (early /
+    middle / late) they were picking in the round right before the reroll.
+    That round is compared in its un-reversed, "1 to num_teams" form — a
+    snake draft's even rounds are just the odd round mirrored, so comparing
+    against the raw (possibly-reversed) round directly can send a team
+    right back toward the *other* round's tier instead of away from both."""
+    def _tier(pos: int) -> int:
+        return min(pos * 3 // num_teams, 2)
+
+    reversed_pattern = _REVERSED_FLIPS if flips else _REVERSED_NO_FLIPS
+
+    if start_round > 0:
+        prev_idx = start_round - 1
+        prev_round = pick_order[prev_idx]
+        was_reversed = reversed_pattern[prev_idx] if prev_idx < len(reversed_pattern) else (prev_idx % 2 == 1)
+        if was_reversed:
+            prev_round = list(reversed(prev_round))
+    else:
+        prev_round = list(range(num_teams))
+    old_tier = {team: _tier(pos) for pos, team in enumerate(prev_round)}
+
+    shuffled = list(range(num_teams))
+    random.shuffle(shuffled)
+
+    # Checking the constraint against `shuffled` itself wouldn't be enough —
+    # odd rounds (and rounds 6+ with a penalty team) reorder it before it's
+    # actually used, so the repair below checks/fixes against what the
+    # first affected round will really look like. Every fix is then
+    # translated back into a swap on `shuffled` itself (by team identity,
+    # not position — works regardless of the reversal/penalty transform)
+    # rather than editing that round's list directly: build_snake_order
+    # derives every later round from this same `shuffled`, so patching a
+    # derived round in isolation would silently desync it from the rounds
+    # that come after — exactly the bug this used to have (Round 4 stayed
+    # on the pre-repair draw while Round 3 alone got fixed, breaking the
+    # snake mirror between them). Patching `shuffled` first and building
+    # once at the end keeps every round consistent with every other.
+    is_reversed_first = reversed_pattern[start_round] if start_round < len(reversed_pattern) else (start_round % 2 == 1)
+    has_penalty_first = start_round >= 5 and bool(penalty_teams)
+
+    def _first_round_view(base: list[int]) -> list[int]:
+        seq = list(base)
+        if is_reversed_first:
+            seq.reverse()
+        if has_penalty_first:
+            normal  = [t for t in seq if t not in penalty_teams]
+            penalty = sorted(penalty_teams, reverse=True)
+            seq = normal + penalty
+        return seq
+
+    swappable = range(num_teams - len(penalty_teams)) if has_penalty_first else range(num_teams)
+    for _ in range(num_teams * num_teams):
+        first_view = _first_round_view(shuffled)
+        violations = [i for i in swappable if _tier(i) == old_tier.get(first_view[i], -1)]
+        if not violations:
+            break
+        i = violations[0]
+        team_i = first_view[i]
+        for j in swappable:
+            if j == i:
+                continue
+            team_j = first_view[j]
+            if _tier(j) != old_tier.get(team_i, -1) and _tier(i) != old_tier.get(team_j, -1):
+                pi, pj = shuffled.index(team_i), shuffled.index(team_j)
+                shuffled[pi], shuffled[pj] = shuffled[pj], shuffled[pi]
+                break
+
+    return build_snake_order(num_teams, penalty_teams, base_order=shuffled,
+                              start_round=start_round, existing_order=pick_order, flips=flips)
 
 
 class DraftState:
@@ -197,17 +292,38 @@ class DraftState:
                     self.state = "complete"
 
     def apply_penalty(self, team_idx: int):
-        """Register a LeBron/MJ team and rebuild pick order from round 6 onward."""
+        """Register a LeBron/MJ team and rebuild pick order from round 6 onward.
+        No-op in "snake+budget" mode — that theme has no pick-last penalty."""
+        if self.mode == "snake+budget":
+            return
         if team_idx not in self.penalty_teams:
             self.penalty_teams.append(team_idx)
-        self.pick_order = build_snake_order(self.num_teams, self.penalty_teams)
+        self.pick_order = build_snake_order(self.num_teams, self.penalty_teams, flips=(self.mode != "snake+budget"))
+
+    def _uses_stepped_skip_schedule(self, round_num: int) -> bool:
+        """R3-8 and roundless mode (both 45 min base) use a fixed step-down
+        schedule per skip instead of a flat -5 min/skip deduction. A
+        timer_override (fixed custom timer) always uses the flat formula."""
+        if self.timer_override is not None:
+            return False
+        return self.order_mode == "roundless" or 3 <= round_num <= 8
+
+    def active_skip_threshold(self, round_num: int | None = None) -> int:
+        """Skip count at which a team is skipped instantly with no timer.
+        Higher for the stepped schedule (35/20/10 min steps before AS)."""
+        from config import AS_THRESHOLD, STEPPED_AS_THRESHOLD
+        if self._uses_stepped_skip_schedule(round_num if round_num is not None else self.round_number):
+            return STEPPED_AS_THRESHOLD
+        return AS_THRESHOLD
 
     def effective_timer(self, round_num: int, team_idx: int) -> int:
         """Base timer for this pick minus accumulated skip penalties (min 0).
         Applies even when timer_override (fixed timer mode) is set — a fixed
         base duration doesn't mean skips go unpenalized, just that the base
         itself is a flat value instead of round/mode-dependent."""
-        from config import SKIP_PENALTY
+        from config import SKIP_PENALTY, STEPPED_SKIP_SCHEDULE
+        skip_count = self.teams[team_idx].get("skip_count", 0)
+
         if self.timer_override is not None:
             base = self.timer_override
         elif self.order_mode == "roundless":
@@ -216,13 +332,14 @@ class DraftState:
         else:
             from config import ROUND_TIMERS
             base = ROUND_TIMERS.get(round_num, 1800)
-        deductions = self.teams[team_idx].get("skip_count", 0) * SKIP_PENALTY
-        return max(base - deductions, 0)
+
+        if skip_count > 0 and self._uses_stepped_skip_schedule(round_num):
+            return STEPPED_SKIP_SCHEDULE.get(skip_count, 0)
+        return max(base - skip_count * SKIP_PENALTY, 0)
 
     def is_active_skip(self, team_idx: int) -> bool:
         """Returns True if this team has hit the AS threshold and should be skipped instantly."""
-        from config import AS_THRESHOLD
-        return self.teams[team_idx].get("skip_count", 0) >= AS_THRESHOLD
+        return self.teams[team_idx].get("skip_count", 0) >= self.active_skip_threshold()
 
     # ── Steal / Block / Lock ──────────────────────────────────────────────────
     #

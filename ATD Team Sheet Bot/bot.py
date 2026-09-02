@@ -13,7 +13,7 @@ import requests
 import requests.exceptions
 import fitz  # PyMuPDF — rasterizes the sheet's own PDF export for !matchup
 from PIL import Image, ImageChops
-from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID, TEAM_BUDGET, TIMER_BOT_ID
+from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID, TEAM_BUDGET, TIMER_BOT_ID, FLUX_BOT_ID, TRUSTED_BOT_IDS
 from player_positions import PLAYER_POSITIONS
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
 
@@ -144,14 +144,69 @@ def _remove_channel_sheet(channel_id: int):
     _persist_channel_map()
 
 
+# The "active draft" — a single tab/sheet pointer that general/utility
+# channels (not themselves a specific draft's home channel) can follow, so
+# switching drafts doesn't require re-running !setsheet in every one of
+# them individually. Real per-draft channels keep managing their own
+# _channel_sheet_map entry directly and are unaffected by this.
+_active_draft: dict | None = _config.get("active_draft")
+_active_draft_channels: set[int] = {int(c) for c in _config.get("active_draft_channels", [])}
+
+
+def _persist_active_draft():
+    cfg = _load_config()
+    cfg["active_draft"] = _active_draft
+    cfg["active_draft_channels"] = list(_active_draft_channels)
+    _save_config(cfg)
+
+
 # Per-team dollar budget shown on !roster, applies across every channel this
 # bot manages. Overridable at runtime via !setbudget; falls back to the
 # TEAM_BUDGET config default until set.
 _budget_override: int | None = _config.get("budget")
 
+# Per-channel budget base (e.g. a draft with its own rules, like Rising
+# Budget Flux) — overrides the global default above for that channel only.
+# Set via !setchannelbudget, run in the channel it should apply to.
+_channel_budgets: dict[int, int] = {int(k): v for k, v in _config.get("channel_budgets", {}).items()}
 
-def _get_budget() -> int:
-    return _budget_override if _budget_override is not None else TEAM_BUDGET
+# Rising Budget Flux: base budget increases by this much each time ATD Flux
+# Bot's !flux command finishes a round, tracked per channel since only
+# specific drafts run this rule.
+RISING_BUDGET_BUMP = 6
+_channel_budget_bumps: dict[int, int] = {int(k): v for k, v in _config.get("channel_budget_bumps", {}).items()}
+
+# Channels where !roster shouldn't show a Budget field at all — e.g. a plain
+# snake draft with no pricing. Set via !setnobudget; !setbudget/!setchannelbudget
+# clear it again since setting a real budget number means you want it shown.
+_no_budget_channels: set[int] = {int(c) for c in _config.get("no_budget_channels", [])}
+
+
+def _persist_no_budget_channels():
+    cfg = _load_config()
+    cfg["no_budget_channels"] = list(_no_budget_channels)
+    _save_config(cfg)
+
+
+def _channel_has_budget(channel_id: int) -> bool:
+    return channel_id not in _no_budget_channels
+
+
+# ATD 108's budget-mirror sibling channels — kept tracked so !flux budget
+# bumps propagate to them, but nobody actually submits picks there, so
+# pick-validation errors (e.g. "Unrecognised emoji") are just noise. Real
+# pick errors should only ever show up in the actual draft channel.
+# 934054851485270016 is a general/matchup channel (sheet-mapped for !matchup
+# lookups only) — regular chat there shouldn't be misread as pick attempts.
+_SILENT_PICK_ERROR_CHANNELS = {934052158532378634, 1471629828208988314, 934054851485270016}
+
+
+def _get_budget(channel_id: int = None) -> int:
+    base = _budget_override if _budget_override is not None else TEAM_BUDGET
+    if channel_id is not None:
+        base = _channel_budgets.get(channel_id, base)
+        base += _channel_budget_bumps.get(channel_id, 0)
+    return base
 
 
 def _set_budget(amount: int):
@@ -160,6 +215,28 @@ def _set_budget(amount: int):
     cfg = _load_config()
     cfg["budget"] = amount
     _save_config(cfg)
+
+
+def _set_channel_budget(channel_id: int, amount: int):
+    _channel_budgets[channel_id] = amount
+    _no_budget_channels.discard(channel_id)  # setting a real number means budget is back on
+    cfg = _load_config()
+    channel_budgets = cfg.setdefault("channel_budgets", {})
+    channel_budgets[str(channel_id)] = amount
+    cfg["no_budget_channels"] = list(_no_budget_channels)
+    _save_config(cfg)
+
+
+def _bump_channel_budget(channel_id: int, amount: int) -> int:
+    """Add `amount` to this channel's running budget bump and persist it.
+    Returns the channel's new total bump."""
+    new_total = _channel_budget_bumps.get(channel_id, 0) + amount
+    _channel_budget_bumps[channel_id] = new_total
+    cfg = _load_config()
+    channel_bumps = cfg.setdefault("channel_budget_bumps", {})
+    channel_bumps[str(channel_id)] = new_total
+    _save_config(cfg)
+    return new_total
 
 
 def _get_manager(channel_id: int) -> "SheetManager | None":
@@ -221,6 +298,20 @@ def connect_sheets(sheet_name: str, spreadsheet_id: str = None):
     ws = client.open_by_key(sid).worksheet(sheet_name)
     print(f"✅ Connected to worksheet: '{sheet_name}' (spreadsheet: {sid})")
     return ws
+
+
+def _list_worksheet_titles(spreadsheet_id: str = None) -> list[str]:
+    """All tab names in the spreadsheet — used to resolve 'ATD <num>' shorthand
+    without requiring the tab to already be mapped to some channel."""
+    scope = [
+        'https://spreadsheets.google.com/feeds',
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive',
+    ]
+    sid = spreadsheet_id or SPREADSHEET_ID
+    creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
+    client = gspread.authorize(creds)
+    return [ws.title for ws in client.open_by_key(sid).worksheets()]
 
 
 # =============================================================================
@@ -310,6 +401,45 @@ class SheetManager:
 
         print(f"[Sheet] ❌ Team '{team_name}' not found in sheet")
         return None, None
+
+    def _tab_has_price_column(self, all_data) -> bool:
+        """Whether THIS TAB reserves a 3rd (price) column per team, or whether
+        teams are packed Name+Year only with the next team's block starting
+        immediately after — no-budget/plain-snake tabs (e.g. "ATD 109 -
+        Standard") only have Name+Year per team, so column+2 there is really
+        the START OF THE NEXT TEAM'S BLOCK, not a price cell. Reading or
+        writing it as price would silently corrupt (or misreport) the next
+        team's player.
+
+        A price column's header can be blank, "Price", or even a dollar
+        figure like "$100" (some budget tabs label it with the cap) — so
+        peeking at that one cell isn't reliable. Instead this checks, for
+        every team header found in the tab, whether the cell *two* columns
+        over is itself immediately followed by "Year": every team block
+        starts Name→Year, so if col+3 says "Year", col+2 must be the next
+        team's name — meaning no price column. Decided once per tab (not
+        per team) and cached, since a tab is consistently one layout or the
+        other; a team with nothing after it (last in its row) can't settle
+        the question either way and is skipped.
+        """
+        if hasattr(self, '_price_col_cache'):
+            return self._price_col_cache
+
+        known_teams_lower = {v.strip().lower() for v in EMOJI_TEAM_MAP.values()}
+        votes = []
+        for row in all_data:
+            for col_idx, cell in enumerate(row):
+                if cell.strip().lower() not in known_teams_lower:
+                    continue
+                peek = row[col_idx + 2].strip() if (col_idx + 2) < len(row) else ""
+                after_peek = row[col_idx + 3].strip() if (col_idx + 3) < len(row) else ""
+                if not peek and not after_peek:
+                    continue  # last team in its row — nothing to compare against
+                votes.append(after_peek.lower() != "year")
+
+        result = (sum(votes) > len(votes) / 2) if votes else True
+        self._price_col_cache = result
+        return result
 
     def _find_existing_player(self, player_name, all_data):
         """
@@ -470,7 +600,8 @@ class SheetManager:
         # 5. Write to sheet (batch to minimise API calls)
         name_col  = team_col
         year_col  = team_col + 1
-        price_col = team_col + 2
+        has_price_col = self._tab_has_price_column(all_data)
+        price_col = team_col + 2 if has_price_col else None
 
         updates = [
             {
@@ -483,7 +614,7 @@ class SheetManager:
                 'range': gspread.utils.rowcol_to_a1(target_row, year_col),
                 'values': [[year]],
             })
-        if price:
+        if price and price_col:
             # Strip "$" and write as a number so SUM formulas work in Sheets
             try:
                 price_num = int(float(re.sub(r'[^\d.-]', '', price)))
@@ -493,6 +624,10 @@ class SheetManager:
                 'range': gspread.utils.rowcol_to_a1(target_row, price_col),
                 'values': [[price_num]],
             })
+        elif price and not price_col:
+            print(f"[Pick] ⚠️ Price '{price}' given for {player_name} but this tab has no price "
+                  f"column (team block is Name+Year only) — price not written, avoided corrupting "
+                  f"the next team's block.")
 
         print(f"[Pick] Writing to sheet: row={target_row} col={team_col} → '{player_name}' | year={year} price={price}")
         self._call('batch_update', updates)
@@ -540,8 +675,12 @@ class SheetManager:
         updates = [
             {'range': gspread.utils.rowcol_to_a1(row, col), 'values': [['']]},
             {'range': gspread.utils.rowcol_to_a1(row, col + 1), 'values': [['']]},
-            {'range': gspread.utils.rowcol_to_a1(row, col + 2), 'values': [['']]},
         ]
+        # Only clear col+2 if this tab actually has a price column — on a
+        # no-price tab (teams packed Name+Year only) it's the NEXT team's name
+        # cell, and clearing it would silently wipe that team's player instead.
+        if self._tab_has_price_column(all_data):
+            updates.append({'range': gspread.utils.rowcol_to_a1(row, col + 2), 'values': [['']]})
         self._call('batch_update', updates)
         print(f"[SBL] Removed {player_name} (row {row})")
         return True, None
@@ -556,13 +695,16 @@ class SheetManager:
         row_data  = all_data[row - 1]
         col_idx   = col - 1  # 0-indexed name column
         year_cell  = row_data[col_idx + 1] if (col_idx + 1) < len(row_data) else ""
-        price_cell = row_data[col_idx + 2] if (col_idx + 2) < len(row_data) else ""
+
+        has_price_col = self._tab_has_price_column(all_data)
+        price_cell = (row_data[col_idx + 2] if (col_idx + 2) < len(row_data) else "") if has_price_col else ""
 
         updates = [
             {'range': gspread.utils.rowcol_to_a1(row, col), 'values': [['']]},
             {'range': gspread.utils.rowcol_to_a1(row, col + 1), 'values': [['']]},
-            {'range': gspread.utils.rowcol_to_a1(row, col + 2), 'values': [['']]},
         ]
+        if has_price_col:
+            updates.append({'range': gspread.utils.rowcol_to_a1(row, col + 2), 'values': [['']]})
         self._call('batch_update', updates)
         print(f"[SBL] Stole {player_name} — clearing old slot (row {row}) before re-adding to {new_team_name}")
 
@@ -582,6 +724,7 @@ class SheetManager:
         if not team_row:
             return None, f"Team **{team_name}** was not found in the sheet."
         col_idx = team_col - 1  # 0-indexed
+        has_price_col = self._tab_has_price_column(all_data)
 
         SLOTS = [
             ("PG", "Starter", 1),
@@ -604,7 +747,8 @@ class SheetManager:
                 row_data = all_data[r]
                 player = row_data[col_idx].strip() if col_idx < len(row_data) else ""
                 year = row_data[col_idx + 1].strip() if (col_idx + 1) < len(row_data) else ""
-                price = row_data[col_idx + 2].strip() if (col_idx + 2) < len(row_data) else ""
+                if has_price_col:
+                    price = row_data[col_idx + 2].strip() if (col_idx + 2) < len(row_data) else ""
             roster.append({
                 "position": pos,
                 "slot": slot_type,
@@ -620,6 +764,31 @@ class SheetManager:
         that need the team's (row, col) without re-reading the whole roster."""
         return self._find_team_cell(team_name)
 
+    def _hidden_columns(self) -> set:
+        """1-indexed column numbers hidden by the user on this tab (cached
+        per-instance). Many tabs hide the price column between teams —
+        Google's PDF export doesn't just skip a hidden column when it's part
+        of the requested range, it substitutes the next *visible* column to
+        fill the gap, silently pulling in the neighboring team's block. So
+        any hidden column must never be included in an export range."""
+        if not hasattr(self, '_hidden_cols_cache'):
+            try:
+                meta = self.ws.spreadsheet.fetch_sheet_metadata(
+                    params={'fields': 'sheets(properties(sheetId),data(columnMetadata))'})
+            except Exception as e:
+                print(f"[matchup] Could not fetch column metadata: {e}")
+                self._hidden_cols_cache = set()
+                return self._hidden_cols_cache
+            hidden = set()
+            for s in meta.get('sheets', []):
+                if s['properties']['sheetId'] != self.ws.id:
+                    continue
+                for i, col in enumerate(s.get('data', [{}])[0].get('columnMetadata', []), start=1):
+                    if col.get('hiddenByUser'):
+                        hidden.add(i)
+            self._hidden_cols_cache = hidden
+        return self._hidden_cols_cache
+
     def get_matchup_range(self, team_row: int, col_idx_1based: int):
         """Return (spreadsheet_id, gid, a1_range) covering a team's header row
         + 10 roster rows across its name/year (+price, if used) columns —
@@ -629,16 +798,19 @@ class SheetManager:
         Different tabs lay teams out differently: some have a blank spacer
         column between teams, some have a price column, some have neither and
         butt team blocks directly against each other. So the end column is
-        computed two ways at once:
+        computed several ways at once:
           1. Stop *before* any column whose header cell is itself a known
              team name — otherwise we'd swallow the next team's block whole
              (happens on tabs with zero gap between teams).
           2. Never include a column that's entirely blank — Sheets' PDF
              export doesn't clip cleanly there, it bleeds into whatever comes
              after it instead of stopping (happens on tabs with a blank
-             spacer column between teams)."""
+             spacer column between teams).
+          3. Never include a column hidden by the user (e.g. a hidden price
+             column) — see _hidden_columns()."""
         header_row = self._call('row_values', team_row)
         known_teams = {v.strip().lower() for v in EMOJI_TEAM_MAP.values()}
+        hidden_cols = self._hidden_columns()
 
         def _cell(col):
             return header_row[col - 1].strip() if 0 < col <= len(header_row) else ''
@@ -656,7 +828,8 @@ class SheetManager:
             # team's name column, not something that belongs to this block.
             if val.lower() in known_teams or _cell(c + 1).lower() == 'year':
                 break
-            last_col = c
+            if c not in hidden_cols:
+                last_col = c
 
         start_a1 = gspread.utils.rowcol_to_a1(team_row, col_idx_1based)
         end_a1   = gspread.utils.rowcol_to_a1(team_row + 10, last_col)
@@ -877,7 +1050,7 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 COMMISSIONER_ROLE = "LeComissioner"
 
 
-_PUBLIC_COMMANDS = {'roster', 'find', 'available', 'teams', 'sheethelp', 'sheetinfo', 'claimteam', 'swap', 'myteam', 'addyear'}
+_PUBLIC_COMMANDS = {'roster', 'find', 'available', 'teams', 'sheethelp', 'sheetinfo', 'claimteam', 'swap', 'myteam', 'addyear', 'matchup'}
 
 
 @bot.check
@@ -1026,9 +1199,33 @@ async def on_message(message):
             await _handle_sbl_confirmation(message)
         return
 
-    # Let the Draft List Bot's picks through; ignore all other bot messages.
-    _from_draft_list = bool(DRAFT_LIST_BOT_ID and message.author.id == DRAFT_LIST_BOT_ID)
-    if message.author.bot and not _from_draft_list:
+    # Rising Budget Flux: ATD Flux Bot's !flux command posts a plain-text
+    # "Flux is done" confirmation when a round's flux finishes — bump the
+    # budget for this channel AND every other channel mapped to the same
+    # sheet/tab. Flux Bot only ever runs in one specific channel per draft,
+    # but a draft can have several Discord channels fronting the same
+    # underlying sheet, and they all need to show the same budget.
+    if FLUX_BOT_ID and message.author.id == FLUX_BOT_ID:
+        if "Flux is done" in message.content:
+            entry = _channel_sheet_map.get(message.channel.id)
+            if entry:
+                sibling_ids = [
+                    ch_id for ch_id, e in _channel_sheet_map.items()
+                    if e.get("tab") == entry.get("tab") and e.get("sheet_id") == entry.get("sheet_id")
+                ]
+                for ch_id in sibling_ids:
+                    _bump_channel_budget(ch_id, RISING_BUDGET_BUMP)
+                await message.channel.send(
+                    f"💰 **Rising Budget Flux** — per-team budget bumped by **${RISING_BUDGET_BUMP}**, "
+                    f"now **${_get_budget(message.channel.id)}** "
+                    f"(applied across {len(sibling_ids)} channel{'s' if len(sibling_ids) != 1 else ''} on this sheet)."
+                )
+        return
+
+    # Let trusted bots' picks through (Draft List Bot, and any others in
+    # TRUSTED_BOT_IDS — e.g. ATD Draft Theme Bot); ignore all other bot messages.
+    _from_trusted_bot = message.author.id in TRUSTED_BOT_IDS
+    if message.author.bot and not _from_trusted_bot:
         return
 
     # Always process commands regardless of channel
@@ -1057,7 +1254,7 @@ async def on_message(message):
             _CUSTOM_EMOJI_RE.search(message.content)
             or re.match(r'^\s*\d+\.', message.content)
         )
-        if looks_like_pick:
+        if looks_like_pick and message.channel.id not in _SILENT_PICK_ERROR_CHANNELS:
             await message.add_reaction('❌')
             await message.channel.send(f"❌ {error}")
         return
@@ -1066,11 +1263,12 @@ async def on_message(message):
 
     # Price is mandatory for this draft theme
     if PRICE_REQUIRED and not data.get('price'):
-        await message.add_reaction('❌')
-        await message.channel.send(
-            "❌ **Price is required** for this draft. Include the price in your pick, e.g. `$26`.\n"
-            "Format: `14. <:YourEmoji:> Player Name year $price`"
-        )
+        if message.channel.id not in _SILENT_PICK_ERROR_CHANNELS:
+            await message.add_reaction('❌')
+            await message.channel.send(
+                "❌ **Price is required** for this draft. Include the price in your pick, e.g. `$26`.\n"
+                "Format: `14. <:YourEmoji:> Player Name year $price`"
+            )
         return
 
     try:
@@ -1122,8 +1320,9 @@ async def on_message(message):
         await asyncio.sleep(60)
         await bot_msg.delete()
     else:
-        await message.add_reaction('❌')
-        await message.channel.send(f"❌ {result}")
+        if message.channel.id not in _SILENT_PICK_ERROR_CHANNELS:
+            await message.add_reaction('❌')
+            await message.channel.send(f"❌ {result}")
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -1199,6 +1398,64 @@ async def cmd_setsheetall(ctx, *, args: str):
     await ctx.send(f"✅ **{len(channel_ids)} channel(s)** now write to worksheet **{tab}**.")
 
 
+@bot.command(name='setatdroster')
+async def cmd_setatdroster(ctx, *, args: str):
+    """!setatdroster <num> [keyword] — point EVERY currently-mapped channel
+    (plus this one) at an ATD season by number, e.g. `!setatdroster 109`.
+    Searches every tab in the spreadsheet, so the tab doesn't need to already
+    be mapped anywhere first (unlike !setactivedraft ATD <num>). If more than
+    one tab matches that number (split drafts, regional brackets, etc.), add a
+    keyword from the tab name to disambiguate, e.g. `!setatdroster 100 west`."""
+    args = args.strip()
+    m = re.match(r'(?i)^(?:ATD\s*)?(\d+)\s*(.*)$', args)
+    if not m:
+        await ctx.send("❌ Usage: `!setatdroster <num>` — e.g. `!setatdroster 109`. Add a keyword if there are multiple tabs for that number, e.g. `!setatdroster 100 west`.")
+        return
+    draft_num, keyword = m.group(1), m.group(2).strip().lower()
+
+    try:
+        loop = asyncio.get_event_loop()
+        titles = await loop.run_in_executor(None, _list_worksheet_titles, SPREADSHEET_ID)
+    except Exception as e:
+        await ctx.send(f"❌ Couldn't read the spreadsheet's tab list: {e}")
+        return
+
+    num_pattern = re.compile(rf'(?i)^ATD\s*{re.escape(draft_num)}\b')
+    candidates = [t for t in titles if num_pattern.match(t)]
+    if keyword:
+        # Word-boundary match, not substring — "west" must not also match "Midwest".
+        kw_pattern = re.compile(rf'(?i)\b{re.escape(keyword)}\b')
+        candidates = [t for t in candidates if kw_pattern.search(t)]
+
+    if not candidates:
+        suffix = f" matching “{keyword}”" if keyword else ""
+        await ctx.send(f"❌ No worksheet tab found for **ATD {draft_num}**{suffix}. Check the number/keyword.")
+        return
+
+    if len(candidates) > 1:
+        listing = "\n".join(f"• {t}" for t in candidates)
+        await ctx.send(
+            f"⚠️ Multiple tabs match **ATD {draft_num}** — add a keyword to pick one:\n{listing}\n\n"
+            f"Example: `!setatdroster {draft_num} {candidates[0].split('-')[-1].strip().split()[0].lower()}`"
+        )
+        return
+
+    tab = candidates[0]
+    try:
+        ws = await loop.run_in_executor(None, connect_sheets, tab, SPREADSHEET_ID)
+    except Exception as e:
+        await ctx.send(f"❌ Failed to connect to **{tab}**: {e}")
+        return
+
+    channel_ids = set(_channel_sheet_map.keys())
+    channel_ids.add(ctx.channel.id)
+    for ch_id in channel_ids:
+        _set_channel_sheet(ch_id, tab, SPREADSHEET_ID)
+        _channel_managers[ch_id] = SheetManager(ws, SPREADSHEET_ID, ch_id)
+
+    await ctx.send(f"✅ **{len(channel_ids)} channel(s)** now point to **{tab}** — `!roster` and other sheet commands will use it everywhere.")
+
+
 @bot.command(name='addchannel')
 async def cmd_addchannel(ctx, channel: discord.TextChannel, *, args: str):
     """Map a channel to a worksheet tab. Usage: !addchannel #channel [SpreadsheetID_or_URL] Tab Name"""
@@ -1237,6 +1494,122 @@ async def cmd_setbudget(ctx, amount: int):
         return
     _set_budget(amount)
     await ctx.send(f"✅ Budget set to **${amount}** across all channels.")
+
+
+@bot.command(name='setchannelbudget')
+async def cmd_setchannelbudget(ctx, amount: int):
+    """Set the per-team budget for THIS channel only, overriding the global
+    !setbudget default — for drafts with their own rules (e.g. Rising Budget
+    Flux). Usage: !setchannelbudget <amount>, run in the channel it applies to."""
+    if amount <= 0:
+        await ctx.send("❌ Budget must be a positive number.")
+        return
+    _set_channel_budget(ctx.channel.id, amount)
+    await ctx.send(f"✅ Budget for **#{ctx.channel.name}** set to **${amount}** (other channels unaffected).")
+
+
+@bot.command(name='setnobudget')
+async def cmd_setnobudget(ctx):
+    """!setnobudget — mark THIS channel as a no-budget draft (e.g. a plain
+    snake with no pricing). !roster here stops showing a Budget field.
+    Run !setchannelbudget <amount> to turn budget tracking back on."""
+    _no_budget_channels.add(ctx.channel.id)
+    _persist_no_budget_channels()
+    await ctx.send(f"✅ **#{ctx.channel.name}** is now a no-budget draft — `!roster` here won't show a Budget field.")
+
+
+@bot.command(name='setactivedraft')
+async def cmd_setactivedraft(ctx, *, args: str):
+    """Set the current 'active draft' and immediately push it to every
+    channel following it (via !followactivedraft) — so you only map the
+    new draft once instead of re-running !setsheet in each channel.
+    Usage: !setactivedraft ATD <num>  (matches an already-tracked channel's
+    tab name)  or  !setactivedraft [SpreadsheetID] Tab Name  (explicit)."""
+    global _active_draft
+
+    m = re.match(r'(?i)^ATD\s*(\d+)\s*$', args.strip())
+    if m:
+        draft_num = m.group(1)
+        target = f"ATD {draft_num}".upper()
+        match = next(
+            (entry for entry in _channel_sheet_map.values()
+             if entry.get("tab", "").upper().startswith(target)),
+            None,
+        )
+        if not match:
+            await ctx.send(
+                f"❌ No tracked sheet found for **ATD {draft_num}**. Map at least one channel to "
+                f"it first with `!setsheet`/`!addchannel`, or use `!setactivedraft [SheetID] Tab Name`."
+            )
+            return
+        sid, tab = match["sheet_id"], match["tab"]
+    else:
+        sid, tab = _extract_spreadsheet_id(args)
+        sid = sid or SPREADSHEET_ID
+        if not tab:
+            await ctx.send("❌ Usage: `!setactivedraft ATD <num>` or `!setactivedraft [SpreadsheetID] Tab Name`")
+            return
+
+    try:
+        loop = asyncio.get_event_loop()
+        ws = await loop.run_in_executor(None, connect_sheets, tab, sid)
+    except gspread.exceptions.WorksheetNotFound:
+        await ctx.send(f"❌ No worksheet tab named **{tab}** found. Check the spelling.")
+        return
+    except Exception as e:
+        await ctx.send(f"❌ Failed: {e}")
+        return
+
+    _active_draft = {"tab": tab, "sheet_id": sid}
+    _persist_active_draft()
+
+    updated = []
+    for ch_id in _active_draft_channels:
+        _set_channel_sheet(ch_id, tab, sid)
+        _channel_managers[ch_id] = SheetManager(ws, sid, ch_id)
+        updated.append(ch_id)
+
+    lines = "\n".join(f"<#{c}>" for c in updated) if updated else \
+        "*(none yet — run `!followactivedraft` in a channel to have it follow this)*"
+    await ctx.send(f"✅ Active draft set to **{tab}**.\nUpdated {len(updated)} following channel(s):\n{lines}")
+
+
+@bot.command(name='followactivedraft')
+async def cmd_followactivedraft(ctx):
+    """Make THIS channel always follow the active draft set by
+    !setactivedraft, instead of needing its own !setsheet/!addchannel call
+    every time the active draft changes."""
+    _active_draft_channels.add(ctx.channel.id)
+    _persist_active_draft()
+
+    if not _active_draft:
+        await ctx.send(
+            f"✅ **#{ctx.channel.name}** will follow the active draft — "
+            f"no active draft set yet, use `!setactivedraft` to set one."
+        )
+        return
+
+    try:
+        loop = asyncio.get_event_loop()
+        ws = await loop.run_in_executor(None, connect_sheets, _active_draft["tab"], _active_draft["sheet_id"])
+        _set_channel_sheet(ctx.channel.id, _active_draft["tab"], _active_draft["sheet_id"])
+        _channel_managers[ctx.channel.id] = SheetManager(ws, _active_draft["sheet_id"], ctx.channel.id)
+        await ctx.send(f"✅ **#{ctx.channel.name}** now follows the active draft (currently **{_active_draft['tab']}**).")
+    except Exception as e:
+        await ctx.send(f"⚠️ Now following the active draft, but failed to apply it immediately: {e}")
+
+
+@bot.command(name='unfollowactivedraft')
+async def cmd_unfollowactivedraft(ctx):
+    """Stop this channel from auto-updating when the active draft changes.
+    Its current sheet mapping is left as-is; use !setsheet/!removechannel
+    to change it manually from here on."""
+    if ctx.channel.id not in _active_draft_channels:
+        await ctx.send(f"❌ **#{ctx.channel.name}** isn't following the active draft.")
+        return
+    _active_draft_channels.discard(ctx.channel.id)
+    _persist_active_draft()
+    await ctx.send(f"✅ **#{ctx.channel.name}** will no longer auto-update with the active draft.")
 
 
 @bot.command(name='channels')
@@ -1594,6 +1967,7 @@ async def cmd_swap(ctx, *, args: str):
                 return
 
             col_idx = team_col - 1  # 0-indexed
+            has_price_col = manager._tab_has_price_column(all_data)
 
             # Read all 10 roster slots
             slots = {}
@@ -1603,7 +1977,7 @@ async def cmd_swap(ctx, *, args: str):
                     row_data = all_data[r]
                     cell_name = row_data[col_idx].strip() if col_idx < len(row_data) else ""
                     cell_year = row_data[col_idx + 1].strip() if (col_idx + 1) < len(row_data) else ""
-                    cell_price = row_data[col_idx + 2].strip() if (col_idx + 2) < len(row_data) else ""
+                    cell_price = (row_data[col_idx + 2].strip() if (col_idx + 2) < len(row_data) else "") if has_price_col else ""
                 else:
                     cell_name = cell_year = cell_price = ""
                 slots[offset] = {"row": team_row + offset, "name": cell_name, "year": cell_year, "price": cell_price, "offset": offset}
@@ -1627,11 +2001,12 @@ async def cmd_swap(ctx, *, args: str):
             updates = [
                 {"range": gspread.utils.rowcol_to_a1(slot_a["row"], team_col), "values": [[slot_b["name"]]]},
                 {"range": gspread.utils.rowcol_to_a1(slot_a["row"], team_col + 1), "values": [[slot_b["year"]]]},
-                {"range": gspread.utils.rowcol_to_a1(slot_a["row"], team_col + 2), "values": [[slot_b["price"]]]},
                 {"range": gspread.utils.rowcol_to_a1(slot_b["row"], team_col), "values": [[slot_a["name"]]]},
                 {"range": gspread.utils.rowcol_to_a1(slot_b["row"], team_col + 1), "values": [[slot_a["year"]]]},
-                {"range": gspread.utils.rowcol_to_a1(slot_b["row"], team_col + 2), "values": [[slot_a["price"]]]},
             ]
+            if has_price_col:
+                updates.append({"range": gspread.utils.rowcol_to_a1(slot_a["row"], team_col + 2), "values": [[slot_b["price"]]]})
+                updates.append({"range": gspread.utils.rowcol_to_a1(slot_b["row"], team_col + 2), "values": [[slot_a["price"]]]})
             manager._call('batch_update', updates)
 
     except Exception as exc:
@@ -2269,42 +2644,56 @@ async def cmd_available(ctx, *, position: str):
 
 
 @bot.command(name='roster')
-async def cmd_roster(ctx, *, team_input: str):
-    """View a team's current roster from the sheet. Accepts team name, emoji name, or custom emoji."""
-    # Extract emoji name from custom emoji syntax (e.g. <:NW:123456> → "NW")
-    emoji_match = _CUSTOM_EMOJI_RE.search(team_input)
-    team_name = None
-    if emoji_match:
-        lookup = emoji_match.group(1)
-    else:
-        # Fall back to built-in Unicode emojis (e.g. flag_fr 🇫🇷, England 🏴󠁧󠁢󠁥󠁮󠁧󠁿)
-        for char, tname in UNICODE_EMOJI_MAP.items():
-            if char in team_input:
-                team_name = tname
-                break
-        lookup = team_input.strip()
+async def cmd_roster(ctx, *, team_input: str = ""):
+    """View a team's current roster from the sheet. Accepts team name, emoji
+    name, or custom emoji — or, with no argument, defaults to the team
+    you've claimed via !claimteam/!assignteam."""
+    team_input = team_input.strip()
+    emoji_match = None
 
-    # Resolve: emoji name → exact team name → partial team name → raw
-    if not team_name:
-        team_name = EMOJI_TEAM_MAP.get(lookup)
-    if not team_name:
-        lookup_lower = lookup.lower()
-        for ename, tname in EMOJI_TEAM_MAP.items():
-            if ename.lower() == lookup_lower:
-                team_name = tname
-                break
-    if not team_name:
-        for tname in set(EMOJI_TEAM_MAP.values()):
-            if tname.lower() == lookup.lower():
-                team_name = tname
-                break
-    if not team_name:
-        for tname in set(EMOJI_TEAM_MAP.values()):
-            if lookup.lower() in tname.lower():
-                team_name = tname
-                break
-    if not team_name:
-        team_name = lookup
+    if not team_input:
+        team_name = _team_owners.get(str(ctx.author.id))
+        if not team_name:
+            await ctx.send(
+                "❌ You haven't claimed a team. Use `!claimteam <:YourEmoji:>` first, "
+                "or specify one directly: `!roster <:TeamEmoji:>`."
+            )
+            return
+    else:
+        # Extract emoji name from custom emoji syntax (e.g. <:NW:123456> → "NW")
+        emoji_match = _CUSTOM_EMOJI_RE.search(team_input)
+        team_name = None
+        if emoji_match:
+            lookup = emoji_match.group(1)
+        else:
+            # Fall back to built-in Unicode emojis (e.g. flag_fr 🇫🇷, England 🏴󠁧󠁢󠁥󠁮󠁧󠁿)
+            for char, tname in UNICODE_EMOJI_MAP.items():
+                if char in team_input:
+                    team_name = tname
+                    break
+            lookup = team_input
+
+        # Resolve: emoji name → exact team name → partial team name → raw
+        if not team_name:
+            team_name = EMOJI_TEAM_MAP.get(lookup)
+        if not team_name:
+            lookup_lower = lookup.lower()
+            for ename, tname in EMOJI_TEAM_MAP.items():
+                if ename.lower() == lookup_lower:
+                    team_name = tname
+                    break
+        if not team_name:
+            for tname in set(EMOJI_TEAM_MAP.values()):
+                if tname.lower() == lookup.lower():
+                    team_name = tname
+                    break
+        if not team_name:
+            for tname in set(EMOJI_TEAM_MAP.values()):
+                if lookup.lower() in tname.lower():
+                    team_name = tname
+                    break
+        if not team_name:
+            team_name = lookup
 
     # Use current channel's manager if available, otherwise search all mappings
     manager = await _get_manager_async(ctx.channel.id)
@@ -2340,8 +2729,11 @@ async def cmd_roster(ctx, *, team_input: str):
         await ctx.send(f"❌ {last_error}")
         return
 
-    # Use the team's custom emoji in the title and as thumbnail if the user passed one
-    title_prefix = emoji_match.group(0) if emoji_match else "🏀"
+    # Discord embed titles don't render custom emoji — they fall back to showing
+    # the bare ":name:" shortcode as literal text (unlike descriptions/fields,
+    # which render them fine). So the title always uses the plain fallback; the
+    # team's actual emoji still shows up correctly via the thumbnail image below.
+    title_prefix = "🏀"
     thumbnail_url = f"https://cdn.discordapp.com/emojis/{emoji_match.group(2)}.png" if emoji_match else None
 
     # Find GM(s) assigned to this team
@@ -2353,19 +2745,21 @@ async def cmd_roster(ctx, *, team_input: str):
     bench_filled    = sum(1 for e in roster[5:] if e["player"])
     color           = discord.Color.gold() if filled == 10 else discord.Color.blue()
 
-    spent = 0
-    for e in roster:
-        if not e["player"] or not e["price"]:
-            continue
-        try:
-            spent += int(float(re.sub(r'[^\d.-]', '', e["price"])))
-        except (ValueError, TypeError):
-            pass
-    team_budget = _get_budget()
-    remaining   = team_budget - spent
-
     embed = discord.Embed(title=f"{title_prefix} {result_name}", description=gm_line, color=color)
-    embed.add_field(name="💰 Budget", value=f"${remaining} remaining (${spent}/${team_budget} spent)", inline=False)
+
+    if _channel_has_budget(ctx.channel.id):
+        spent = 0
+        for e in roster:
+            if not e["player"] or not e["price"]:
+                continue
+            try:
+                spent += int(float(re.sub(r'[^\d.-]', '', e["price"])))
+            except (ValueError, TypeError):
+                pass
+        team_budget = _get_budget(ctx.channel.id)
+        remaining   = team_budget - spent
+        embed.add_field(name="💰 Budget", value=f"${remaining} remaining (${spent}/${team_budget} spent)", inline=False)
+
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
 
@@ -2407,10 +2801,19 @@ def _get_export_token() -> str:
     return creds.get_access_token().access_token
 
 
-def _autocrop_whitespace(img: "Image.Image") -> "Image.Image":
-    bg = Image.new("RGB", img.size, (255, 255, 255))
-    diff = ImageChops.difference(img.convert("RGB"), bg)
-    bbox = diff.getbbox()
+def _autocrop_whitespace(img: "Image.Image", threshold: int = 60) -> "Image.Image":
+    """Crop away white margin, including the faint anti-aliased near-white
+    fringe PDF rasterization leaves right at the true edge of a filled cell.
+    Cropping on ANY nonzero diff from pure white keeps that fringe (it reads
+    as "content"), which shows up as a thin white outline around each team
+    block — doubled into a visible seam where two blocks get pasted
+    edge-to-edge. Ignoring near-white pixels below `threshold` trims past
+    the fringe instead of hugging it."""
+    rgb = img.convert("RGB")
+    bg = Image.new("RGB", rgb.size, (255, 255, 255))
+    diff = ImageChops.difference(rgb, bg).convert("L")
+    mask = diff.point(lambda p: 255 if p > threshold else 0)
+    bbox = mask.getbbox()
     return img.crop(bbox) if bbox else img
 
 
@@ -2507,22 +2910,55 @@ def _resolve_team_name_from_emoji(token: str):
 @bot.command(name='matchup')
 async def cmd_matchup(ctx, *, args: str = ''):
     """Post a real screenshot of two teams' cells from the Google Sheet, side
-    by side. Usage: !matchup <emoji1> <emoji2>"""
-    parts = args.split()
-    if len(parts) != 2:
-        await ctx.send("❌ Usage: `!matchup <team1 emoji> <team2 emoji>`")
-        return
+    by side. Usage: !matchup <emoji1> <emoji2> (uses this channel's mapped
+    sheet) or !matchup ATD <num> <emoji1> <emoji2> (works from ANY channel,
+    by tab name, so it doesn't need this channel to be sheet-mapped)."""
+    m = re.match(r'(?i)^ATD\s*(\d+)\s+(\S+)\s+(\S+)\s*$', args.strip())
+    if m:
+        draft_num = m.group(1)
+        team1_raw, team2_raw = m.group(2), m.group(3)
 
-    team1_name, _ = _resolve_team_name_from_emoji(parts[0])
-    team2_name, _ = _resolve_team_name_from_emoji(parts[1])
+        # Resolve the draft number to a tracked channel via its tab name
+        # (e.g. "ATD 108") instead of requiring this exact channel to be
+        # mapped — this is what makes the command usable from anywhere.
+        target = f"ATD {draft_num}".upper()
+        lookup_channel_id = next(
+            (ch_id for ch_id, entry in _channel_sheet_map.items()
+             if entry.get("tab", "").upper().startswith(target)),
+            None,
+        )
+        if lookup_channel_id is None:
+            await ctx.send(f"❌ No tracked sheet found for **ATD {draft_num}**.")
+            return
+    else:
+        parts = args.split()
+        if len(parts) != 2:
+            await ctx.send(
+                "❌ Usage: `!matchup <team1 emoji> <team2 emoji>` "
+                "or `!matchup ATD <num> <team1 emoji> <team2 emoji>` (any channel)"
+            )
+            return
+        team1_raw, team2_raw = parts
 
-    # Only ever search the sheet this channel is actually configured for —
-    # a fallback that tried every other channel's sheet used to let this
-    # silently return a team from a completely different tab/draft than the
-    # one being asked about.
-    manager = await _get_manager_async(ctx.channel.id)
+        # Only ever search the sheet this channel is actually configured for —
+        # a fallback that tried every other channel's sheet used to let this
+        # silently return a team from a completely different tab/draft than the
+        # one being asked about. Threads have their own channel id though, so a
+        # thread under a mapped channel would otherwise never match — fall back
+        # to the parent channel's id for threads under 934054851485270016.
+        lookup_channel_id = ctx.channel.id
+        if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent_id == 934054851485270016:
+            lookup_channel_id = ctx.channel.parent_id
+
+    team1_name, _ = _resolve_team_name_from_emoji(team1_raw)
+    team2_name, _ = _resolve_team_name_from_emoji(team2_raw)
+
+    manager = await _get_manager_async(lookup_channel_id)
     if manager is None:
-        await ctx.send("❌ No sheet mapping configured for this channel. Use `!addchannel` or `!setsheet` first.")
+        await ctx.send(
+            "❌ No sheet mapping configured for this channel. Use `!addchannel` or `!setsheet` first, "
+            "or specify the draft directly: `!matchup ATD <num> <emoji1> <emoji2>`."
+        )
         return
 
     loop = asyncio.get_event_loop()

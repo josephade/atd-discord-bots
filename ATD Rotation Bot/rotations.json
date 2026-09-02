@@ -1,0 +1,891 @@
+{
+  "Philadelphia 76ers": {
+    "nicknames": {
+      "Kidd": "Jason Kidd",
+      "Wade": "Dwyane Wade",
+      "Rich": "Mitch Richmond",
+      "Lauri": "Lauri Markkanen",
+      "Reed": "Willis Reed",
+      "Mitchell": "Donovan Mitchell",
+      "Hinrich": "Kirk Hinrich",
+      "Dandridge": "Bob Dandridge",
+      "Perkins": "Sam Perkins",
+      "Gilmore": "Artis Gilmore"
+    },
+    "segments": [
+      {
+        "minutes": 10,
+        "positions": {
+          "PG": {
+            "nickname": "Kidd",
+            "player": "Jason Kidd"
+          },
+          "SG": {
+            "nickname": "Wade",
+            "player": "Dwyane Wade"
+          },
+          "SF": {
+            "nickname": "Rich",
+            "player": "Mitch Richmond"
+          },
+          "PF": {
+            "nickname": "Lauri",
+            "player": "Lauri Markkanen"
+          },
+          "C": {
+            "nickname": "Reed",
+            "player": "Willis Reed"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Hinrich",
+            "player": "Kirk Hinrich"
+          },
+          "SG": {
+            "nickname": "Wade",
+            "player": "Dwyane Wade"
+          },
+          "SF": {
+            "nickname": "Dandridge",
+            "player": "Bob Dandridge"
+          },
+          "PF": {
+            "nickname": "Lauri",
+            "player": "Lauri Markkanen"
+          },
+          "C": {
+            "nickname": "Reed",
+            "player": "Willis Reed"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Kidd",
+            "player": "Jason Kidd"
+          },
+          "SG": {
+            "nickname": "Mitchell",
+            "player": "Donovan Mitchell"
+          },
+          "SF": {
+            "nickname": "Rich",
+            "player": "Mitch Richmond"
+          },
+          "PF": {
+            "nickname": "Perkins",
+            "player": "Sam Perkins"
+          },
+          "C": {
+            "nickname": "Gilmore",
+            "player": "Artis Gilmore"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Hinrich",
+            "player": "Kirk Hinrich"
+          },
+          "SG": {
+            "nickname": "Mitchell",
+            "player": "Donovan Mitchell"
+          },
+          "SF": {
+            "nickname": "Dandridge",
+            "player": "Bob Dandridge"
+          },
+          "PF": {
+            "nickname": "Perkins",
+            "player": "Sam Perkins"
+          },
+          "C": {
+            "nickname": "Gilmore",
+            "player": "Artis Gilmore"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Kidd",
+            "player": "Jason Kidd"
+          },
+          "SG": {
+            "nickname": "Wade",
+            "player": "Dwyane Wade"
+          },
+          "SF": {
+            "nickname": "Rich",
+            "player": "Mitch Richmond"
+          },
+          "PF": {
+            "nickname": "Lauri",
+            "player": "Lauri Markkanen"
+          },
+          "C": {
+            "nickname": "Reed",
+            "player": "Willis Reed"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Kidd",
+            "player": "Jason Kidd"
+          },
+          "SG": {
+            "nickname": "Wade",
+            "player": "Dwyane Wade"
+          },
+          "SF": {
+            "nickname": "Dandridge",
+            "player": "Bob Dandridge"
+          },
+          "PF": {
+            "nickname": "Lauri",
+            "player": "Lauri Markkanen"
+          },
+          "C": {
+            "nickname": "Gilmore",
+            "player": "Artis Gilmore"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Hinrich",
+            "player": "Kirk Hinrich"
+          },
+          "SG": {
+            "nickname": "Mitchell",
+            "player": "Donovan Mitchell"
+          },
+          "SF": {
+            "nickname": "Rich",
+            "player": "Mitch Richmond"
+          },
+          "PF": {
+            "nickname": "Perkins",
+            "player": "Sam Perkins"
+          },
+          "C": {
+            "nickname": "Reed",
+            "player": "Willis Reed"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Kidd",
+            "player": "Jason Kidd"
+          },
+          "SG": {
+            "nickname": "Wade",
+            "player": "Dwyane Wade"
+          },
+          "SF": {
+            "nickname": "Rich",
+            "player": "Mitch Richmond"
+          },
+          "PF": {
+            "nickname": "Lauri",
+            "player": "Lauri Markkanen"
+          },
+          "C": {
+            "nickname": "Reed",
+            "player": "Willis Reed"
+          }
+        }
+      }
+    ],
+    "set_by": 681833601830354944,
+    "updated_at": "2026-08-18T07:41:32.970032+00:00"
+  },
+  "San Antonio Spurs": {
+    "nicknames": {},
+    "segments": [
+      {
+        "minutes": 10,
+        "positions": {
+          "PG": {
+            "nickname": "Lowry",
+            "player": "Kyle Lowry"
+          },
+          "SG": {
+            "nickname": "Mcgrady",
+            "player": "Tracy Mcgrady"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Barnes",
+            "player": "Scottie Barnes"
+          },
+          "C": {
+            "nickname": "Gobert",
+            "player": "Rudy Gobert"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Wall",
+            "player": "John Wall"
+          },
+          "SG": {
+            "nickname": "Bell",
+            "player": "Raja Bell"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Williamson",
+            "player": "Zion Williamson"
+          },
+          "C": {
+            "nickname": "Noah",
+            "player": "Joakim Noah"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Lowry",
+            "player": "Kyle Lowry"
+          },
+          "SG": {
+            "nickname": "Knueppel",
+            "player": "Kon Knueppel"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Barnes",
+            "player": "Scottie Barnes"
+          },
+          "C": {
+            "nickname": "Gobert",
+            "player": "Rudy Gobert"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Wall",
+            "player": "John Wall"
+          },
+          "SG": {
+            "nickname": "Bell",
+            "player": "Raja Bell"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Williamson",
+            "player": "Zion Williamson"
+          },
+          "C": {
+            "nickname": "Noah",
+            "player": "Joakim Noah"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Lowry",
+            "player": "Kyle Lowry"
+          },
+          "SG": {
+            "nickname": "Mcgrady",
+            "player": "Tracy Mcgrady"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Barnes",
+            "player": "Scottie Barnes"
+          },
+          "C": {
+            "nickname": "Gobert",
+            "player": "Rudy Gobert"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Lowry",
+            "player": "Kyle Lowry"
+          },
+          "SG": {
+            "nickname": "Mcgrady",
+            "player": "Tracy Mcgrady"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Williamson",
+            "player": "Zion Williamson"
+          },
+          "C": {
+            "nickname": "Noah",
+            "player": "Joakim Noah"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Wall",
+            "player": "John Wall"
+          },
+          "SG": {
+            "nickname": "Knueppel",
+            "player": "Kon Knueppel"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Barnes",
+            "player": "Scottie Barnes"
+          },
+          "C": {
+            "nickname": "Gobert",
+            "player": "Rudy Gobert"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Lowry",
+            "player": "Kyle Lowry"
+          },
+          "SG": {
+            "nickname": "Mcgrady",
+            "player": "Tracy Mcgrady"
+          },
+          "SF": {
+            "nickname": "Barry",
+            "player": "Rick Barry"
+          },
+          "PF": {
+            "nickname": "Barnes",
+            "player": "Scottie Barnes"
+          },
+          "C": {
+            "nickname": "Gobert",
+            "player": "Rudy Gobert"
+          }
+        }
+      }
+    ],
+    "set_by": 681833601830354944,
+    "updated_at": "2026-08-25T15:01:56.011230+00:00"
+  },
+  "UCLA Bruins": {
+    "nicknames": {},
+    "segments": [
+      {
+        "minutes": 10,
+        "positions": {
+          "PG": {
+            "nickname": "West",
+            "player": "Jerry West"
+          },
+          "SG": {
+            "nickname": "Miller",
+            "player": "Reggie Miller"
+          },
+          "SF": {
+            "nickname": "Bridges",
+            "player": "Mikal Bridges"
+          },
+          "PF": {
+            "nickname": "Webber",
+            "player": "Chris Webber"
+          },
+          "C": {
+            "nickname": "Cowen",
+            "player": "Dave Cowens"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Walker",
+            "player": "Kemba Walker"
+          },
+          "SG": {
+            "nickname": "Ball",
+            "player": "Lonzo Ball"
+          },
+          "SF": {
+            "nickname": "Prince",
+            "player": "Tayshaun Prince"
+          },
+          "PF": {
+            "nickname": "Amar'e",
+            "player": "Amar'e Stoudemire"
+          },
+          "C": {
+            "nickname": "Thurmond",
+            "player": "Nate Thurmond"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Walker",
+            "player": "Kemba Walker"
+          },
+          "SG": {
+            "nickname": "Miller",
+            "player": "Reggie Miller"
+          },
+          "SF": {
+            "nickname": "Bridge",
+            "player": "Mikal Bridges"
+          },
+          "PF": {
+            "nickname": "Cowen",
+            "player": "Dave Cowens"
+          },
+          "C": {
+            "nickname": "Thurmond",
+            "player": "Nate Thurmond"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "West",
+            "player": "Jerry West"
+          },
+          "SG": {
+            "nickname": "Ball",
+            "player": "Lonzo Ball"
+          },
+          "SF": {
+            "nickname": "Bridge",
+            "player": "Mikal Bridges"
+          },
+          "PF": {
+            "nickname": "Amar'e",
+            "player": "Amar'e Stoudemire"
+          },
+          "C": {
+            "nickname": "Cowen",
+            "player": "Dave Cowens"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Walker",
+            "player": "Kemba Walker"
+          },
+          "SG": {
+            "nickname": "West",
+            "player": "Jerry West"
+          },
+          "SF": {
+            "nickname": "Reggie",
+            "player": "Reggie Miller"
+          },
+          "PF": {
+            "nickname": "Prince",
+            "player": "Tayshaun Prince"
+          },
+          "C": {
+            "nickname": "Thurmond",
+            "player": "Nate Thurmond"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "West",
+            "player": "Jerry West"
+          },
+          "SG": {
+            "nickname": "Miller",
+            "player": "Reggie Miller"
+          },
+          "SF": {
+            "nickname": "Bridges",
+            "player": "Mikal Bridges"
+          },
+          "PF": {
+            "nickname": "Webber",
+            "player": "Chris Webber"
+          },
+          "C": {
+            "nickname": "Cowen",
+            "player": "Dave Cowens"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Walker",
+            "player": "Kemba Walker"
+          },
+          "SG": {
+            "nickname": "Lonzo",
+            "player": "Lonzo Ball"
+          },
+          "SF": {
+            "nickname": "Prince",
+            "player": "Tayshaun Prince"
+          },
+          "PF": {
+            "nickname": "Amar'e",
+            "player": "Amar'e Stoudemire"
+          },
+          "C": {
+            "nickname": "Thurmond",
+            "player": "Nate Thurmond"
+          }
+        }
+      },
+      {
+        "minutes": 8,
+        "positions": {
+          "PG": {
+            "nickname": "West",
+            "player": "Jerry West"
+          },
+          "SG": {
+            "nickname": "Miller",
+            "player": "Reggie Miller"
+          },
+          "SF": {
+            "nickname": "Bridges",
+            "player": "Mikal Bridges"
+          },
+          "PF": {
+            "nickname": "Webber",
+            "player": "Chris Webber"
+          },
+          "C": {
+            "nickname": "Cowen",
+            "player": "Dave Cowens"
+          }
+        }
+      }
+    ],
+    "set_by": 756136026426048522,
+    "updated_at": "2026-08-18T09:11:20.780400+00:00"
+  },
+  "Milwaukee Bucks": {
+    "nicknames": {},
+    "segments": [
+      {
+        "minutes": 10,
+        "positions": {
+          "PG": {
+            "nickname": "Baron",
+            "player": "Baron Davis"
+          },
+          "SG": {
+            "nickname": "Hersey",
+            "player": "Hersey Hawkins"
+          },
+          "SF": {
+            "nickname": "Vince",
+            "player": "Vince Carter"
+          },
+          "PF": {
+            "nickname": "Lebron",
+            "player": "Lebron James"
+          },
+          "C": {
+            "nickname": "Al",
+            "player": "Al Horford"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Tyrese",
+            "player": "Tyrese Maxey"
+          },
+          "SG": {
+            "nickname": "Phil",
+            "player": "Phil Smith"
+          },
+          "SF": {
+            "nickname": "Vince",
+            "player": "Vince Carter"
+          },
+          "PF": {
+            "nickname": "Love",
+            "player": "Bob Love"
+          },
+          "C": {
+            "nickname": "Chandler",
+            "player": "Tyson Chandler"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Tyrese",
+            "player": "Tyrese Maxey"
+          },
+          "SG": {
+            "nickname": "Phil",
+            "player": "Phil Smith"
+          },
+          "SF": {
+            "nickname": "kukoc",
+            "player": "Toni Kukoc"
+          },
+          "PF": {
+            "nickname": "Bron",
+            "player": "Lebron James"
+          },
+          "C": {
+            "nickname": "Chandler",
+            "player": "Tyson Chandler"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Baron",
+            "player": "Baron Davis"
+          },
+          "SG": {
+            "nickname": "Hersey",
+            "player": "Hersey Hawkins"
+          },
+          "SF": {
+            "nickname": "Kukoc",
+            "player": "Toni Kukoc"
+          },
+          "PF": {
+            "nickname": "Love",
+            "player": "Bob Love"
+          },
+          "C": {
+            "nickname": "Chandler",
+            "player": "Tyson Chandler"
+          }
+        }
+      },
+      {
+        "minutes": 2,
+        "positions": {
+          "PG": {
+            "nickname": "Baron",
+            "player": "Baron Davis"
+          },
+          "SG": {
+            "nickname": "Hersey",
+            "player": "Hersey Hawkins"
+          },
+          "SF": {
+            "nickname": "Bron",
+            "player": "Lebron James"
+          },
+          "PF": {
+            "nickname": "Al",
+            "player": "Al Horford"
+          },
+          "C": {
+            "nickname": "Chandler",
+            "player": "Tyson Chandler"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Tyrese",
+            "player": "Tyrese Maxey"
+          },
+          "SG": {
+            "nickname": "Vince",
+            "player": "Vince Carter"
+          },
+          "SF": {
+            "nickname": "Bron",
+            "player": "Lebron James"
+          },
+          "PF": {
+            "nickname": "Love",
+            "player": "Bob Love"
+          },
+          "C": {
+            "nickname": "Al",
+            "player": "Al Horford"
+          }
+        }
+      },
+      {
+        "minutes": 4,
+        "positions": {
+          "PG": {
+            "nickname": "Baron",
+            "player": "Baron Davis"
+          },
+          "SG": {
+            "nickname": "Phil",
+            "player": "Phil Smith"
+          },
+          "SF": {
+            "nickname": "Vince",
+            "player": "Vince Carter"
+          },
+          "PF": {
+            "nickname": "Kukoc",
+            "player": "Toni Kukoc"
+          },
+          "C": {
+            "nickname": "Chandler",
+            "player": "Tyson Chandler"
+          }
+        }
+      },
+      {
+        "minutes": 2,
+        "positions": {
+          "PG": {
+            "nickname": "Tyrese",
+            "player": "Tyrese Maxey"
+          },
+          "SG": {
+            "nickname": "Hersey",
+            "player": "Hersey Hawkins"
+          },
+          "SF": {
+            "nickname": "Bron",
+            "player": "Lebron James"
+          },
+          "PF": {
+            "nickname": "love",
+            "player": "Bob Love"
+          },
+          "C": {
+            "nickname": "Chandler",
+            "player": "Tyson Chandler"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Baron",
+            "player": "Baron Davis"
+          },
+          "SG": {
+            "nickname": "Hersey",
+            "player": "Hersey Hawkins"
+          },
+          "SF": {
+            "nickname": "Vince",
+            "player": "Vince Carter"
+          },
+          "PF": {
+            "nickname": "Lebron",
+            "player": "Lebron James"
+          },
+          "C": {
+            "nickname": "Al",
+            "player": "Al Horford"
+          }
+        }
+      },
+      {
+        "minutes": 6,
+        "positions": {
+          "PG": {
+            "nickname": "Tyrese",
+            "player": "Tyrese Maxey"
+          },
+          "SG": {
+            "nickname": "Hersey",
+            "player": "Hersey Hawkins"
+          },
+          "SF": {
+            "nickname": "Vince",
+            "player": "Vince Carter"
+          },
+          "PF": {
+            "nickname": "Bron",
+            "player": "Lebron James"
+          },
+          "C": {
+            "nickname": "Al",
+            "player": "Al Horford"
+          }
+        }
+      }
+    ],
+    "set_by": 756136026426048522,
+    "updated_at": "2026-08-18T09:27:46.046362+00:00"
+  }
+}
