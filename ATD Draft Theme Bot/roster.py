@@ -3,10 +3,14 @@
 # made entirely of players that drafter actually picked, and must fit the
 # budget (when the theme has one).
 
-def validate_drafted_by(picks: list[str], submitted: list[str]) -> tuple[bool, list[str]]:
-    """Every submitted player must appear in this drafter's own picks."""
+def validate_drafted_by(picks: list[str], submitted: list[str],
+                         extra_allowed: frozenset[str] = frozenset()) -> tuple[bool, list[str]]:
+    """Every submitted player must appear in this drafter's own picks —
+    unless explicitly exempted via extra_allowed (e.g. Pack Draft's $1
+    filler players, which patch a roster nobody could otherwise afford)."""
     picks_lower = {p.lower() for p in picks}
-    errors = [p for p in submitted if p.lower() not in picks_lower]
+    allowed_lower = {p.lower() for p in extra_allowed}
+    errors = [p for p in submitted if p.lower() not in picks_lower and p.lower() not in allowed_lower]
     return (len(errors) == 0, errors)
 
 
@@ -27,12 +31,12 @@ def validate_budget(submitted: list[str], price_lookup: dict[str, float],
 
 
 def validate_roster(picks: list[str], submitted: list[str], price_lookup: dict[str, float] | None = None,
-                     budget: float | None = None) -> tuple[bool, list[str]]:
+                     budget: float | None = None, extra_allowed: frozenset[str] = frozenset()) -> tuple[bool, list[str]]:
     """Convenience wrapper combining both checks. price_lookup/budget are
     optional — pass None to skip the budget check entirely."""
     errors: list[str] = []
 
-    drafted_ok, undrafted = validate_drafted_by(picks, submitted)
+    drafted_ok, undrafted = validate_drafted_by(picks, submitted, extra_allowed)
     if not drafted_ok:
         errors.append(
             f"Not drafted by you: {', '.join(undrafted)}"

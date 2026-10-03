@@ -1,0 +1,75 @@
+PackDraft | failed to mark 'B1' taken on ADP - Division A
+Traceback (most recent call last):
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\spreadsheet.py", line 327, in worksheet
+    item = finditem(
+        lambda x: x["properties"]["title"] == title,
+        sheet_data["sheets"],
+    )
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\utils.py", line 224, in finditem
+    return next(item for item in seq if func(item))
+StopIteration
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\josep\OneDrive\Desktop\atd-discord-bots\ATD Draft Theme Bot\themes\pack_draft.py", line 207, in _highlight_taken_division
+    await loop.run_in_executor(None, sheets.mark_player_taken, POOL_SPREADSHEET_ID, tab_name, player)
+  File "C:\Python314\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Python314\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "c:\Users\josep\OneDrive\Desktop\atd-discord-bots\ATD Draft Theme Bot\sheets.py", line 116, in mark_player_taken
+    ws = _client().open_by_key(spreadsheet_id).worksheet(tab_name)
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\spreadsheet.py", line 333, in worksheet
+    raise WorksheetNotFound(title)
+gspread.exceptions.WorksheetNotFound: ADP - Division A
+PackDraft | failed to mark 'A1' taken on ADP - Division A
+Traceback (most recent call last):
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\spreadsheet.py", line 327, in worksheet
+    item = finditem(
+        lambda x: x["properties"]["title"] == title,
+        sheet_data["sheets"],
+    )
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\utils.py", line 224, in finditem
+    return next(item for item in seq if func(item))
+StopIteration
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\josep\OneDrive\Desktop\atd-discord-bots\ATD Draft Theme Bot\themes\pack_draft.py", line 207, in _highlight_taken_division
+    await loop.run_in_executor(None, sheets.mark_player_taken, POOL_SPREADSHEET_ID, tab_name, player)
+  File "C:\Python314\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Python314\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "c:\Users\josep\OneDrive\Desktop\atd-discord-bots\ATD Draft Theme Bot\sheets.py", line 116, in mark_player_taken
+    ws = _client().open_by_key(spreadsheet_id).worksheet(tab_name)
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\spreadsheet.py", line 333, in worksheet
+    raise WorksheetNotFound(title)
+gspread.exceptions.WorksheetNotFound: ADP - Division A
+PackDraft | failed to mark 'A2' taken on ADP - Division A
+Traceback (most recent call last):
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\spreadsheet.py", line 327, in worksheet
+    item = finditem(
+        lambda x: x["properties"]["title"] == title,
+        sheet_data["sheets"],
+    )
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\utils.py", line 224, in finditem
+    return next(item for item in seq if func(item))
+StopIteration
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Users\josep\OneDrive\Desktop\atd-discord-bots\ATD Draft Theme Bot\themes\pack_draft.py", line 207, in _highlight_taken_division
+    await loop.run_in_executor(None, sheets.mark_player_taken, POOL_SPREADSHEET_ID, tab_name, player)
+  File "C:\Python314\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Python314\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "c:\Users\josep\OneDrive\Desktop\atd-discord-bots\ATD Draft Theme Bot\sheets.py", line 116, in mark_player_taken
+    ws = _client().open_by_key(spreadsheet_id).worksheet(tab_name)
+  File "C:\Users\josep\AppData\Roaming\Python\Python314\site-packages\gspread\spreadsheet.py", line 333, in worksheet
+    raise WorksheetNotFound(title)
+gspread.exceptions.WorksheetNotFound: ADP - Division A

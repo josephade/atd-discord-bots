@@ -14,6 +14,19 @@ from feedback import db as fdb
 from feedback import proposer as fproposer
 from feedback.analyzer import REASON_LABELS
 
+
+async def _send(channel, *args, **kwargs):
+    """channel.send() with up to 3 retries on transient 5xx / network errors."""
+    for attempt in range(3):
+        try:
+            return await channel.send(*args, **kwargs)
+        except (discord.errors.DiscordServerError, discord.errors.HTTPException) as exc:
+            if attempt == 2 or (hasattr(exc, 'status') and exc.status < 500):
+                raise
+            wait = 5 * (attempt + 1)
+            print(f"[send] Transient error ({exc}), retrying in {wait}s…")
+            await asyncio.sleep(wait)
+
 # Candidate emoji names to try for each NBA team (checked in order, case-insensitive).
 # Add more variants here if you upload emojis under different names.
 _TEAM_EMOJI_CANDIDATES: dict[str, list[str]] = {
@@ -119,14 +132,35 @@ def _remove_draft(channel_id: int) -> None:
 def _resolve_player(text: str, pool: list[str], cutoff: float = 0.6) -> str | None:
     """
     Fuzzy-match `text` against `pool`.
+    Uses both sequence ratio and sorted-token ratio, taking the max, so
+    "Kevin Mchale" → "Kevin McHale" scores higher than "Kevin Martin".
     Returns the best match or None if confidence is below `cutoff`.
     """
     text = text.strip()
+    # Exact match first (case-insensitive)
     for name in pool:
         if name.lower() == text.lower():
             return name
-    matches = difflib.get_close_matches(text, pool, n=1, cutoff=cutoff)
-    return matches[0] if matches else None
+
+    text_l = text.lower()
+    best_name  = None
+    best_score = 0.0
+    for name in pool:
+        name_l = name.lower()
+        # Standard sequence ratio
+        seq_score = difflib.SequenceMatcher(None, text_l, name_l).ratio()
+        # Sorted-token ratio: split into words, sort, rejoin, then compare.
+        # Handles reordering ("McHale Kevin" vs "Kevin McHale") and catches
+        # cases where difflib sequence matching penalises different orderings.
+        text_tokens = " ".join(sorted(text_l.split()))
+        name_tokens = " ".join(sorted(name_l.split()))
+        tok_score = difflib.SequenceMatcher(None, text_tokens, name_tokens).ratio()
+        score = max(seq_score, tok_score)
+        if score > best_score:
+            best_score = score
+            best_name  = name
+
+    return best_name if best_score >= cutoff else None
 
 
 def _parse_pick_message(content: str) -> str | None:
@@ -169,7 +203,7 @@ def _team_roster_embed(team, pick_num: int, total_picks: int) -> discord.Embed:
 async def _announce_pick(channel, pick_num: int, team, player: str, auto: bool = False):
     """Send the official pick announcement in the ATD pick format."""
     suffix = " *(auto-pick — time expired)*" if auto else ""
-    await channel.send(f"**{pick_num}.** {team.emoji} {player}{suffix}")
+    await _send(channel, f"**{pick_num}.** {team.emoji} {player}{suffix}")
 
 
 async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
@@ -180,13 +214,16 @@ async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
     total = dm.total_picks
 
     while not dm.is_complete():
+        if channel.id not in _drafts:
+            return  # cancelled mid-draft
+
         team     = dm.current_team
         pick_num = dm.pick_number
         rnd      = dm.round_number
 
         # ── Round header ────────────────────────────────────────────────
         if (pick_num - 1) % dm.total_teams == 0:
-            await channel.send(
+            await _send(channel,
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🏀 **Round {rnd} of {ROUNDS}**\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -203,15 +240,16 @@ async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
                 pool_size=len(dm.player_pool),
                 overall_pick=dm.pick_number,
                 num_teams=dm.total_teams,
+                archetype=team.archetype,
             )
             dm.record_pick(player)
-            print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | AI   | {team.name:<28} | {player}")
+            print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | AI [{team.archetype or 'balanced'}] | {team.name:<28} | {player}")
             await _announce_pick(channel, pick_num, team, player)
             continue
 
         # ── Human pick ───────────────────────────────────────────────────
         print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | Human | {team.name:<28} | waiting…")
-        await channel.send(
+        await _send(channel,
             f"🎯 Pick **#{pick_num}** — {team.emoji} **{team.name}** "
             f"(<@{team.owner_id}>)\n"
             f"*You have {PICK_TIMEOUT_SECONDS}s. Format:* `{pick_num}. {team.emoji} Player Name`"
@@ -255,12 +293,12 @@ async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
             # Not in the available pool — check if it's already drafted
             already = _resolve_player(raw_name, list(dm.drafted), cutoff=0.75)
             if already:
-                await channel.send(
+                await _send(channel,
                     f"❌ **{already}** has already been drafted. Please choose another player."
                 )
                 continue
 
-            await channel.send(
+            await _send(channel,
                 f"⚠️ **{raw_name}** not found in the player pool. Please re-enter your pick."
             )
 
@@ -269,24 +307,24 @@ async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
             print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | Human | {team.name:<28} | {player}")
             await _announce_pick(channel, pick_num, team, player)
         else:
-            player = ai_drafter.pick(team.picks, available, player_adp=dm.player_adp, pool_size=len(dm.player_pool), overall_pick=dm.pick_number, num_teams=dm.total_teams)
+            player = ai_drafter.pick(team.picks, available, player_adp=dm.player_adp, pool_size=len(dm.player_pool), overall_pick=dm.pick_number, num_teams=dm.total_teams, archetype=team.archetype)
             dm.record_pick(player)
             print(f"[Draft:{channel.id}] Pick #{pick_num:>3} | Auto  | {team.name:<28} | {player} (timeout)")
             await _announce_pick(channel, pick_num, team, player, auto=True)
 
     # ── Draft complete ────────────────────────────────────────────────────
     dm.state = DraftState.COMPLETE
-    await channel.send("✅ **Draft complete!** Writing results to Google Sheets…")
+    await _send(channel, "✅ **Draft complete!** Writing results to Google Sheets…")
 
     try:
         tab = dm.write_results()
-        await channel.send(f"📋 Results saved to tab **`{tab}`**.")
+        await _send(channel, f"📋 Results saved to tab **`{tab}`**.")
     except Exception as e:
-        await channel.send(f"❌ Failed to write results: {e}")
+        await _send(channel, f"❌ Failed to write results: {e}")
 
     draft_id = _save_draft_to_db(dm, started_by=dm.started_by)
     if draft_id:
-        await channel.send(
+        await _send(channel,
             f"📊 Draft #{draft_id} saved for review. "
             f"Run `!draftreview` when ready to evaluate teams."
         )
@@ -301,7 +339,7 @@ async def _run_draft(channel: discord.TextChannel, dm: DraftManager):
         embed.set_author(name=owner_tag)
         for i, p in enumerate(team.picks, 1):
             embed.add_field(name=f"Pick {i}", value=p, inline=True)
-        await channel.send(embed=embed)
+        await _send(channel, embed=embed)
 
     # Clean up — free the slot so a new draft can start in this thread
     _remove_draft(channel.id)
@@ -318,7 +356,7 @@ async def _run_draft_sim(channel: discord.TextChannel, dm: DraftManager):
         rnd      = dm.round_number
 
         if (pick_num - 1) % dm.total_teams == 0:
-            await channel.send(
+            await _send(channel,
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🏀 **Round {rnd} of {ROUNDS}**\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -331,23 +369,24 @@ async def _run_draft_sim(channel: discord.TextChannel, dm: DraftManager):
             pool_size=len(dm.player_pool),
             overall_pick=dm.pick_number,
             num_teams=dm.total_teams,
+            archetype=team.archetype,
         )
         dm.record_pick(player)
         print(f"[Sim:{channel.id}] Pick #{pick_num:>3} | {team.name:<28} | {player}")
         await _announce_pick(channel, pick_num, team, player)
 
     dm.state = DraftState.COMPLETE
-    await channel.send("✅ **Sim complete!** Writing results to Google Sheets…")
+    await _send(channel, "✅ **Sim complete!** Writing results to Google Sheets…")
 
     try:
         tab = dm.write_results()
-        await channel.send(f"📋 Results saved to tab **`{tab}`**.")
+        await _send(channel, f"📋 Results saved to tab **`{tab}`**.")
     except Exception as e:
-        await channel.send(f"❌ Failed to write results: {e}")
+        await _send(channel, f"❌ Failed to write results: {e}")
 
     draft_id = _save_draft_to_db(dm, started_by=dm.started_by)
     if draft_id:
-        await channel.send(
+        await _send(channel,
             f"📊 Draft #{draft_id} saved for review. "
             f"Run `!draftreview` when ready to evaluate teams."
         )
@@ -358,7 +397,7 @@ async def _run_draft_sim(channel: discord.TextChannel, dm: DraftManager):
         embed.set_author(name=owner_tag)
         for i, p in enumerate(team.picks, 1):
             embed.add_field(name=f"Pick {i}", value=p, inline=True)
-        await channel.send(embed=embed)
+        await _send(channel, embed=embed)
 
     _remove_draft(channel.id)
 
@@ -576,6 +615,10 @@ async def draft_cmd(ctx: commands.Context):
     )
     await asyncio.sleep(5)
 
+    # If !draftcancel was called during the countdown, abort silently.
+    if ctx.channel.id not in _drafts:
+        return
+
     # ── Step 6: Run the draft ─────────────────────────────────────────────
     async def _run_draft_safe():
         try:
@@ -717,8 +760,8 @@ async def draft_history(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 
-@bot.command(name='draftboard')
-async def draft_board(ctx: commands.Context, team_emoji: str = None):
+@bot.command(name='draftteam')
+async def draft_team(ctx: commands.Context, team_emoji: str = None):
     """Show current rosters mid-draft. Pass a team emoji to see just that team."""
     if not _is_draft_channel(ctx.channel):
         return
@@ -783,7 +826,7 @@ class _PoolPageView(discord.ui.View):
         await interaction.response.edit_message(embed=self._build_embed(), view=self)
 
 
-@bot.command(name='draftpool')
+@bot.command(name='draftpool', aliases=['draftboard'])
 async def draft_pool(ctx: commands.Context, category: str = None):
     """Show remaining available players. Optionally filter by Guard / Wing / Forward / Big."""
     if not _is_draft_channel(ctx.channel):
@@ -869,16 +912,16 @@ async def draft_help(ctx: commands.Context):
     )
 
     e.add_field(
-        name="📋 `!draftboard` / `!draftboard <emoji>`",
+        name="👥 `!draftteam` / `!draftteam <emoji>`",
         value=(
             "Shows every team's current roster mid-draft.\n"
-            "Pass a team emoji to see just that one team — e.g. `!draftboard 🦁`"
+            "Pass a team emoji to see just that one team — e.g. `!draftteam 🦁`"
         ),
         inline=False,
     )
 
     e.add_field(
-        name="📝 `!draftpool` / `!draftpool <category>`",
+        name="📝 `!draftpool` / `!draftboard` / `!draftpool <category>`",
         value=(
             "Lists all players still available to be drafted (paginated by 30).\n"
             "Filter by position group: `!draftpool Guard`, `!draftpool Wing`, "

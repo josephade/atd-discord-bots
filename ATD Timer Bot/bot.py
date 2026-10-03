@@ -1438,10 +1438,39 @@ async def _try_process_roundless_makeup(s: DraftSession, message: discord.Messag
     if pick_num_in_msg > s.draft.overall_pick:
         return
 
-    team_idx = next((i for i, t in enumerate(s.draft.teams) if message.author.id in t["user_ids"]), None)
-    if team_idx is None or not s.draft.teams[team_idx].get("pending_makeup"):
+    # Resolve which pending team this message is for: prefer the poster's own
+    # team (the normal self-recovery path), then fall back to matching the
+    # skipped pick number itself — so a message from someone who ISN'T that
+    # team's owner still resolves to the right team below, and gets a clear
+    # error instead of being silently dropped (as it used to be).
+    team_idx = next(
+        (i for i, t in enumerate(s.draft.teams)
+         if message.author.id in t["user_ids"] and t.get("pending_makeup")),
+        None,
+    )
+    if team_idx is None:
+        team_idx = next(
+            (i for i, t in enumerate(s.draft.teams)
+             if t.get("pending_makeup") and t.get("last_pick_number") == pick_num_in_msg),
+            None,
+        )
+    if team_idx is None:
         return
     team = s.draft.teams[team_idx]
+
+    is_owner = message.author.id in team["user_ids"]
+    is_comm  = (
+        message.author.guild_permissions.administrator
+        or any(r.name == COMMISSIONER_ROLE for r in message.author.roles)
+    )
+    if not is_owner and not is_comm:
+        await message.add_reaction('❌')
+        await message.channel.send(
+            f"❌ {message.author.mention} — only **{team['name']}**'s own GM or a commissioner can "
+            f"make up their skipped pick #{pick_num_in_msg}. Ask a commissioner to record it with "
+            f"`!timeraddpick` if you're covering for them."
+        )
+        return
 
     if pick_num_in_msg == s.draft.overall_pick and s.draft.current_team is team:
         return
@@ -3405,9 +3434,10 @@ async def timerboard(ctx):
             money = t.get("money_spent", 0)
             last  = t.get("last_pick_number", 0)
             skips = t.get("skip_count", 0)
-            skip_str = f" | {skips}x skip" if skips else ""
-            arrow    = " ← **ON CLOCK**" if idx == current_idx else ""
-            lines.append(f"**{pos}.** {t['name']} — ${money} | {picks} picks | last #{last}{skip_str}{arrow}")
+            skip_str   = f" | {skips}x skip" if skips else ""
+            makeup_str = " | ⚠️ **MAKEUP OWED**" if t.get("pending_makeup") else ""
+            arrow      = " ← **ON CLOCK**" if idx == current_idx else ""
+            lines.append(f"**{pos}.** {t['name']} — ${money} | {picks} picks | last #{last}{skip_str}{makeup_str}{arrow}")
             pos += 1
         desc = "\n".join(lines) if lines else "_All teams complete!_"
         if len(desc) > 4000:
@@ -3627,6 +3657,11 @@ async def avgtimepicker(ctx, member: discord.Member = None):
         return
 
     if member is None:
+        skip_counts: dict[int, int] = {}
+        for h in _load_skip_history():
+            for uid in h.get("user_ids", []):
+                skip_counts[uid] = skip_counts.get(uid, 0) + 1
+
         totals: dict[int, dict] = {}
         for entry in history:
             for uid in entry["user_ids"]:
@@ -3644,9 +3679,11 @@ async def avgtimepicker(ctx, member: discord.Member = None):
             name       = member_obj.display_name if member_obj else data["name"]
             avg        = data["total"] / data["picks"]
             atd_count  = len(data["atds"])
+            skips      = skip_counts.get(uid, 0)
             rows.append(
                 f"**{rank}.** <@{uid}> ({name}) — **{_fmt_duration(avg)}** avg "
-                f"({data['picks']} pick(s) across {atd_count} ATD(s))"
+                f"({data['picks']} pick(s) across {atd_count} ATD(s)) — "
+                f"**{skips}** skip{'s' if skips != 1 else ''}"
             )
 
         pages = [rows[i:i + 10] for i in range(0, len(rows), 10)] or [[]]
@@ -3670,10 +3707,11 @@ async def avgtimepicker(ctx, member: discord.Member = None):
             by_draft.setdefault(label, []).append(entry)
 
         overall_avg = sum(e["elapsed_seconds"] for e in entries) / len(entries)
+        total_skips = sum(1 for h in _load_skip_history() if uid in h.get("user_ids", []))
         embed = discord.Embed(
             title=f"⏱️ Average Time to Pick — {member.display_name}",
             description=f"**{_fmt_duration(overall_avg)}** avg across **{len(entries)}** pick(s) "
-                        f"in {len(by_draft)} ATD(s)",
+                        f"in {len(by_draft)} ATD(s) — **{total_skips}** skip{'s' if total_skips != 1 else ''}",
             color=discord.Color.orange(),
         )
         for label, draft_entries in by_draft.items():
@@ -4492,12 +4530,23 @@ async def removeskip(ctx, member: discord.Member, count: int = 1):
     team_idx, team = max(slots_with_skips, key=lambda x: x[1].get("skip_count", 0))
     removed = min(count, team["skip_count"])
     team["skip_count"] = team["skip_count"] - removed
-    s.draft.save(s.channel_id)
     new_skips = team["skip_count"]
+
+    # A skip sets pending_makeup (roundless mode) so the team sorts last until
+    # they catch up. If this removal clears their last skip, there's nothing
+    # left to catch up on — leaving pending_makeup set would otherwise strand
+    # them at the back of the order with no way out except making a pick.
+    cleared_pending = False
+    if new_skips == 0 and team.get("pending_makeup"):
+        team["pending_makeup"] = False
+        cleared_pending = True
+
+    s.draft.save(s.channel_id)
     await ctx.send(
         f"✅ Removed **{removed}** skip(s) from **{team['name']}** (slot {team_idx + 1}). "
         f"They now have **{new_skips}** skip(s)" +
-        (f" (−{new_skips * 10} min)." if s.draft.timer_override is None else ".")
+        (f" (−{new_skips * 10} min)." if s.draft.timer_override is None else ".") +
+        (" Pending makeup cleared too." if cleared_pending else "")
     )
 
 

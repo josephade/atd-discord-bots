@@ -174,6 +174,7 @@ def _effective_adp(
     missing_tier_count: int,
     starter_scorers:    int,   # shot creators among picks 1-5 (starter phase)
     bench_scorers:      int,   # shot creators among picks 6-10 (bench phase)
+    archetype:          str = "",
 ) -> float:
     """
     Return an effective ADP for this player given team context.
@@ -540,6 +541,69 @@ def _effective_adp(
         if positions and all(pos in star_positions for pos in positions):
             adp += W["r6_r7_duplicate_penalty"]
 
+    # ── Round 1 canonical ordering ────────────────────────────────────────────
+    # Override sheet ADP for the consensus ATD top picks so the AI draft
+    # reflects the community's expected R1 ordering regardless of how the
+    # pool spreadsheet was ranked.
+    #
+    # LeBron/MJ canonical = 1.5 → with ±1 jitter they almost always go 1-2
+    # KG canonical = 3.0, Curry = 4.5 → KG wins the 3rd pick most of the time
+    #
+    # Note: the fall cap below only raises adp (prevents falling too far),
+    # so setting adp to a low canonical value here persists through it.
+    # Round 1: LeBron/MJ always go 1-2, KG 3rd, Shaq top 5, Curry top 6
+    _R1_CANONICAL: dict[str, float] = {
+        "LeBron James":      1.5,
+        "Michael Jordan":    1.5,
+        "Kevin Garnett":     3.0,
+        "Shaquille O'Neal":  4.5,   # never falls below pick 5
+        "Stephen Curry":     5.5,
+    }
+    if round_num == 1:
+        canonical = _R1_CANONICAL.get(player)
+        if canonical is not None:
+            adp = canonical
+
+    # All rounds: force specific players to their target ADP range.
+    # Dirk/KMalone target picks 31-34 in a 30-team draft → canonical ~32.
+    # These override sheet ADP unconditionally; in round 1 they're never
+    # picked (30 players with lower ADP exist), so no conflict.
+    _FIXED_ADP: dict[str, float] = {
+        "Dirk Nowitzki":  32.0,
+        "Karl Malone":    32.5,
+    }
+    fixed = _FIXED_ADP.get(player)
+    if fixed is not None:
+        adp = fixed
+
+    # ── Archetype identity (gentle tiebreaker only) ───────────────────────────
+    # Small nudges that give teams a stylistic flavor without overriding ADP order.
+    # Values are intentionally small (±2–3) so the fall cap below still governs
+    # the total deviation — a player should never be drafted far outside their ADP
+    # just because of archetype preference.
+    if archetype:
+        if archetype == "pace_space":
+            if is_shooter(player):           adp -= 3.0
+            if is_ball_dominant(player):     adp -= 2.0
+            if is_non_scoring_big(player):   adp += 3.0
+            if is_immobile_center(player):   adp += 3.0
+        elif archetype == "defensive":
+            if is_versatile_defender(player): adp -= 3.0
+            if is_perimeter_defender(player): adp -= 2.0
+            if is_elite_rim_protector(player): adp -= 2.0
+        elif archetype == "frontcourt_first":
+            if any(p in ('C', 'PF') for p in positions): adp -= 3.0
+            if all(p in ('PG', 'SG') for p in positions): adp += 2.0
+        elif archetype == "wing_dominant":
+            if (any(p in ('SF', 'SG') for p in positions)
+                    and is_shot_creator(player)):          adp -= 3.0
+            if is_high_portability(player):               adp -= 2.0
+            if positions and all(p == 'C' for p in positions): adp += 3.0
+        elif archetype == "playmaker_led":
+            if is_ball_dominant(player) or is_elite_playmaker(player): adp -= 3.0
+            if is_pnr_creator(player):                    adp -= 2.0
+            if _is_pnr_big(player):                       adp -= 2.0
+
     # ── Fall protection floor ──────────────────────────────────────────────────
     # No player should fall too far past their raw ADP due to fit penalties.
     # Exemptions: DO_NOT_DRAFT (+300), tier 11 (+150), and unknown ADP.
@@ -583,6 +647,7 @@ def pick(
     pool_size:    int                     = 450,
     overall_pick: int                     = 0,
     num_teams:    int                     = 30,
+    archetype:    str                     = "",
 ) -> str:
     """
     Choose the best available player for an AI team.
@@ -623,6 +688,7 @@ def pick(
             nsb_count, soft_big_ct, has_immob_c,
             tiers_present, missing_tier_count,
             starter_scorers, bench_scorers,
+            archetype=archetype,
         )
 
     # ── Global overdue override ───────────────────────────────────────────────
@@ -665,13 +731,24 @@ def pick(
                 # Tier-overdue — decisive pull: must beat any competition even with jitter
                 eff[player] = raw - 50.0
             elif overall_pick > raw + max_fall_global:
-                # ADP-overdue — strong pull: player has fallen too far past their ADP
-                eff[player] = raw - 20.0
+                # ADP-overdue — decisive pull: player has fallen too far past their ADP.
+                # Must be strong enough to override positional urgency pulls (c_priority = 24,
+                # pg_priority = 14, etc.) so non-bench-blocked teams snap them up immediately.
+                eff[player] = raw - 45.0
 
     # Jitter for variety:
-    # R1:  ±1 — nearly strict ADP order; only adjacent players can swap
-    # R2+: ±4 — penalties and fit logic drive picks; wider window for different archetypes
-    jitter = 1.0 if round_num == 1 else 4.0
+    # R1:   ±1 — nearly strict ADP order
+    # R2-5: ±4 — fit logic drives picks
+    # R6-8: ±6 — bench phase, more stylistic variation
+    # R9-10: ±8 — deep sleepers, full creative freedom
+    if round_num == 1:
+        jitter = 1.0
+    elif round_num <= 5:
+        jitter = 4.0
+    elif round_num <= 8:
+        jitter = 6.0
+    else:
+        jitter = 8.0
     best = min(available, key=lambda p: eff[p] + random.uniform(-jitter, jitter))
 
     # Debug: show top 5 candidates

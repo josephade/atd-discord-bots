@@ -139,6 +139,12 @@ def set_draft_state(draft_id: int, state: dict):
         con.execute('UPDATE drafts SET state_json = ? WHERE id = ?', (json.dumps(state), draft_id))
 
 
+def update_draft_state(draft_id: int, patch: dict):
+    draft = get_draft(draft_id)
+    state = {**draft['state'], **patch}
+    set_draft_state(draft_id, state)
+
+
 def update_draft_settings(draft_id: int, patch: dict):
     draft = get_draft(draft_id)
     settings = {**draft['settings'], **patch}
@@ -249,6 +255,16 @@ def get_picks(draft_id: int, drafter_id: int) -> list[str]:
             'SELECT player FROM picks WHERE draft_id = ? AND drafter_id = ? ORDER BY id', (draft_id, drafter_id)
         ).fetchall()
         return [r[0] for r in rows]
+
+
+def get_pick_timestamps(draft_id: int, drafter_id: int) -> list[datetime]:
+    """created_at for every pick, in draft order — used to derive an
+    average time-between-picks stat (e.g. `!theme reveal <draft> <emoji>`)."""
+    with _conn() as con:
+        rows = con.execute(
+            'SELECT created_at FROM picks WHERE draft_id = ? AND drafter_id = ? ORDER BY id', (draft_id, drafter_id)
+        ).fetchall()
+        return [datetime.fromisoformat(r[0]) for r in rows]
 
 
 def get_all_picks(draft_id: int) -> dict[int, list[str]]:

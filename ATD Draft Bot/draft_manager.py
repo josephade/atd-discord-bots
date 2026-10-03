@@ -97,12 +97,22 @@ class DraftState(Enum):
     COMPLETE      = "complete"
 
 
+_AI_ARCHETYPES = [
+    "pace_space",       # perimeter-heavy, shooters everywhere, mobile C
+    "defensive",        # defense-first identity, rim protection, switchability
+    "frontcourt_first", # dominant big, inside-out, early C/PF priority
+    "wing_dominant",    # versatile forwards, shot-creating wings
+    "playmaker_led",    # elite PG/distributor identity, PnR-centric
+]
+
+
 @dataclass
 class TeamSlot:
-    name:     str
-    emoji:    str                    # unicode fallback emoji
-    owner_id: Optional[int] = None   # Discord user ID; None = AI
-    picks:    list[str] = field(default_factory=list)
+    name:      str
+    emoji:     str                    # unicode fallback emoji
+    owner_id:  Optional[int] = None   # Discord user ID; None = AI
+    picks:     list[str] = field(default_factory=list)
+    archetype: str = ""               # AI team identity ("" = balanced/human)
 
     @property
     def is_ai(self) -> bool:
@@ -174,8 +184,15 @@ class DraftManager:
             owners = human_ids + [None] * (total_teams - len(human_ids))
             random.shuffle(owners)
 
+        # Distribute archetypes evenly so every style appears roughly equally
+        archetype_pool = (_AI_ARCHETYPES * ((total_teams // len(_AI_ARCHETYPES)) + 1))[:total_teams]
+        random.shuffle(archetype_pool)
+
         self.teams = [
-            TeamSlot(name=pool[i][0], emoji=pool[i][1], owner_id=owners[i])
+            TeamSlot(
+                name=pool[i][0], emoji=pool[i][1], owner_id=owners[i],
+                archetype="" if owners[i] is not None else archetype_pool[i],
+            )
             for i in range(total_teams)
         ]
 

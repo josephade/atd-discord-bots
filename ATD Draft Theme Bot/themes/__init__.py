@@ -7,12 +7,16 @@ from .pack_draft import PackDraftTheme
 from .partner_draft import PartnerDraftTheme
 from .anon_draft import AnonDraftTheme
 from .anon_budget_draft import AnonBudgetDraftTheme
+from .nation_flux import NationFluxTheme
+from .auto_draft import AutoDraftTheme
 
 REGISTRY: dict[str, Theme] = {
     PackDraftTheme.key: PackDraftTheme(),
     PartnerDraftTheme.key: PartnerDraftTheme(),
     AnonDraftTheme.key: AnonDraftTheme(),
     AnonBudgetDraftTheme.key: AnonBudgetDraftTheme(),
+    NationFluxTheme.key: NationFluxTheme(),
+    AutoDraftTheme.key: AutoDraftTheme(),
 }
 
 

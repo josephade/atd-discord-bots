@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.db
+service_account.json
+fly.toml
+Dockerfile
+.dockerignore
+*.txt
+!requirements.txt

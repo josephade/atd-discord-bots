@@ -267,7 +267,7 @@ class PartnerDraftTheme(Theme):
             f"Your list this round: {'submitted' if submitted else 'not submitted yet'}."
         )
 
-    def is_pick_phase_complete(self, ctx: DraftContext) -> bool:
+    def is_pick_phase_complete(self, ctx: DraftContext, drafter: dict | None = None) -> bool:
         settings = self._settings(ctx)
         seen_pairs = set()
         for d in ctx.drafters():

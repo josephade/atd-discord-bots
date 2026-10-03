@@ -8,7 +8,7 @@ DRAFT_CHANNEL_ID       = int(os.getenv('DRAFT_CHANNEL_ID', '0'))
 
 # Spreadsheet containing the player pool (tab name set by POOL_TAB_NAME)
 POOL_SPREADSHEET_ID    = os.getenv('POOL_SPREADSHEET_ID')
-POOL_TAB_NAME          = os.getenv('POOL_TAB_NAME', 'East')
+POOL_TAB_NAME          = os.getenv('POOL_TAB_NAME', 'ADP')
 
 # Separate spreadsheet where completed draft results are written
 OUTPUT_SPREADSHEET_ID  = os.getenv('OUTPUT_SPREADSHEET_ID')

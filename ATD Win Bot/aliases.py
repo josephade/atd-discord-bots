@@ -23,6 +23,7 @@ DRAFTER_ALIASES = {
     "gethigher77":                "Datboi",
     "goobynky":                   "Gooby",
     "ceokelvin":                  "Ceo",
+    "kelvin":                     "CeoKelvin",
 
     "lucario baseketball":        "Element",
     "r3v 🪽 #freebanny":          "r3con",

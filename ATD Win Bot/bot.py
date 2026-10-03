@@ -166,8 +166,26 @@ def _resolve_drafter_name(name: str, profiles: dict) -> str:
             return sheet_name
     return name
 
+# Two genuinely different drafters (CeoKelvin and CEOOfKobeFans, both real,
+# separate Win Sheet rows) happen to have typed near-identical short handles
+# into lotto messages, distinguished ONLY by capitalization: mixed-case "Ceo"
+# is CeoKelvin's long-running habitual handle (appears in ~35 drafts back to
+# ATD 18), while the rare, distinct all-caps "CEO" belongs to CEOOfKobeFans
+# (confirmed against every lotto occurrence — ATD 84/92/93/95/109). Every
+# other match in this file is intentionally case-insensitive, so this one
+# exact string needs a case-SENSITIVE carve-out before that logic ever runs,
+# or "CEO" collapses into "Ceo" and silently credits the wrong person.
+_CASE_SENSITIVE_NAME_OVERRIDES = {
+    "CEO": "CEOOfKobeFans",
+}
+
+
 def _all_name_variants(name: str) -> list:
     """All variants of a name: parenthetical splits + alias forward/reverse lookups."""
+    override = _CASE_SENSITIVE_NAME_OVERRIDES.get(name.strip())
+    if override:
+        return [override]
+
     variants = _name_variants(name)
     name_lower = name.strip().lower()
     # Forward: query is itself an alias → add its canonical target
@@ -184,7 +202,22 @@ def _all_name_variants(name: str) -> list:
 
 def _drafter_match(query: str, drafters: list) -> bool:
     variants = [v.lower() for v in _all_name_variants(query)]
-    return any(v == d.strip().lower() for v in variants for d in drafters)
+    for d in drafters:
+        d_clean = d.strip()
+        # A raw drafter string that's one of the known case-sensitive-
+        # ambiguous handles (see _CASE_SENSITIVE_NAME_OVERRIDES) must resolve
+        # via its override target specifically — comparing it case-
+        # insensitively against `variants` here is exactly what collapsed
+        # "CEO" (CEOOfKobeFans) into "Ceo" (CeoKelvin)'s variant list before,
+        # crediting the wrong person's team in !profile/!gmteam.
+        override = _CASE_SENSITIVE_NAME_OVERRIDES.get(d_clean)
+        if override is not None:
+            if override.lower() in variants:
+                return True
+            continue
+        if d_clean.lower() in variants:
+            return True
+    return False
 
 def _fold(s: str) -> str:
     """Strip accents/diacritics so 'Ginóbili' and 'Ginobili' compare equal —
@@ -1369,8 +1402,38 @@ async def cmd_winstats(ctx):
     by_total  = sorted(drafters, key=lambda d: d['total'], reverse=True)
     qualified = [d for d in drafters if d['total'] >= MIN_PCT_GAMES and d['pct'] is not None]
     by_pct    = sorted(qualified, key=lambda d: d['pct'], reverse=True)
-    by_recent = sorted([d for d in drafters if d['recent_wins'] > 0], key=lambda d: d['recent_wins'], reverse=True)
-    rd        = f"D{recent_drafts[0]}–{recent_drafts[-1]}"
+    rd = f"D{recent_drafts[0]}–{recent_drafts[-1]}"
+
+    # Hot/Cold Streak both require having played in EVERY one of the last 5
+    # ATDs — someone who only played 1 or 2 of them shouldn't be able to top
+    # (or bottom out) a "streak" stat off a tiny, unrepresentative sample.
+    full_recent = [d for d in drafters if all(num in d['draft_wins'] for num in recent_drafts)]
+    by_recent   = sorted(full_recent, key=lambda d: d['recent_wins'], reverse=True)
+    by_cold     = sorted(full_recent, key=lambda d: d['recent_wins'])
+
+    over_qualified = [d for d in drafters if d['over'] is not None]
+    by_over        = sorted(over_qualified, key=lambda d: d['over'], reverse=True)
+
+    # Flatten every (drafter, single-ATD win count) pair to find the best/worst
+    # SINGLE-draft performance in league history — distinct from "Most Wins
+    # All-Time" above, which is a career total across every draft played.
+    single_atd   = [(wins, d['name'], num) for d in drafters for num, wins in d['draft_wins'].items()]
+    best_single  = max(single_atd, key=lambda x: x[0]) if single_atd else None
+    worst_single = min(single_atd, key=lambda x: x[0]) if single_atd else None
+
+    def _team_and_logo(drafter_name: str, draft_num: int):
+        """Team `drafter_name` had in ATD `draft_num` (from stored lotto data)
+        plus its custom emoji, for display alongside a single-ATD stat."""
+        teams = _load_lottos().get(f"ATD {draft_num}", {})
+        for team_name, entry in teams.items():
+            if _drafter_match(drafter_name, entry.get('drafters', [])):
+                for en, mapped in EMOJI_TEAM_MAP.items():
+                    if mapped.strip().lower() == team_name.strip().lower():
+                        emoji = discord.utils.get(ctx.guild.emojis, name=en)
+                        if emoji:
+                            return team_name, str(emoji)
+                return team_name, ''
+        return None, ''
 
     embed = discord.Embed(title="📈 ATD League Win Stats", color=C_GREEN)
     embed.add_field(name="👑 Most Wins All-Time",        value=f"**{by_total[0]['name']}**\n{by_total[0]['total']}W",  inline=True)
@@ -1378,7 +1441,24 @@ async def cmd_winstats(ctx):
         embed.add_field(name=f"📈 Best Win % (≥{MIN_PCT_GAMES}W)", value=f"**{by_pct[0]['name']}**\n{_pct_str(by_pct[0]['pct'])}", inline=True)
     if by_recent:
         embed.add_field(name=f"🔥 Recent Hot Streak ({rd})",       value=f"**{by_recent[0]['name']}**\n{by_recent[0]['recent_wins']}W", inline=True)
-    embed.add_field(name="📉 Fewest Wins All-Time",      value=f"**{by_total[-1]['name']}**\n{by_total[-1]['total']}W", inline=True)
+    if by_cold:
+        embed.add_field(name=f"🥶 Recent Cold Streak ({rd})",      value=f"**{by_cold[0]['name']}**\n{by_cold[0]['recent_wins']}W", inline=True)
+    if best_single:
+        wins, name, num = best_single
+        team_name, logo = _team_and_logo(name, num)
+        team_line = f"{logo} {team_name}".strip() if team_name else ""
+        embed.add_field(
+            name="🌟 Most Wins (Single ATD)",
+            value=f"**{name}**\n{wins}W — ATD {num}" + (f"\n{team_line}" if team_line else ""),
+            inline=True,
+        )
+    if worst_single:
+        wins, name, num = worst_single
+        embed.add_field(name="📉 Fewest Wins (Single ATD)", value=f"**{name}**\n{wins}W — ATD {num}", inline=True)
+    embed.add_field(name="🔻 Lowest Wins All-Time",       value=f"**{by_total[-1]['name']}**\n{by_total[-1]['total']}W", inline=True)
+    if by_over:
+        embed.add_field(name="⬆️ Highest Over .500",     value=f"**{by_over[0]['name']}**\n{_over_str(by_over[0]['over'])}", inline=True)
+        embed.add_field(name="⬇️ Lowest Over .500",      value=f"**{by_over[-1]['name']}**\n{_over_str(by_over[-1]['over'])}", inline=True)
     embed.add_field(name="👥 Total Drafters",            value=str(len(drafters)), inline=True)
     await ctx.send(embed=embed)
 
@@ -1891,7 +1971,21 @@ async def cmd_setlotto(ctx, *, args: str = ''):
                 emoji_names = re.findall(r':([^:\s]+):', team_part)
             if not emoji_names:
                 emoji_names = _UNICODE_EMOJI_RE.findall(team_part)
+
             if not emoji_names:
+                # No emoji at all on this line — some older drafts used a
+                # plain text team name instead of a logo (e.g. "Dreamville").
+                # Treat the team token itself as the team name and look it up
+                # directly on the sheet, same as a resolved emoji would be.
+                literal_name = team_part.strip()
+                if not literal_name:
+                    continue
+                found_name, players = _find_team_roster(tab_data, literal_name)
+                if not found_name:
+                    print(f"[setlotto] literal team name not found on sheet: {literal_name!r} — full line: {resolved_line!r}")
+                    skipped.append(literal_name)
+                    continue
+                draft_entry[found_name] = {'drafters': drafter_names, 'players': players}
                 continue
 
             for emoji_name in emoji_names:
@@ -1962,6 +2056,75 @@ async def cmd_deletelotto(ctx, *, args: str = ''):
     )
     await ctx.send(embed=embed)
 
+# ── !deletelottoteam ──────────────────────────────────────────────────────────
+
+@bot.command(name='deletelottoteam')
+async def cmd_deletelottoteam(ctx, *, args: str = ''):
+    """!deletelottoteam ATD 104 <:TeamEmoji:> — remove a single team's entry
+    from a draft's stored lotto (accepts a team emoji or its plain name)."""
+    if not _in_channel(ctx):
+        return
+    if not args:
+        await ctx.send(embed=_err("Usage: `!deletelottoteam ATD 104 <:TeamEmoji:>` (or the team's plain name)"))
+        return
+
+    m = re.match(r'(?i)(?:ATD\s*)?(\d+)\s+(.+)$', args.strip())
+    if not m:
+        await ctx.send(embed=_err("❌ Usage: `!deletelottoteam ATD 104 <:TeamEmoji:>`"))
+        return
+
+    draft_num, team_token = m.group(1), m.group(2).strip()
+    draft_key = f"ATD {draft_num}"
+
+    lottos = _load_lottos()
+    existing = lottos.get(draft_key)
+    if not existing:
+        await ctx.send(embed=_err(f"❌ No stored lotto found for **{draft_key}**."))
+        return
+
+    # Try resolving the token as a team emoji first (same rules as !setlotto).
+    emoji_names = re.findall(r'<a?:([^:]+):\d+>', team_token)
+    if not emoji_names:
+        emoji_names = re.findall(r':([^:\s]+):', team_token)
+    if not emoji_names:
+        emoji_names = _UNICODE_EMOJI_RE.findall(team_token)
+
+    team_name = _lookup_emoji_team(emoji_names[0]) if emoji_names else None
+
+    # Fall back to matching the token directly against this draft's stored
+    # team names (exact, then case-insensitive, then substring).
+    if not team_name:
+        if team_token in existing:
+            team_name = team_token
+        else:
+            token_lower = team_token.lower()
+            for t in existing:
+                if t.lower() == token_lower:
+                    team_name = t
+                    break
+            if not team_name:
+                for t in existing:
+                    if token_lower in t.lower():
+                        team_name = t
+                        break
+
+    if not team_name or team_name not in existing:
+        await ctx.send(embed=_err(f"❌ Team **{team_token}** not found in **{draft_key}**'s stored lotto."))
+        return
+
+    drafters = existing[team_name].get('drafters', [])
+    del existing[team_name]
+    lottos[draft_key] = existing
+    _save_lottos(lottos)
+
+    embed = discord.Embed(
+        title=f"🗑️ Team Removed — {draft_key}",
+        description=f"Removed **{team_name}** (was {', '.join(drafters) if drafters else 'unassigned'}). "
+                     f"**{len(existing)}** team(s) remain.",
+        color=C_GREEN,
+    )
+    await ctx.send(embed=embed)
+
 # ── !gmplayers ────────────────────────────────────────────────────────────────
 
 @bot.command(name='gmplayers')
@@ -2013,6 +2176,158 @@ async def cmd_gmplayers(ctx, *, name: str = ''):
             subtitle=subtitle
         )
         await ctx.send(embed=view.get_embed(), view=view)
+
+# ── !merchant ─────────────────────────────────────────────────────────────────
+
+def _build_player_drafter_index(drafters: list, lottos: dict) -> dict:
+    """folded player name -> {'display': str, 'counts': {canonical_drafter_name: count}}
+    across every ATD on record. Co-drafters on a team each get full credit for
+    every player on that team, same convention as _get_drafter_players."""
+    lookup = {}
+    for d in drafters:
+        for v in _all_name_variants(d['name']):
+            lookup[v.strip().lower()] = d['name']
+
+    def _resolve_name(raw_name: str) -> str:
+        for v in _all_name_variants(raw_name):
+            match = lookup.get(v.strip().lower())
+            if match:
+                return match
+        return raw_name.strip()
+
+    index: dict = {}
+    for teams in lottos.values():
+        for entry in teams.values():
+            raw_names = [n for n in entry.get('drafters', []) if n.strip().lower() != 'deleted user']
+            canonical_names = {_resolve_name(n) for n in raw_names}
+            for p in entry.get('players', []):
+                key    = _fold(p['name'].lower())
+                bucket = index.setdefault(key, {'display': p['name'], 'counts': {}})
+                for name in canonical_names:
+                    bucket['counts'][name] = bucket['counts'].get(name, 0) + 1
+    return index
+
+
+@bot.command(name='merchant')
+async def cmd_merchant(ctx, *, args: str = ''):
+    """!merchant — every ADP player and who's drafted them most, 10/page.
+    !merchant @GM — every player where @GM is the #1 (most frequent) drafter.
+    !merchant <player name> — that player's top 5 drafters and how many times
+    each has drafted them. A name with no close match suggests similar ones."""
+    if not _in_channel(ctx):
+        return
+
+    args = args.strip()
+
+    async with ctx.typing():
+        raw = await _get_raw()
+    drafters, _, _ = _parse(raw)
+    if not drafters:
+        await ctx.send(embed=_err("⚠️ Could not load Win Sheet data."))
+        return
+    lottos = _load_lottos()
+    index  = _build_player_drafter_index(drafters, lottos)
+
+    # ── !merchant @GM ───────────────────────────────────────────────────────
+    if ctx.message.mentions:
+        member     = ctx.message.mentions[0]
+        profiles   = _load_profiles()
+        sheet_name = profiles.get(str(member.id), {}).get('sheet_name')
+        if not sheet_name:
+            await ctx.send(embed=_err(
+                f"❌ **{member.display_name}** hasn't linked a Win Sheet profile yet — "
+                f"use `!linkprofile <name>` first."
+            ))
+            return
+
+        lookup = {}
+        for d in drafters:
+            for v in _all_name_variants(d['name']):
+                lookup[v.strip().lower()] = d['name']
+        canonical = next(
+            (lookup[v.strip().lower()] for v in _all_name_variants(sheet_name) if v.strip().lower() in lookup),
+            sheet_name,
+        )
+
+        top_for_gm = []
+        for bucket in index.values():
+            counts = bucket['counts']
+            if not counts:
+                continue
+            top_count = max(counts.values())
+            if counts.get(canonical, 0) == top_count:
+                top_for_gm.append((bucket['display'], top_count))
+        top_for_gm.sort(key=lambda x: (-x[1], x[0].lower()))
+
+        if not top_for_gm:
+            await ctx.send(embed=_err(f"❌ **{canonical}** isn't the #1 drafter for any player yet."))
+            return
+
+        lines = [f"{i:>2}. {player:<24} ×{count}" for i, (player, count) in enumerate(top_for_gm, 1)]
+        view = PlayerListView(
+            title=f"🛒  {canonical} — #1 Drafter For",
+            lines=lines,
+            subtitle=f"`{len(lines)} player(s)`",
+            per_page=10,
+        )
+        await ctx.send(embed=view.get_embed(), view=view)
+        return
+
+    # ── !merchant (no args) — browse every ADP player ───────────────────────
+    if not args:
+        lines = []
+        for name, _adp in sorted(ADP_MAP.items(), key=lambda x: x[1]):
+            bucket = index.get(_fold(name))
+            if bucket and bucket['counts']:
+                top_drafter, top_count = max(bucket['counts'].items(), key=lambda x: x[1])
+                lines.append(f"{bucket['display']:<24} {top_drafter} (×{top_count})")
+            else:
+                lines.append(f"{name.title():<24} — never drafted")
+
+        view = PlayerListView(
+            title="🛒  Merchant — Top Drafter Per Player",
+            lines=lines,
+            subtitle=f"`{len(lines)} ADP players`",
+            per_page=10,
+        )
+        await ctx.send(embed=view.get_embed(), view=view)
+        return
+
+    # ── !merchant <player name> ──────────────────────────────────────────────
+    key    = _fold(args.lower())
+    bucket = index.get(key)
+    if not bucket and key in ADP_MAP:
+        bucket = {'display': args.title(), 'counts': {}}
+
+    if not bucket:
+        candidates = {b['display'].lower(): b['display'] for b in index.values()}
+        for name in ADP_MAP:
+            candidates.setdefault(name, name.title())
+        close_keys = difflib.get_close_matches(args.lower(), candidates.keys(), n=5, cutoff=0.5)
+        if close_keys:
+            suggestions = "\n".join(f"• {candidates[k]}" for k in close_keys)
+            await ctx.send(embed=_err(f"❌ No player found matching **{args}**.\nDid you mean:\n{suggestions}"))
+        else:
+            await ctx.send(embed=_err(f"❌ No player found matching **{args}**."))
+        return
+
+    counts = bucket['counts']
+    if not counts:
+        await ctx.send(embed=discord.Embed(
+            title=f"🛒  {bucket['display']}",
+            description="Never drafted.",
+            color=C_PROFILE,
+        ))
+        return
+
+    top5  = sorted(counts.items(), key=lambda x: -x[1])[:5]
+    lines = [f"{MEDALS[i] if i < 3 else f'{i+1}.'} {name} — ×{count}" for i, (name, count) in enumerate(top5)]
+    embed = discord.Embed(
+        title=f"🛒  {bucket['display']} — Top Drafters",
+        description="\n".join(lines),
+        color=C_PROFILE,
+    )
+    await ctx.send(embed=embed)
 
 # ── !team ─────────────────────────────────────────────────────────────────────
 

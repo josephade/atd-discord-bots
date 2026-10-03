@@ -1,29 +1,26 @@
 # themes/anon_draft.py
 #
 # Anonymous Draft: ~30-32 GMs, grouped into teams of 1-3 owners each, each
-# team assigned a random logo nobody but the commissioner (and this bot)
-# can trace back to real people. The draft itself actually runs on ATD
-# Timer Bot in the real selection channel — Timer Bot never sees a real
-# GM's identity, because every anonymous team is registered there with
-# THIS bot as the sole "owner". This bot:
-#   1. Watches Timer Bot's public "your turn" ping, maps the pick number to
-#      a team via its own precomputed snake order (Timer Bot's ping never
-#      names the team — see handle_timer_ping), and relays the deadline to
-#      the real hidden GM(s) via DM.
+# team assigned a logo nobody but the commissioner (and this bot) can trace
+# back to real people. Turn order runs entirely inside this bot — no
+# external turn-order bot involved. This bot:
+#   1. Drives its own precomputed snake order (_team_index_for_pick):
+#      _advance_live_pick opens the next pick the instant the current one
+#      resolves (finalized or skipped), with its own decaying per-team
+#      timer (_open_pick_for_team/_start_team_timer) — same base/decay/
+#      floor shape Pack Draft uses, just applied per team here.
 #   2. Collects each GM's DM'd pick (`!pick <player> <year>`) — on a multi-
 #      member team, whoever submits first becomes the proposer and every
 #      other member gets an agree (`1`)-or-counter (`2`) prompt; countering
 #      hands the proposer role to them instead, ping-ponging until someone
 #      agrees or a 2-minute response window lapses (silence = agreement).
-#   3. Posts the finalized pick into the channel in the exact format ATD
-#      Draft List Bot already uses ("N. <logo> Player 'YY"), which Sheet
-#      Bot and Team Sheet Bot pick up unmodified — this bot must be in
-#      their EXTRA_TRUSTED_BOT_IDS allowlist for that to actually register.
+#   3. Posts each finalized pick as "<logo> picks <Player> [year] [price]"
+#      into a single fixed results channel (_RESULTS_CHANNEL_ID) — the only
+#      public record of a pick; there's no other downstream bot integration.
 #
-# Picks are still recorded in this bot's own DB for `!mypicks`, but this
-# theme's real source of truth for "what got drafted" is the live sheet —
-# unlike Pack Draft/Partner Draft, nothing here is hidden-until-reveal;
-# only GM IDENTITY is hidden, never the pick itself.
+# Picks are still recorded in this bot's own DB for `!mypicks`, but only GM
+# IDENTITY is ever hidden here — the pick itself is public the moment it's
+# made, unlike Pack Draft/Partner Draft's hidden-until-reveal model.
 
 import logging
 import re
@@ -31,7 +28,6 @@ import time
 
 import db
 import lotto
-from config import SELF_BOT_ID
 from timer import PickTimer
 from .base import DraftContext, Theme, draft_lock
 
@@ -41,7 +37,27 @@ _timer = PickTimer()  # keyed by (draft_id, team_index) — one clock per team, 
 _proposal_timer = PickTimer()  # same keying — the 2-minute agree-or-counter window for a pending proposal
 _PROPOSAL_RESPONSE_MINUTES = 2.0
 
+# This bot now runs turn order itself instead of watching ATD Timer Bot's
+# pings (see _open_pick_for_team/_advance_live_pick) — every finalized pick
+# is announced here as a plain "<logo> picks <Player> [year] [price]" line,
+# not the "N. <logo> Player 'YY $price" format ATD Draft List Bot/Sheet
+# Bot/Team Sheet Bot used to auto-parse. Those integrations are gone; this
+# channel is now the only public record of a pick.
+_RESULTS_CHANNEL_ID = 934052208624930848
+
 _YEAR_TOKEN_RE = re.compile(r"^'?\d{2,4}(-\d{2,4})?$")
+
+# Apostrophe-lookalike normalization for _already_taken's duplicate-pick
+# check — a curly apostrophe from one GM's phone and a straight one from
+# another's otherwise silently pass the "already drafted" check as
+# different strings, letting the same real player get drafted twice.
+_APOSTROPHE_VARIANTS = str.maketrans({
+    '‘': "'", '’': "'", 'ʼ': "'", '´': "'", '`': "'",
+})
+
+
+def _normalize_name(text: str) -> str:
+    return text.translate(_APOSTROPHE_VARIANTS)
 
 
 def _display_year(year: str) -> str:
@@ -78,7 +94,13 @@ class AnonDraftTheme(Theme):
             'rounds': 10,
             'require_price': False,   # the Anon Budget subclass flips this on
             'budget': None,           # set by the Anon Budget subclass
-            'fallback_deadline_minutes': 60,  # used only if a ping's deadline can't be parsed
+            # Same decaying-timer shape Pack Draft uses, applied per team
+            # instead of per seat — each skip knocks decay_minutes off the
+            # team's next clock, down to floor_minutes. floor_minutes=0 means
+            # a team that keeps skipping eventually gets skipped immediately.
+            'base_timer_minutes': 60,
+            'decay_minutes': 10,
+            'floor_minutes': 0,
         }
 
     def _settings(self, ctx: DraftContext) -> dict:
@@ -123,6 +145,8 @@ class AnonDraftTheme(Theme):
                 'budget_spent': 0.0,
                 'open_picks': [],       # [{'pick_number': int, 'skipped': bool, 'proposal': {...}|None, 'pending_from': [drafter_id]}]
                 'timer_pick_number': None,
+                'timer_deadline': None,
+                'skip_count': 0,
             })
 
         for team in teams:
@@ -136,21 +160,7 @@ class AnonDraftTheme(Theme):
         total_gms = sum(len(t['member_ids']) for t in teams)
         return (
             f"✅ Registered {len(teams)} teams ({total_gms} GMs total). "
-            f"Run `!fakelotto {ctx.draft_id}` next to get the Timer Bot registration message."
-        )
-
-    async def generate_fake_lotto(self, ctx: DraftContext) -> str:
-        teams = ctx.state.get('teams', [])
-        if not teams:
-            return "No teams registered yet — DM `!setteams` first."
-        self_id = SELF_BOT_ID or (ctx.bot.user.id if ctx.bot.user else None)
-        if not self_id:
-            return "❌ Couldn't determine this bot's own Discord ID — set SELF_BOT_ID in .env."
-        lines = [f"{t['index'] + 1}. {t['logo']} - <@{self_id}>" for t in teams]
-        return (
-            "Post this in Timer Bot's channel, then reply to it with `!timerloadlotto` "
-            "(every line intentionally mentions **this bot**, never a real GM):\n```\n"
-            + '\n'.join(lines) + "\n```"
+            f"Run `!theme start {ctx.draft_id}` to open pick #1."
         )
 
     async def start(self, ctx: DraftContext) -> str:
@@ -158,53 +168,37 @@ class AnonDraftTheme(Theme):
         if not teams:
             raise ValueError("No teams registered — DM me `!setteams` first.")
         settings = self._settings(ctx)
-        return (
-            f"Anonymous Draft ready — {len(teams)} teams, {settings['rounds']} rounds. "
-            f"Make sure Timer Bot's draft is running in this same channel — picks will be relayed "
-            f"automatically as its turn pings come in."
-        )
+        state = ctx.state
+        state['last_finalized_pick_number'] = 0
+        state['live_pick_number'] = 1
+        ctx.save_state(state)
+        await self._open_pick_for_team(ctx, 0, 1)
+        return f"Anonymous Draft started — {len(teams)} teams, {settings['rounds']} rounds. Pick #1 is now open."
 
-    # ── Turn detection (driven by bot.py's Timer Bot ping listener) ────────────
-    async def handle_timer_ping(self, ctx: DraftContext, pick_number: int, deadline_ts: int | None,
-                                 window_closed: bool = False) -> None:
-        async with draft_lock(ctx.draft_id):
-            settings = self._settings(ctx)
-            state = ctx.state
-            teams = state.get('teams', [])
-            if not teams:
-                return
-            team_idx = self._team_index_for_pick(pick_number, len(teams), settings['rounds'])
-            if team_idx is None:
-                return
-            await self._open_pick_for_team(ctx, team_idx, pick_number, deadline_ts, window_closed=window_closed)
-
+    # ── Turn order (self-driven — no external bot involved) ─────────────────
     async def override_pick(self, ctx: DraftContext, pick_number: int, team_ref: str) -> str:
         async with draft_lock(ctx.draft_id):
-            teams = ctx.state.get('teams', [])
+            state = ctx.state
+            teams = state.get('teams', [])
             team_idx = self._resolve_team_ref(teams, team_ref)
             if team_idx is None:
                 return f"❌ Couldn't find a team matching '{team_ref}' (use its number or exact logo)."
-            deadline_ts = int(time.time()) + self._settings(ctx)['fallback_deadline_minutes'] * 60
+            state['live_pick_number'] = pick_number
+            ctx.save_state(state)
             # force=True — this is the commish's explicit safety valve for
             # exactly the case the guard below exists to prevent accidental
             # duplicates of; an intentional manual override should win.
-            await self._open_pick_for_team(ctx, team_idx, pick_number, deadline_ts, force=True)
+            await self._open_pick_for_team(ctx, team_idx, pick_number, force=True)
             return f"✅ Manually opened pick #{pick_number} for team {teams[team_idx]['logo']}."
 
-    async def _open_pick_for_team(self, ctx: DraftContext, team_idx: int, pick_number: int,
-                                   deadline_ts: int | None, window_closed: bool = False,
-                                   force: bool = False) -> None:
+    async def _open_pick_for_team(self, ctx: DraftContext, team_idx: int, pick_number: int, force: bool = False) -> None:
         state = ctx.state
         team = state['teams'][team_idx]
         settings = self._settings(ctx)
         price_hint = ' `<price>`' if settings['require_price'] else ''
 
         if not force and pick_number <= state.get('last_finalized_pick_number', 0):
-            # A stale/duplicate "your turn" ping for a pick already finalized
-            # (observed cause: ATD Timer Bot's watchdog scanner can resend a
-            # ping if it runs in the split-second between a pick being
-            # accepted and the next one's ping going out) — reopening it
-            # would let the team draft twice for the same slot.
+            # Defensive: don't reopen a pick that's already been finalized.
             return
 
         entry = next((p for p in team['open_picks'] if p['pick_number'] == pick_number), None)
@@ -217,47 +211,70 @@ class AnonDraftTheme(Theme):
             if await self._try_consume_queued_pick(ctx, state, team_idx, entry):
                 return  # a teammate's standing pick already fired — nothing else to do
 
-        if window_closed:
-            # Timer Bot's own closed-window ping has no real deadline yet
-            # (its timer only starts at 10 AM ET) — don't start a countdown
-            # or pressure the GM with a fake urgent deadline. Just let them
-            # know they're up and can submit early if they want; the real
-            # timer gets started below once an actual active ping arrives.
-            if is_new:
-                for mid in team['member_ids']:
-                    drafter = db.get_drafter(mid)
-                    await ctx.dm(
-                        drafter['user_id'],
-                        f"🏀 **Pick #{pick_number} — your team is on the clock**, but the draft window "
-                        f"is currently closed. You can DM me your pick early with `!pick <player> <year>`"
-                        f"{price_hint} and it'll be accepted, or wait — I'll ping you again once the "
-                        f"real timer starts at 10:00 AM ET.",
-                    )
-            return
-
-        # A live/active ping. If we already have a running timer for this
-        # exact pick (e.g. the window just reopened and re-sent, or Timer
-        # Bot's ping fired twice), don't restart it or re-notify.
+        # Already have a running timer for this exact pick (e.g. this got
+        # called twice in a row somehow) — don't restart it or re-notify.
         if _timer.is_running((ctx.draft_id, team_idx)) and team.get('timer_pick_number') == pick_number:
             return
 
         team['timer_pick_number'] = pick_number
         ctx.save_state(state)
 
-        remaining_minutes = max(1.0, (deadline_ts - time.time()) / 60)
+        minutes = PickTimer.effective_minutes(
+            settings['base_timer_minutes'], settings['decay_minutes'], settings['floor_minutes'], team.get('skip_count', 0),
+        )
+        deadline_ts = int(time.time() + minutes * 60)
         for mid in team['member_ids']:
             drafter = db.get_drafter(mid)
             await ctx.dm(
                 drafter['user_id'],
-                f"🏀 **Pick #{pick_number} — the timer is live!**\n"
+                f"🏀 **Pick #{pick_number} — you're on the clock!**\n"
                 f"Deadline: <t:{deadline_ts}:R>\n"
                 f"DM me your pick: `!pick <player> <year>`{price_hint}",
             )
 
-        async def _on_timeout():
-            await self._resolve_on_timeout(ctx, team_idx, pick_number)
+        self._start_team_timer(ctx, state, team_idx, minutes)
 
-        _timer.start((ctx.draft_id, team_idx), remaining_minutes, _on_timeout)
+    def _start_team_timer(self, ctx: DraftContext, state: dict, team_idx: int, minutes: float) -> None:
+        # Persisted as a real wall-clock deadline, not just an in-memory
+        # asyncio delay, so resume_timers() can work out genuine remaining
+        # time instead of granting a fresh full clock after a restart.
+        deadline = time.time() + minutes * 60
+        state['teams'][team_idx]['timer_deadline'] = deadline
+        ctx.save_state(state)
+
+        async def _on_timeout():
+            # Re-fetch fresh rather than capturing pick_number now — an
+            # override could reopen a different pick for this team between
+            # scheduling and firing.
+            fresh_team = ctx.state['teams'][team_idx]
+            pick_number = fresh_team.get('timer_pick_number')
+            if pick_number is not None:
+                await self._resolve_on_timeout(ctx, team_idx, pick_number)
+
+        _timer.start((ctx.draft_id, team_idx), minutes, _on_timeout)
+
+    async def _advance_live_pick(self, ctx: DraftContext, pick_number: int) -> None:
+        """Called once the pick_number that was the current live turn
+        resolves (finalized OR skipped) — moves the snake sequence on to
+        the next pick regardless of which. A later makeup pick for an old
+        skipped slot must NOT trigger this — callers only invoke it when
+        pick_number was the draft's live_pick_number at the time."""
+        state = ctx.state
+        teams = state.get('teams', [])
+        settings = self._settings(ctx)
+        n_teams = len(teams)
+        total_picks = n_teams * settings['rounds']
+        next_pick_number = pick_number + 1
+        if next_pick_number > total_picks:
+            state['live_pick_number'] = None
+            ctx.save_state(state)
+            db.set_draft_status(ctx.draft_id, 'complete')
+            await ctx.announce(f"🏁 **Anonymous Draft complete!** All {total_picks} picks made.")
+            return
+        state['live_pick_number'] = next_pick_number
+        ctx.save_state(state)
+        next_team_idx = self._team_index_for_pick(next_pick_number, n_teams, settings['rounds'])
+        await self._open_pick_for_team(ctx, next_team_idx, next_pick_number)
 
     @staticmethod
     def _team_index_for_pick(pick_number: int, n_teams: int, rounds: int) -> int | None:
@@ -326,14 +343,10 @@ class AnonDraftTheme(Theme):
                 budget_error = self._check_budget(ctx, team, price)
                 if budget_error:
                     return budget_error
+                # _finalize_pick posts the public announcement and DMs a
+                # private confirmation to every teammate — nothing else
+                # needed here.
                 await self._finalize_pick(ctx, team_idx, entry, player, year, price)
-                price_part = f" ${price:.0f}" if price is not None else ''
-                year_part = f" '{_display_year(year)}" if year else ''
-                replied = await ctx.reply_to_trigger(
-                    f"✅ Makeup pick recorded — **{entry['pick_number']}. {team['logo']} {player}{year_part}{price_part}**"
-                )
-                if not replied:
-                    await ctx.dm(drafter['user_id'], f"✅ Makeup pick recorded — **{player}{year_part}{price_part}**")
                 return ''
 
             if len(team['member_ids']) == 1:
@@ -473,6 +486,7 @@ class AnonDraftTheme(Theme):
 
             if team.get('timer_pick_number') == pick_number:
                 team['timer_pick_number'] = None
+                team['timer_deadline'] = None
 
             proposal = entry.get('proposal')
             if proposal:
@@ -484,12 +498,12 @@ class AnonDraftTheme(Theme):
                 return
 
             entry['skipped'] = True
+            team['skip_count'] = team.get('skip_count', 0) + 1
+            was_live = pick_number == state.get('live_pick_number')
             ctx.save_state(state)
-            skip_msg = await ctx.announce(
+            await ctx.announce(
                 f"⏭️ **Pick {pick_number} skipped** — {_safe_logo_text(team['logo'])} didn't submit in time."
             )
-            entry['skip_message_id'] = skip_msg.id if skip_msg else None
-            ctx.save_state(state)
             for mid in team['member_ids']:
                 mate = db.get_drafter(mid)
                 await ctx.dm(
@@ -497,6 +511,8 @@ class AnonDraftTheme(Theme):
                     f"⏰ Nobody on your team submitted pick #{pick_number} in time — skipped. "
                     f"DM me anytime with your pick and I'll record it as a makeup.",
                 )
+            if was_live:
+                await self._advance_live_pick(ctx, pick_number)
 
     async def _finalize_pick(self, ctx: DraftContext, team_idx: int, entry: dict,
                               player: str, year: str, price: float | None) -> None:
@@ -514,6 +530,8 @@ class AnonDraftTheme(Theme):
         team['open_picks'] = [p for p in team['open_picks'] if p['pick_number'] != pick_number]
         if team.get('timer_pick_number') == pick_number:
             team['timer_pick_number'] = None
+            team['timer_deadline'] = None
+        was_live = pick_number == state.get('live_pick_number')
         ctx.save_state(state)
 
         _timer.cancel((ctx.draft_id, team_idx))
@@ -521,20 +539,22 @@ class AnonDraftTheme(Theme):
 
         price_part = f" ${price:.0f}" if price is not None else ''
         year_part = f" '{_display_year(year)}" if year else ''
-        pick_line = f"{pick_number}. {team['logo']} {player}{year_part}{price_part}"
-        # Posted as this bot — Timer Bot / Sheet Bot / Team Sheet Bot need this
-        # bot's ID in their EXTRA_TRUSTED_BOT_IDS for it to actually register.
-        if entry.get('skipped') and entry.get('skip_message_id'):
-            # A makeup pick — thread it as a reply to the original public
-            # "skipped" notice so it's visually linked instead of showing up
-            # as an unrelated new message.
-            await ctx.announce_reply_to(entry['skip_message_id'], pick_line)
+
+        results_channel = ctx.bot.get_channel(_RESULTS_CHANNEL_ID)
+        if results_channel:
+            await results_channel.send(f"{team['logo']} picks **{player}**{year_part}{price_part}")
         else:
-            await ctx.announce(pick_line)
+            log.warning(
+                "AnonDraft | results channel %s not found/not cached — pick announcement not posted",
+                _RESULTS_CHANNEL_ID,
+            )
 
         for mid in team['member_ids']:
             drafter = db.get_drafter(mid)
-            await ctx.dm(drafter['user_id'], f"✅ Your team's pick: **{pick_line}**")
+            await ctx.dm(drafter['user_id'], f"✅ Your team's pick: **{player}{year_part}{price_part}**")
+
+        if was_live:
+            await self._advance_live_pick(ctx, pick_number)
 
     def _check_budget(self, ctx: DraftContext, team: dict, price: float | None) -> str | None:
         """Overridden by the Anon Budget subclass. Base format has no budget."""
@@ -543,16 +563,15 @@ class AnonDraftTheme(Theme):
     @staticmethod
     def _already_taken(ctx: DraftContext, player: str) -> str | None:
         """Returns the logo of the team that already drafted this player (in
-        this draft), or None if it's still available. Checked here rather
-        than relying on ATD Timer Bot's own duplicate-pick rejection —
-        that happens after we've already told the GM their pick was
-        finalized, since Timer Bot only rejects it once we post to the
-        public channel."""
-        key = player.strip().lower()
+        this draft), or None if it's still available. Apostrophe-normalized
+        on both sides — a curly apostrophe from one GM's phone and a
+        straight one from another's would otherwise compare as different
+        strings, letting the same real player get drafted twice."""
+        key = _normalize_name(player.strip().lower())
         all_picks = db.get_all_picks(ctx.draft_id)
         teams = ctx.state.get('teams', [])
         for drafter_id, players in all_picks.items():
-            if not any(p.strip().lower() == key for p in players):
+            if not any(_normalize_name(p.strip().lower()) == key for p in players):
                 continue
             drafter = db.get_drafter(drafter_id)
             team_idx = drafter['state'].get('team_index') if drafter else None
@@ -693,11 +712,11 @@ class AnonDraftTheme(Theme):
         )
 
     async def on_timeout(self, ctx: DraftContext, drafter: dict) -> None:
-        # Timeouts are team-scoped (see _resolve_on_timeout / handle_timer_ping),
-        # not per-drafter — nothing to do via this generic per-drafter hook.
+        # Timeouts are team-scoped (see _resolve_on_timeout), not
+        # per-drafter — nothing to do via this generic per-drafter hook.
         return
 
-    def is_pick_phase_complete(self, ctx: DraftContext) -> bool:
+    def is_pick_phase_complete(self, ctx: DraftContext, drafter: dict | None = None) -> bool:
         settings = self._settings(ctx)
         teams = ctx.state.get('teams', [])
         if not teams:
@@ -725,8 +744,75 @@ class AnonDraftTheme(Theme):
         return list(ctx.state['teams'][idx]['member_ids'])
 
     async def resume_timers(self, ctx: DraftContext) -> int:
-        """Timers here track Timer Bot's own deadline, not a fresh clock —
-        there's no sane "resume" without re-reading Timer Bot's current
-        ping, which this bot doesn't retroactively fetch. A restart mid-pick
-        just means the next Timer Bot ping (or `!anonoverride`) re-opens it."""
-        return 0
+        """Called on bot startup/reconnect (and by the overnight auto-pause
+        job when it reopens the draft at 10 AM) — timers only live in this
+        process's memory, so a restart silently drops any countdown that
+        was mid-flight even though team/pick state itself (in sqlite)
+        survives fine. Resumes from the persisted deadline (see
+        _start_team_timer) so a team gets its genuine remaining time, not a
+        fresh full clock — or an immediate resolution if it had already
+        expired while the bot was down. Proposal-response timers (the
+        2-minute agree-or-counter window) are NOT resumed — that window is
+        short enough that a restart almost always means it's already
+        moot, and a GM can still resolve it manually via `1`/`2` regardless
+        of whether the auto-timeout survives a restart."""
+        settings = self._settings(ctx)
+        state = ctx.state
+        teams = state.get('teams', [])
+        resumed = 0
+        for team_idx, team in enumerate(teams):
+            pick_number = team.get('timer_pick_number')
+            if pick_number is None or _timer.is_running((ctx.draft_id, team_idx)):
+                continue
+
+            deadline = team.get('timer_deadline')
+            if deadline is None:
+                minutes = PickTimer.effective_minutes(
+                    settings['base_timer_minutes'], settings['decay_minutes'], settings['floor_minutes'], team.get('skip_count', 0),
+                )
+                delivered_any = False
+                for mid in team['member_ids']:
+                    drafter = db.get_drafter(mid)
+                    ok = await ctx.dm(
+                        drafter['user_id'],
+                        f"🔄 Reconnected — your timer has been reset to **{minutes:.0f} minutes** for pick "
+                        f"#{pick_number} (no prior deadline on file). DM me your pick: `!pick <player> <year>`.",
+                    )
+                    delivered_any = delivered_any or ok
+                if delivered_any:
+                    self._start_team_timer(ctx, ctx.state, team_idx, minutes)
+                    resumed += 1
+                continue
+
+            remaining_seconds = deadline - time.time()
+            if remaining_seconds <= 0:
+                for mid in team['member_ids']:
+                    drafter = db.get_drafter(mid)
+                    await ctx.dm(drafter['user_id'], "🔄 Reconnected — your timer had already run out while I was offline. Resolving now.")
+                await self._resolve_on_timeout(ctx, team_idx, pick_number)
+            else:
+                minutes = remaining_seconds / 60
+                for mid in team['member_ids']:
+                    drafter = db.get_drafter(mid)
+                    await ctx.dm(
+                        drafter['user_id'],
+                        f"🔄 Reconnected — you still have **{minutes:.0f} minutes** left on pick #{pick_number}. "
+                        f"DM me your pick: `!pick <player> <year>`.",
+                    )
+                self._start_team_timer(ctx, ctx.state, team_idx, minutes)
+            resumed += 1
+        return resumed
+
+    async def cancel(self, ctx: DraftContext) -> None:
+        # Clear the persisted deadline (not just the in-memory task) so a
+        # later resume_timers() grants a fresh full clock instead of
+        # computing negative/expired remaining time — e.g. the overnight
+        # auto-pause window is ~10 hours, which would otherwise read as
+        # "already expired" and immediately auto-skip every team the
+        # instant the draft reopens at 10 AM.
+        state = ctx.state
+        for team_idx, team in enumerate(state.get('teams', [])):
+            team['timer_deadline'] = None
+            _timer.cancel((ctx.draft_id, team_idx))
+            _proposal_timer.cancel((ctx.draft_id, team_idx))
+        ctx.save_state(state)

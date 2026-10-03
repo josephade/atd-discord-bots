@@ -36,14 +36,132 @@ import sheets
 from config import POOL_SPREADSHEET_ID, POOL_TAB_NAME
 from emoji_map import EMOJI_TEAM_MAP
 from timer import PickTimer
-from .base import DraftContext, Theme, draft_lock, highlight_taken
+from .base import DraftContext, Theme, draft_lock
 
 log = logging.getLogger(__name__)
 
 _timer = PickTimer()
 
 _CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):(\d+)>')
+_EMOJI_SUFFIX_RE = re.compile(r'~\d+$')
 _YEAR_TOKEN_RE = re.compile(r"^'?\d{2,4}(-\d{2,4})?$")
+
+# Mobile keyboards (iOS especially) auto-convert a typed straight apostrophe
+# into a curly one — "O'Neal" becomes "O'Neal" as you type, visually
+# identical but a different character, so a plain string match against the
+# pack's ASCII apostrophe silently fails and rejects an obviously-present
+# player. Normalize every apostrophe-lookalike to a plain "'" before any
+# name comparison.
+_APOSTROPHE_VARIANTS = str.maketrans({
+    '‘': "'", '’': "'", 'ʼ': "'", '´': "'", '`': "'",
+})
+
+
+def _normalize_name(text: str) -> str:
+    return text.translate(_APOSTROPHE_VARIANTS)
+
+
+def _display_year(year: str) -> str:
+    """Classic trading-card shorthand ("'96") for a bare 1-2 digit year —
+    but a season range ("2011-12") or a full 4-digit year read as a typo
+    with an apostrophe glued on front, so only add it for the short form."""
+    return f"'{year}" if year.isdigit() and len(year) <= 2 else year
+
+
+def _normalize_season_year(year: str) -> str:
+    """A bare single 4-digit year ("2020") gets auto-expanded to the
+    season-range format ("2019-20") the reveal sheet's Year column expects
+    — GMs typing just the year it happened, not the "start-end" season
+    notation the rest of the sheet uses, produced a plain "2020" sitting
+    next to everyone else's "2015-16" style entries. The convention is the
+    season ENDING in that year (2020 means the 2019-20 season, the one
+    whose Finals landed in 2020), not the one starting in it. Anything
+    that already has its own explicit format (a dash, a 2-digit !myteam
+    shorthand, non-numeric) is left exactly as typed."""
+    year = year.strip()
+    if year.isdigit() and len(year) == 4:
+        y = int(year)
+        return f"{y - 1}-{y % 100:02d}"
+    return year
+
+# ── $1 filler players ────────────────────────────────────────────────────────
+# Last-resort roster padding for best_affordable_roster: if a GM's own picks
+# can't fill every slot within budget (e.g. every single one of their picks
+# is expensive), this pool patches the gaps at a flat $1 each rather than
+# leaving them unable to ever submit a roster at all. These were never
+# drafted, so roster.validate_roster's "must be drafted by you" check needs
+# an explicit allowlist for them — see Theme.filler_player_names.
+#
+# Position categories here are the broad Guard/Wing/Forward/Big scale (not
+# the strict PG/SG/SF/PF/C used for real picks) — mapped below to whichever
+# of the 5 real slots each category can reasonably cover.
+_FILLER_CATEGORY_POSITIONS = {
+    'guard': ['PG', 'SG'],
+    'wing': ['SG', 'SF'],
+    'forward': ['SF', 'PF'],
+    'big': ['PF', 'C'],
+    'guard/wing': ['PG', 'SG', 'SF'],
+    'forward/big': ['SF', 'PF', 'C'],
+    'wing/forward': ['SG', 'SF', 'PF'],
+}
+
+_FILLER_RAW = [
+    ('JR Smith', 'wing'), ('Gail Goodrich', 'guard'), ('Kenyon Martin', 'forward/big'),
+    ('Clifford Ray', 'big'), ('Louie Dampier', 'guard'), ('Dejounte Murray', 'guard'),
+    ('Nicolas Claxton', 'guard/wing'), ('DeAndre Jordan', 'big'), ('Otis Birdsong', 'wing'),
+    ('Rajon Rondo', 'guard'), ('Kentavious Caldwell-Pope', 'wing'), ('CJ McCollum', 'wing'),
+    ('PJ Tucker', 'forward'), ('Jerami Grant', 'forward'), ('Jerry Lucas', 'forward'),
+    ('Tony Allen', 'wing'), ('Wally Szczerbiak', 'forward'), ('Chuck Person', 'forward'),
+    ('Clint Capela', 'big'), ('Anthony Parker', 'wing'), ('DeMarcus Cousins', 'big'),
+    ('Gary Payton II', 'guard'), ('Bruce Bowen', 'wing'), ('Andrew Bynum', 'big'),
+    ('Rodney McCray', 'wing'), ('Micheal Ray Richardson', 'wing'), ('Myles Turner', 'big'),
+    ('Adrian Dantley', 'wing/forward'), ('John Collins', 'forward'), ('John Salley', 'big'),
+    ('Pete Maravich', 'guard'), ('Walt Bellamy', 'forward/big'), ('Paul Silas', 'forward/big'),
+    ('Trey Murphy', 'guard'), ('John Starks', 'wing'), ('Kevin Martin', 'wing'),
+    ('Sean Elliott', 'wing'), ('James Silas', 'guard'), ('Darryl Dawkins', 'big'),
+    ('Kendall Gill', 'wing'), ('Jim Paxson', 'guard'), ('Bob Cousy', 'guard'),
+    ('Jusuf Nurkic', 'forward/big'), ('Andre Roberson', 'big'), ('Mickey Johnson', 'wing/forward'),
+    ('Quinn Buckner', 'wing/forward'), ('Nickeil Alexander-Walker', 'wing'), ('Nick Anderson', 'big'),
+    ('Lonnie Shelton', 'wing/forward'), ('Mo Williams', 'wing'), ('Cedric Maxwell', 'big'),
+    ('Tom Boerwinkle', 'guard/wing'), ('Richie Guerin', 'guard'), ('Norm Van Lier', 'guard'),
+    ('Ryan Anderson', 'forward/big'), ('Dave Bing', 'wing/forward'), ('World B. Free', 'big'),
+    ('Ty Lawson', 'guard/wing'), ('Tom Sanders', 'guard'), ('Mehmet Okur', 'guard'),
+    ('Xavier McDaniel', 'forward'), ('Ray Williams', 'wing/forward'), ('Spencer Haywood', 'guard'),
+    ('Charles Oakley', 'wing'), ('Jameer Nelson', 'forward'), ('Ben Gordon', 'wing'),
+    ('DeMar DeRozan', 'guard'), ('Larry Hughes', 'guard'), ('Bill Cartwright', 'forward'),
+    ('Terry Mills', 'guard'), ('Mel Daniels', 'big'), ('Bobby Simmons', 'wing'),
+    ('Wil Jones', 'wing/forward'), ('Dolph Schayes', 'forward'), ('Bill Bridges', 'guard'),
+    ('Jack Twyman', 'forward'), ('Eddie Johnson', 'guard/wing'), ('Zelmo Beaty', 'guard'),
+    ('Maurice Stokes', 'forward'), ('Lenny Wilkens', 'wing'), ('Calvin Murphy', 'big'),
+    ('Hot Rod Williams', 'forward/big'), ('Micheal Williams', 'forward'), ('KC Jones', 'guard'),
+    ('Channing Frye', 'big'), ('Bill Sharman', 'guard'), ('Charlie Ward', 'guard'),
+    ('Brian Winters', 'wing'), ('George McGinnis', 'guard'), ('Dan Issel', 'forward'),
+    ('Stephon Marbury', 'forward'), ('Andre Miller', 'guard'), ('Mark Aguirre', 'forward'),
+    ('Earl Monroe', 'guard'),
+]
+
+# Later entries win on an exact-name collision in the raw list above (e.g. Ty
+# Lawson / Lenny Wilkens each appear twice with different categories) — a
+# plain dict comprehension keeps last-occurrence, which is fine here since
+# either category still gets a defensible position for a $1 last resort.
+_FILLER_POOL: dict[str, list[str]] = {
+    name: _FILLER_CATEGORY_POSITIONS[category] for name, category in _FILLER_RAW
+}
+_FILLER_PRICES: dict[str, float] = {name: 1.0 for name in _FILLER_POOL}
+
+
+def _lookup_emoji_team(name: str) -> str:
+    """Discord appends ~1, ~2, ... to an emoji's name to disambiguate when
+    the same name is already in use elsewhere in the message — the number
+    is arbitrary per-message, not a stable property of the emoji, so it'll
+    drift every time. Try the exact name first (covers a handful of teams
+    that legitimately have '~' in their sheet name), then fall back to the
+    name with any trailing ~N stripped, instead of requiring every observed
+    suffix to be hardcoded into EMOJI_TEAM_MAP one at a time."""
+    if name in EMOJI_TEAM_MAP:
+        return EMOJI_TEAM_MAP[name]
+    base = _EMOJI_SUFFIX_RE.sub('', name)
+    return EMOJI_TEAM_MAP.get(base, name)
 
 
 def _resolve_team_name(raw: str) -> str:
@@ -57,8 +175,16 @@ def _resolve_team_name(raw: str) -> str:
     raw = (raw or '').strip()
     m = _CUSTOM_EMOJI_RE.search(raw)
     if m:
-        return EMOJI_TEAM_MAP.get(m.group(1), m.group(1))
-    return EMOJI_TEAM_MAP.get(raw, raw)
+        return _lookup_emoji_team(m.group(1))
+    # A commish sometimes types the Discord shortcode form (":Blazers:")
+    # instead of an actual rendered custom emoji, which arrives as plain
+    # text with the colons still attached — EMOJI_TEAM_MAP's keys are bare
+    # names ("Blazers"), so ":Blazers:" would silently miss the lookup and
+    # fall through to itself unresolved. Strip a matching pair of colons
+    # before trying the name-based lookup.
+    if len(raw) > 2 and raw.startswith(':') and raw.endswith(':'):
+        raw = raw[1:-1]
+    return _lookup_emoji_team(raw)
 
 
 class PackDraftTheme(Theme):
@@ -77,7 +203,7 @@ class PackDraftTheme(Theme):
             'enforce_budget': True,   # set false to run Pack Draft with no money at all, even if the pool sheet has prices
             'base_timer_minutes': 60,
             'decay_minutes': 10,
-            'floor_minutes': 10,
+            'floor_minutes': 0,  # a seat that keeps skipping eventually gets skipped immediately
             'public_channel_id': None,  # optional: channel to create a live per-division spectator thread under
             'pack_delivery_gap_seconds': 3,  # pause before handing a seat its NEXT queued pack right after a
             # pick, so that DM doesn't land on top of (or before) the "you drafted X" confirmation and get
@@ -87,25 +213,86 @@ class PackDraftTheme(Theme):
     def _settings(self, ctx: DraftContext) -> dict:
         return {**self.default_settings(), **ctx.settings}
 
-    @staticmethod
-    def _division_label(idx: int) -> str:
-        return chr(ord('A') + idx)
+    def _division_label(self, ctx: DraftContext, idx: int) -> str:
+        """Full display phrase for this division — "Division A" by default,
+        or just the commish's custom name as-is (via !theme divisionname)
+        if one's set, e.g. "Ember Division" rather than the redundant
+        "Division Ember Division". Callers use this directly and never
+        prepend the word "Division" themselves."""
+        custom = ctx.state.get('division_names', {}).get(str(idx))
+        return custom or f"Division {chr(ord('A') + idx)}"
 
-    @staticmethod
-    def _parse_division(text: str, num_divisions: int) -> int:
-        text = text.strip().upper()
+    def division_label(self, ctx: DraftContext, idx: int) -> str:
+        """Public Theme hook (e.g. for `!theme team`) — delegates to the
+        same custom-name-aware label used everywhere internally."""
+        return self._division_label(ctx, idx)
+
+    def resolve_team_logo(self, raw: str) -> str:
+        return _resolve_team_name(raw)
+
+    def _division_tab_name(self, ctx: DraftContext, idx: int) -> str:
+        """This division's own blackout tab on the pool spreadsheet — e.g.
+        'ADP - Division A' — kept separate from the master POOL_TAB_NAME (and
+        from every other division's tab) since divisions draw independently
+        from the same tiers and a pick in one division doesn't make a player
+        unavailable in another's."""
+        return f"{POOL_TAB_NAME} - {self._division_label(ctx, idx)}"
+
+    async def _ensure_division_tab(self, ctx: DraftContext, div_idx: int) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None, sheets.ensure_division_tab, POOL_SPREADSHEET_ID, POOL_TAB_NAME, self._division_tab_name(ctx, div_idx),
+            )
+        except Exception:
+            log.warning("PackDraft | failed to ensure blackout tab for div=%s", div_idx, exc_info=True)
+
+    async def _highlight_taken_division(self, ctx: DraftContext, div_idx: int, player: str) -> None:
+        """Division-scoped equivalent of base.highlight_taken — marks the
+        player taken on this division's own tab, not the shared master."""
+        loop = asyncio.get_running_loop()
+        tab_name = self._division_tab_name(ctx, div_idx)
+        try:
+            await loop.run_in_executor(None, sheets.mark_player_taken, POOL_SPREADSHEET_ID, tab_name, player)
+        except Exception:
+            log.warning("PackDraft | failed to mark '%s' taken on %s", player, tab_name, exc_info=True)
+
+    def _parse_division(self, ctx: DraftContext, text: str, num_divisions: int) -> int:
+        text = text.strip()
         max_label = chr(ord('A') + num_divisions - 1)
         if not text:
-            raise ValueError(f"Provide a division letter (A-{max_label}) or number (1-{num_divisions}).")
+            raise ValueError(f"Provide a division letter (A-{max_label}), number (1-{num_divisions}), or its custom name.")
+
+        names = ctx.state.get('division_names', {})
+        for idx_str, name in names.items():
+            if name.lower() == text.lower():
+                return int(idx_str)
+
+        text_upper = text.upper()
         if text.isdigit():
             idx = int(text) - 1
-        elif len(text) == 1 and text.isalpha():
-            idx = ord(text) - ord('A')
+        elif len(text_upper) == 1 and text_upper.isalpha():
+            idx = ord(text_upper) - ord('A')
         else:
-            raise ValueError(f"Couldn't parse division '{text}' — use a letter (A-{max_label}) or number (1-{num_divisions}).")
+            raise ValueError(f"Couldn't parse division '{text}' — use a letter (A-{max_label}), number (1-{num_divisions}), or its custom name.")
         if not (0 <= idx < num_divisions):
             raise ValueError(f"Division must be A-{max_label} or 1-{num_divisions}.")
         return idx
+
+    async def set_division_name(self, ctx: DraftContext, division: str, name: str) -> str:
+        settings = self._settings(ctx)
+        try:
+            div_idx = self._parse_division(ctx, division, settings['num_divisions'])
+        except ValueError as e:
+            return f"❌ {e}"
+        name = name.strip()
+        if not name:
+            return "Provide a name to rename it to."
+        old_label = self._division_label(ctx, div_idx)
+        state = ctx.state
+        state.setdefault('division_names', {})[str(div_idx)] = name
+        ctx.save_state(state)
+        return f"✅ {old_label} renamed to **{name}**."
 
     # ── Seats (1-3 GMs each) ────────────────────────────────────────────────
     # A "seat" is the actual unit that owns a pack instance and a timer —
@@ -119,7 +306,40 @@ class PackDraftTheme(Theme):
     def _seat_members(self, ctx: DraftContext, div_idx: int, seat_index: int) -> list[dict]:
         members = [d for d in db.list_drafters_in_division(ctx.draft_id, div_idx) if d['seat_index'] == seat_index]
         members.sort(key=lambda d: d['id'])
+        if len(members) > 1:
+            currents = {m['id']: m['state'].get('current_pack_instance') for m in members}
+            queues = {m['id']: m['state'].get('queue') for m in members}
+            if len(set(currents.values())) > 1 or len(set(map(tuple, (q or [] for q in queues.values())))) > 1:
+                log.warning(
+                    "PackDraft | DIVERGED SEAT detected on read draft=%s div=%s seat=%s current=%s queue=%s",
+                    ctx.draft_id, div_idx, seat_index, currents, queues,
+                )
         return members
+
+    async def division_roster(self, ctx: DraftContext) -> str:
+        """Every GM, grouped by division and seat — a plain assignment
+        list, independent of draft progress/status (works before
+        !startpackdraft too, unlike !packstatus)."""
+        settings = self._settings(ctx)
+        lines = []
+        for div_idx in range(settings['num_divisions']):
+            label = self._division_label(ctx, div_idx)
+            drafters = db.list_drafters_in_division(ctx.draft_id, div_idx)
+            lines.append(f"**{label}**")
+            if not drafters:
+                lines.append('  _nobody assigned yet_')
+                continue
+            seats = sorted({d['seat_index'] for d in drafters if d['seat_index'] is not None})
+            for seat in seats:
+                members = [d for d in drafters if d['seat_index'] == seat]
+                names = ' & '.join(m['display_name'] for m in members)
+                team_name = members[0]['state'].get('team_name')
+                team_part = f" ({team_name})" if team_name else ''
+                lines.append(f"  Seat {seat + 1}: {names}{team_part}")
+            unassigned = [d for d in drafters if d['seat_index'] is None]
+            if unassigned:
+                lines.append(f"  _no seat yet:_ {', '.join(d['display_name'] for d in unassigned)}")
+        return '\n'.join(lines)
 
     @staticmethod
     def _seat_primary(members: list[dict]) -> dict:
@@ -133,7 +353,7 @@ class PackDraftTheme(Theme):
     async def import_draft_order(self, ctx: DraftContext, division: str, team_lines: list[dict]) -> str:
         settings = self._settings(ctx)
         try:
-            div_idx = self._parse_division(division, settings['num_divisions'])
+            div_idx = self._parse_division(ctx, division, settings['num_divisions'])
         except ValueError as e:
             return f"❌ {e}"
 
@@ -145,7 +365,7 @@ class PackDraftTheme(Theme):
         if bad:
             return f"❌ Line(s) {', '.join(map(str, bad))} need 1-3 @mentions — a seat can be solo, a duo, or a trio."
 
-        div_label = self._division_label(div_idx)
+        div_label = self._division_label(ctx, div_idx)
         total_gms = 0
         failed_dms = []
         for seat, entry in enumerate(team_lines):
@@ -171,19 +391,173 @@ class PackDraftTheme(Theme):
 
                 delivered = await ctx.dm(
                     uid,
-                    f"🏀 You're drafting in Division {div_label} — your team is **{team_name}**.",
+                    f"🏀 You're drafting in {div_label} — your team is **{team_name}**.\n"
+                    f"⚠️ Keep this to yourself until seeding is public — disclosing your team early costs you 5 wins.",
                 )
                 if not delivered:
                     failed_dms.append(display_name)
 
         note = f"\n⚠️ Couldn't DM: {', '.join(failed_dms)} — let them know their team manually." if failed_dms else ''
-        return f"✅ Division {div_label} order set ({needed} seats, {total_gms} GMs, team names captured).{note}"
+        return f"✅ {div_label} order set ({needed} seats, {total_gms} GMs, team names captured).{note}"
+
+    async def add_teammate(self, ctx: DraftContext, existing_user_id: int, new_user_id: int) -> str:
+        async with draft_lock(ctx.draft_id):
+            existing = db.get_drafter_by_user(ctx.draft_id, existing_user_id)
+            if not existing or existing.get('division') is None or existing.get('seat_index') is None:
+                return "❌ That GM isn't assigned to a seat in this draft yet — run `!importorder` first."
+
+            div_idx, seat_index = existing['division'], existing['seat_index']
+            members = self._seat_members(ctx, div_idx, seat_index)
+            if len(members) >= 3:
+                return f"❌ Seat {seat_index + 1} already has 3 GMs — that's the max for a duo/trio."
+            if any(m['user_id'] == new_user_id for m in members):
+                return "❌ They're already on this team."
+
+            display_name = str(new_user_id)
+            try:
+                user = ctx.bot.get_user(new_user_id) or await ctx.bot.fetch_user(new_user_id)
+                if user:
+                    display_name = getattr(user, 'display_name', None) or user.name
+            except Exception:
+                pass
+
+            new_drafter = db.get_drafter_by_user(ctx.draft_id, new_user_id)
+            if new_drafter:
+                db.set_drafter_seat(new_drafter['id'], seat_index)
+                db.set_drafter_division(new_drafter['id'], div_idx)
+                new_id = new_drafter['id']
+            else:
+                new_id = db.add_drafter(ctx.draft_id, new_user_id, display_name, seat_index=seat_index, division=div_idx)
+
+            # Mirror the seat's current live state onto the new member so
+            # they're immediately in sync with their teammate(s) — same
+            # fields _open_round/_commit_pick always keep identical across
+            # every member of a seat. A no-op (all None/empty) before the
+            # draft has started.
+            primary = self._seat_primary(members)
+            team_name = primary['state'].get('team_name')
+            db.update_drafter_state(new_id, {
+                'team_name': team_name,
+                'current_pack_instance': primary['state'].get('current_pack_instance'),
+                'queue': list(primary['state'].get('queue', [])),
+                'timer_deadline': primary['state'].get('timer_deadline'),
+            })
+
+            div_label = self._division_label(ctx, div_idx)
+            delivered = await ctx.dm(
+                new_user_id,
+                f"🏀 You've been added to a team in {div_label} — your team is **{team_name}**.\n"
+                f"⚠️ Keep this to yourself until seeding is public — disclosing your team early costs you 5 wins.",
+            )
+            note = '' if delivered else " ⚠️ Couldn't DM them — let them know manually."
+
+            failed_existing = []
+            for m in members:
+                ok = await ctx.dm(m['user_id'], f"🏀 **{display_name}** has joined your team ({team_name}) in {div_label}.")
+                if not ok:
+                    failed_existing.append(m['display_name'])
+            if failed_existing:
+                note += f" ⚠️ Couldn't DM existing teammate(s): {', '.join(failed_existing)}."
+
+            teammates = ' & '.join(m['display_name'] for m in members)
+            return f"✅ **{display_name}** added to Seat {seat_index + 1} ({team_name}) alongside {teammates}.{note}"
+
+    async def move_drafter(self, ctx: DraftContext, user_id: int, division_ref: str, seat_number: int) -> str:
+        """Relocates a GM to a specific division/seat. If that seat already
+        has exactly one occupant, this SWAPS the two — the occupant takes
+        the mover's old spot — rather than adding a second person to the
+        seat (`!addteammate` is the dedicated tool for that). A seat with
+        2-3 people already, or a mover with no prior seat to give back, is
+        refused rather than guessed at."""
+        async with draft_lock(ctx.draft_id):
+            drafter = db.get_drafter_by_user(ctx.draft_id, user_id)
+            if not drafter:
+                return "❌ That GM isn't in this draft at all yet."
+
+            picks = db.get_picks(ctx.draft_id, drafter['id'])
+            if picks:
+                return (f"❌ **{drafter['display_name']}** already has {len(picks)} pick(s) recorded — moving "
+                        f"divisions once picking has started would orphan those picks against the wrong "
+                        f"division's pool. Not supported after picking begins.")
+
+            settings = self._settings(ctx)
+            try:
+                new_div_idx = self._parse_division(ctx, division_ref, settings['num_divisions'])
+            except ValueError as e:
+                return f"❌ {e}"
+            per_division = settings['drafters_per_division']
+            new_seat = seat_number - 1
+            if not (0 <= new_seat < per_division):
+                return f"❌ Seat must be 1-{per_division}."
+
+            old_div_idx, old_seat = drafter.get('division'), drafter.get('seat_index')
+            old_label = self._division_label(ctx, old_div_idx) if old_div_idx is not None else None
+            new_label = self._division_label(ctx, new_div_idx)
+
+            if old_div_idx == new_div_idx and old_seat == new_seat:
+                return f"❌ **{drafter['display_name']}** is already in {new_label} Seat {seat_number}."
+
+            target_members = self._seat_members(ctx, new_div_idx, new_seat)
+            if len(target_members) >= 2:
+                names = ', '.join(m['display_name'] for m in target_members)
+                return (f"❌ {new_label} Seat {seat_number} already has {len(target_members)} GMs ({names}) — "
+                        f"can't swap with more than one person at once. Move them out individually first, or "
+                        f"use `!addteammate` if you actually want to add {drafter['display_name']} alongside them.")
+
+            target = target_members[0] if target_members else None
+            if target and old_div_idx is None:
+                return (f"❌ **{drafter['display_name']}** isn't assigned to a seat yet, so there's nothing to "
+                        f"swap **{target['display_name']}** into. Use `!addteammate` to add them to that seat "
+                        f"instead, or free the seat up first.")
+            if target:
+                target_picks = db.get_picks(ctx.draft_id, target['id'])
+                if target_picks:
+                    return (f"❌ **{target['display_name']}** already has {len(target_picks)} pick(s) recorded — "
+                            f"swapping them out would orphan those picks. Not supported after picking begins.")
+
+            mover_team_name = drafter['state'].get('team_name')
+            target_team_name = target['state'].get('team_name') if target else None
+
+            db.set_drafter_division(drafter['id'], new_div_idx)
+            db.set_drafter_seat(drafter['id'], new_seat)
+            db.update_drafter_state(drafter['id'], {'team_name': target_team_name if target else mover_team_name})
+
+            notes = []
+            mover_team_display = target_team_name if target else mover_team_name
+            delivered = await ctx.dm(
+                user_id,
+                f"🏀 You've been moved to {new_label}, Seat {seat_number} — your team is **{mover_team_display}**.\n"
+                f"⚠️ Keep this to yourself until seeding is public — disclosing your team early costs you 5 wins.",
+            )
+            if not delivered:
+                notes.append(f"couldn't DM {drafter['display_name']}")
+
+            if target:
+                db.set_drafter_division(target['id'], old_div_idx)
+                db.set_drafter_seat(target['id'], old_seat)
+                db.update_drafter_state(target['id'], {'team_name': mover_team_name})
+                swapped_where = f"{old_label} Seat {old_seat + 1}"
+                delivered2 = await ctx.dm(
+                    target['user_id'],
+                    f"🏀 You've been moved to {swapped_where} — your team is **{mover_team_name}**.\n"
+                    f"⚠️ Keep this to yourself until seeding is public — disclosing your team early costs you 5 wins.",
+                )
+                if not delivered2:
+                    notes.append(f"couldn't DM {target['display_name']}")
+
+            note = f" ⚠️ {'; '.join(notes)}." if notes else ''
+            if target:
+                return (f"✅ Swapped **{drafter['display_name']}** ↔ **{target['display_name']}** — "
+                        f"{drafter['display_name']} now {new_label} Seat {seat_number}, "
+                        f"{target['display_name']} now {old_label} Seat {old_seat + 1}.{note}")
+            move_desc = f"from {old_label} Seat {old_seat + 1}" if old_label and old_seat is not None else "in"
+            return f"✅ **{drafter['display_name']}** moved {move_desc} to {new_label} Seat {seat_number} ({mover_team_display}).{note}"
 
     # ── Pack generation ──────────────────────────────────────────────────────
     async def generate_packs(self, ctx: DraftContext, division: str) -> str:
         settings = self._settings(ctx)
         try:
-            div_idx = self._parse_division(division, settings['num_divisions'])
+            div_idx = self._parse_division(ctx, division, settings['num_divisions'])
         except ValueError as e:
             return f"❌ {e}"
 
@@ -210,7 +584,8 @@ class PackDraftTheme(Theme):
             # the remaining tier_size - packs_per_division players are intentionally left unseeded
 
         self._store_generated_packs(ctx, div_idx, packs)
-        result = f"✅ Generated {packs_per_division} packs of {pack_size} for Division {self._division_label(div_idx)}."
+        await self._ensure_division_tab(ctx, div_idx)
+        result = f"✅ Generated {packs_per_division} packs of {pack_size} for {self._division_label(ctx, div_idx)}."
         warning = await self._check_budget_feasibility(ctx, packs)
         if warning:
             result += f"\n{warning}"
@@ -219,7 +594,7 @@ class PackDraftTheme(Theme):
     async def load_packs(self, ctx: DraftContext, division: str, text: str) -> str:
         settings = self._settings(ctx)
         try:
-            div_idx = self._parse_division(division, settings['num_divisions'])
+            div_idx = self._parse_division(ctx, division, settings['num_divisions'])
         except ValueError as e:
             return f"❌ {e}"
 
@@ -246,7 +621,8 @@ class PackDraftTheme(Theme):
 
         packs = [parsed[n] for n in range(1, packs_per_division + 1)]
         self._store_generated_packs(ctx, div_idx, packs)
-        result = f"✅ Loaded {packs_per_division} manual packs for Division {self._division_label(div_idx)}."
+        await self._ensure_division_tab(ctx, div_idx)
+        result = f"✅ Loaded {packs_per_division} manual packs for {self._division_label(ctx, div_idx)}."
         warning = await self._check_budget_feasibility(ctx, packs)
         if warning:
             result += f"\n{warning}"
@@ -261,6 +637,12 @@ class PackDraftTheme(Theme):
 
     # ── Start ────────────────────────────────────────────────────────────────
     async def start(self, ctx: DraftContext) -> str:
+        if ctx.draft['status'] == 'active':
+            raise ValueError(
+                "This draft is already active. Running !startpackdraft again would wipe every division's "
+                "in-progress packs and reset every seat back to round 1 — if you meant to resume after a "
+                "pause, use !resumepackdraft instead."
+            )
         settings = self._settings(ctx)
         num_divisions = settings['num_divisions']
         per_division = settings['drafters_per_division']
@@ -282,15 +664,15 @@ class PackDraftTheme(Theme):
             seats = sorted({d['seat_index'] for d in drafters if d['seat_index'] is not None})
             if seats != list(range(per_division)):
                 raise ValueError(
-                    f"Division {self._division_label(div_idx)} has {len(seats)} seat(s) assigned ({len(drafters)} "
+                    f"{self._division_label(ctx, div_idx)} has {len(seats)} seat(s) assigned ({len(drafters)} "
                     f"GM(s) total), needs exactly {per_division} seats with a clean draft order. Run "
-                    f"`!importorder {self._division_label(div_idx)}` as a reply to that division's lotto message."
+                    f"`!importorder {self._division_label(ctx, div_idx)}` as a reply to that division's lotto message."
                 )
 
             div_state = state['divisions'].setdefault(str(div_idx), {'round_index': 0, 'direction': 1, 'pack_instances': {}})
             if len(div_state.get('generated_packs', [])) != packs_needed:
                 ctx.save_state(state)
-                result = await self.generate_packs(ctx, self._division_label(div_idx))
+                result = await self.generate_packs(ctx, self._division_label(ctx, div_idx))
                 if result.startswith('❌'):
                     raise ValueError(result)
                 state = ctx.state
@@ -327,15 +709,40 @@ class PackDraftTheme(Theme):
             f"🃏 **Round {round_index + 1}** begins — {per_division} fresh packs opened, one per seat.",
         )
 
+        # Two passes, not one combined loop: every seat's OWN initial pack
+        # must be recorded as its current_pack_instance BEFORE any DM goes
+        # out. _deliver_pack_dm below can recurse (via a !pref match or a
+        # lone-last-card auto-pick) straight into _commit_pick/_route_pack_
+        # to_seat for the NEXT seat in this same round — and that routing
+        # decides "is this seat free?" by reading current_pack_instance
+        # fresh from the DB. If the next seat hasn't had ITS OWN pack dealt
+        # yet (this loop hasn't reached it), that read comes back None, gets
+        # mistaken for "free", and the incoming pack is delivered directly
+        # instead of queued — only to be silently clobbered a moment later
+        # when this loop reaches that seat's own deal, orphaning the first
+        # pack (still "held" per its holder_seat, but pointed at by no one's
+        # current_pack_instance or queue). Confirmed live: Ravnica div round
+        # 2, seat 4 got two pack DMs (2-3 and 2-4) this exact way.
+        seat_members: dict[int, list[dict]] = {}
         for seat in range(per_division):
             instance_id = f'{round_index}-{seat}'
             members = self._seat_members(ctx, div_idx, seat)
+            seat_members[seat] = members
             for m in members:
+                log.info(
+                    "PackDraft | SET current_pack_instance [OPEN_ROUND] draft=%s div=%s seat=%s drafter=%s %r -> %r",
+                    ctx.draft_id, div_idx, seat, m['id'], m['state'].get('current_pack_instance'), instance_id,
+                )
                 # update_drafter_state (merge), not set_drafter_state (raw
                 # overwrite) — the latter used to wipe team_name/roster_slots/
                 # player_years/roster_unslotted the instant a new round opened.
                 db.update_drafter_state(m['id'], {'current_pack_instance': instance_id, 'queue': []})
-            await self._deliver_pack_dm(ctx, div_idx, seat, members, instance_id, div_state['pack_instances'][instance_id]['cards'])
+
+        for seat in range(per_division):
+            instance_id = f'{round_index}-{seat}'
+            await self._deliver_pack_dm(
+                ctx, div_idx, seat, seat_members[seat], instance_id, div_state['pack_instances'][instance_id]['cards'],
+            )
 
     # ── Pick handling ────────────────────────────────────────────────────────
     # A duo/trio seat gets the identical pack DM'd to every member at once —
@@ -354,21 +761,57 @@ class PackDraftTheme(Theme):
             state = ctx.state
             div_state = state.get('divisions', {}).get(str(div_idx))
             instance_id = drafter['state'].get('current_pack_instance')
+            log.info(
+                "PackDraft | on_pick: draft=%s div=%s seat=%s drafter=%s text=%r current_pack_instance=%r",
+                ctx.draft_id, div_idx, drafter.get('seat_index'), drafter['id'], text, instance_id,
+            )
             if not div_state or not instance_id or instance_id not in div_state['pack_instances']:
                 return "You don't have a pack in front of you right now — sit tight."
+
+            # Last-resort integrity check: this instance genuinely exists,
+            # but confirm it's actually still assigned to THIS seat before
+            # trusting it — a still-unexplained routing issue has, at least
+            # once, left a seat's own current_pack_instance pointing at a
+            # pack that had already moved to someone else. Showing/accepting
+            # a pick against that stale value would silently steal a pick
+            # from whoever the pack actually belongs to now.
+            true_holder = div_state['pack_instances'][instance_id].get('holder_seat')
+            if true_holder != drafter.get('seat_index'):
+                log.error(
+                    "PackDraft | on_pick: INTEGRITY MISMATCH draft=%s div=%s drafter=%s seat=%s claims instance=%r "
+                    "but its true holder_seat=%s — refusing pick, flagging for admin",
+                    ctx.draft_id, div_idx, drafter['id'], drafter.get('seat_index'), instance_id, true_holder,
+                )
+                await ctx.announce(
+                    f"🚨 Integrity check failed: **{drafter['display_name']}** (Seat {drafter.get('seat_index', '?') + 1 if drafter.get('seat_index') is not None else '?'}) "
+                    f"tried to pick against pack `{instance_id}`, which actually belongs to Seat "
+                    f"{true_holder + 1 if true_holder is not None else '?'} now. Their assignment is stale — needs a manual look via `!packstatus`."
+                )
+                return "⚠️ Something's out of sync with your pack assignment — I've flagged this for the commish rather than risk giving you the wrong pack. Sit tight."
 
             cards = div_state['pack_instances'][instance_id]['cards']
             player, year = self._resolve_pick(text, cards)
             if not player:
-                return f"**{text.strip()}** isn't in your current pack. Your options:\n" + self._format_pack(cards, self._active_prices(ctx))
+                log.info(
+                    "PackDraft | on_pick: REJECTED draft=%s seat=%s drafter=%s text=%r not in instance=%r cards=%r",
+                    ctx.draft_id, drafter.get('seat_index'), drafter['id'], text, instance_id, cards,
+                )
+                settings = self._settings(ctx)
+                pick_number = len(db.get_picks(ctx.draft_id, drafter['id'])) + 1
+                total_picks = settings['rounds'] * settings['pack_size']
+                return (
+                    f"**{text.strip()}** isn't in your current pack (Pick {pick_number}/{total_picks}, instance `{instance_id}`). "
+                    f"Your options:\n" + self._format_pack(cards, self._active_prices(ctx))
+                )
             result = await self._commit_pick(ctx, drafter, div_idx, instance_id, player, auto=False)
             if year:
                 # Same effect as a follow-up !addyear, done inline — set_player_year
                 # isn't called directly since it acquires this same draft_lock itself.
                 slots, years, unslotted = self._ensure_roster_slots(ctx, drafter)
-                years[player.lower()] = year
-                self._save_roster(drafter, slots, unslotted, years)
-                result += f" Year set to **'{year}**."
+                normalized_year = _normalize_season_year(year)
+                years[player.lower()] = normalized_year
+                self._save_roster(ctx, drafter, slots, unslotted, years)
+                result += f" Year set to **{_display_year(normalized_year)}**."
             return result
 
     async def on_timeout(self, ctx: DraftContext, drafter: dict) -> None:
@@ -424,8 +867,136 @@ class PackDraftTheme(Theme):
             return f"{drafter['display_name']} isn't assigned to a division."
         if not drafter['state'].get('current_pack_instance'):
             return f"{drafter['display_name']} doesn't have an active pack right now."
+        # on_timeout silently no-ops if current_pack_instance turns out to be
+        # stale (points at a pack instance that no longer exists) — comparing
+        # pick counts before/after is how this command tells the difference,
+        # instead of always claiming success even when nothing happened.
+        before = len(db.get_picks(ctx.draft_id, drafter['id']))
         await self.on_timeout(ctx, drafter)
+        after = len(db.get_picks(ctx.draft_id, drafter['id']))
+        if after == before:
+            return (f"⚠️ Nothing happened — **{drafter['display_name']}**'s current pack reference looks "
+                     f"stale (points at a pack that no longer exists). Their seat is likely stuck; check "
+                     f"`!packstatus` and flag it for a manual repair.")
         return f"⏭️ Forced a skip for **{drafter['display_name']}**'s team."
+
+    # ── Preference lists (`!pref`) ──────────────────────────────────────────
+    # A standing pick-priority list for a GM who won't be online for a given
+    # pack — checked the instant a pack lands on their seat (_deliver_pack_dm),
+    # before it's even DMed, so their target doesn't sit there for the full
+    # timer only to be sniped by someone else's later pack. Only ever
+    # consulted at delivery time — never re-checked retroactively against a
+    # pack a seat is already holding when the list is set/edited.
+    async def set_preferences(self, ctx: DraftContext, drafter: dict, text: str) -> str:
+        async with draft_lock(ctx.draft_id):
+            drafter = db.get_drafter(drafter['id'])
+            text = text.strip()
+
+            if not text:
+                prefs = drafter['state'].get('pref_list') or []
+                if not prefs:
+                    return ("You don't have a preference list set. `!pref Player A, Player B, ...` — the "
+                            "moment any of them is in a pack you receive, it's auto-picked instantly, even "
+                            "if you're offline.")
+                lines = [f'{i + 1}. {p}' for i, p in enumerate(prefs)]
+                return "**Your preference list (highest priority first):**\n" + '\n'.join(lines) + "\n\n`!pref clear` to remove it."
+
+            if text.lower() == 'clear':
+                db.update_drafter_state(drafter['id'], {'pref_list': []})
+                return "✅ Preference list cleared."
+
+            # One per line works just as well as comma-separated — Discord's
+            # multi-line message box makes a newline-separated list the
+            # natural way to paste a long one in.
+            players = [p.strip() for p in re.split(r'[,\n]+', text) if p.strip()]
+            if not players:
+                return 'Usage: `!pref Player A, Player B, ...` (commas or one per line) or `!pref clear`.'
+
+            db.update_drafter_state(drafter['id'], {'pref_list': players})
+            lines = [f'{i + 1}. {p}' for i, p in enumerate(players)]
+            return (
+                "✅ Preference list saved (highest priority first):\n" + '\n'.join(lines) + "\n\n"
+                "The moment any of these is in a pack you receive, it's auto-picked for you instantly — "
+                "no need to be online."
+            )
+
+    def _pref_match(self, member: dict, cards: list[str]) -> str | None:
+        """This member's highest-priority listed player that's actually in
+        the pack, matched the same tolerant way `!pick` matches (exact,
+        then a single unambiguous substring)."""
+        for wanted in (member['state'].get('pref_list') or []):
+            match = self._resolve_player(wanted, cards)
+            if match:
+                return match
+        return None
+
+    async def _maybe_auto_pick_last_card(self, ctx: DraftContext, div_idx: int, seat_index: int,
+                                          members: list[dict], instance_id: str, cards: list[str]) -> bool:
+        """If only one player is left in a pack, there's no real decision to
+        make — auto-pick it the instant it lands instead of making the
+        seat spend a `!pick` (or a full timer) on a forced, single-option
+        choice. Checked before preferences, though the outcome's the same
+        either way with just one card in play."""
+        if len(cards) != 1:
+            return False
+        player = cards[0]
+        primary = self._seat_primary(members)
+        team_note = ' for your team' if len(members) > 1 else ''
+        for m in members:
+            await ctx.dm(m['user_id'], f"⚡ Only one player was left in that pack — auto-picked **{player}**{team_note}.")
+        await self._commit_pick(ctx, primary, div_idx, instance_id, player, auto=True)
+        return True
+
+    async def _maybe_auto_pick_from_prefs(self, ctx: DraftContext, div_idx: int, seat_index: int,
+                                           members: list[dict], instance_id: str, cards: list[str]) -> bool:
+        """Called right as a pack lands on a seat, before it's DMed. Every
+        teammate's list is checked, not just the primary's. If more than one
+        teammate's list matches a DIFFERENT player in this same pack, that's
+        a genuine conflict (as opposed to two lists agreeing on the same
+        player, which isn't) — priority for conflicts alternates per-seat
+        (div_state['pref_turn']) so one teammate's list can't permanently
+        dominate the other's. Returns True if a pick was made."""
+        matches: dict[int, str] = {}
+        for m in members:
+            player = self._pref_match(m, cards)
+            if player:
+                matches[m['id']] = player
+
+        if not matches:
+            return False
+
+        distinct_players = set(matches.values())
+        if len(distinct_players) == 1:
+            player = next(iter(distinct_players))
+            winner_id = next(m['id'] for m in members if m['id'] in matches)
+        else:
+            state = ctx.state
+            div_state = state['divisions'][str(div_idx)]
+            turn_map = div_state.setdefault('pref_turn', {})
+            seat_key = str(seat_index)
+            order = [m['id'] for m in members]
+            current_turn = turn_map.get(seat_key, order[0])
+            start = order.index(current_turn) if current_turn in order else 0
+            rotated = order[start:] + order[:start]
+            winner_id = next(mid for mid in rotated if mid in matches)
+            player = matches[winner_id]
+            turn_map[seat_key] = order[(order.index(winner_id) + 1) % len(order)]
+            ctx.save_state(state)
+
+        winner = next(m for m in members if m['id'] == winner_id)
+        log.info(
+            "PackDraft | preference auto-pick: %r for seat=%s div=%s via drafter_id=%s (all matches=%s)",
+            player, seat_index, div_idx, winner_id, matches,
+        )
+        team_note = ' for your team' if len(members) > 1 else ''
+        for m in members:
+            if m['id'] == winner_id:
+                msg = f"⚡ Auto-picked **{player}**{team_note} — it was on your preference list."
+            else:
+                msg = f"⚡ **{winner['display_name']}**'s preference list had **{player}**{team_note} — auto-picked."
+            await ctx.dm(m['user_id'], msg)
+        await self._commit_pick(ctx, winner, div_idx, instance_id, player, auto=True)
+        return True
 
     async def _commit_pick(self, ctx: DraftContext, drafter: dict, div_idx: int, instance_id: str,
                             player: str, auto: bool) -> str:
@@ -452,20 +1023,52 @@ class PackDraftTheme(Theme):
                 ctx.draft_id, m['id'], player,
                 round_number=div_state['round_index'] + 1, pick_number=pick_count, auto_pick=auto,
             )
-        await highlight_taken(player)
+        await self._highlight_taken_division(ctx, div_idx, player)
 
         instance = div_state['pack_instances'][instance_id]
         instance['cards'].remove(player)
+        drained = not instance['cards']
 
-        if not instance['cards']:
+        if drained:
             del div_state['pack_instances'][instance_id]
             pack_status = 'that pack is now empty'
             log.info("PackDraft | instance %s fully drained and removed (div=%s)", instance_id, div_idx)
         else:
             next_seat = (picker_seat + div_state['direction']) % per_division
             instance['holder_seat'] = next_seat
-            await self._route_pack_to_seat(ctx, div_idx, state, next_seat, instance_id)
             pack_status = f"pack now with Seat {next_seat + 1} ({len(instance['cards'])} left)"
+
+        # Persist THIS pick's own effect on the pack right now, before doing
+        # anything that can recurse back into another _commit_pick call for
+        # a different seat — _route_pack_to_seat below can call
+        # _deliver_pack_dm, which can trigger a preference auto-pick
+        # (_maybe_auto_pick_from_prefs) for the NEXT seat, and that nested
+        # call does its own fresh ctx.state read/write pair. Saving this
+        # call's `state` again afterward (the old behavior) would silently
+        # clobber whatever the nested call just persisted with this
+        # now-stale copy — exactly the kind of corruption that once left a
+        # seat's current_pack_instance pointing at an instance that had
+        # already been deleted elsewhere in the same recursive chain.
+        ctx.save_state(state)
+
+        if not drained:
+            # Relinquish the picker's own seat BEFORE routing the remainder
+            # onward, not after — in a small division (or a long chain of
+            # pref matches), the routing below can recurse and cycle the
+            # same pack all the way back around to this same seat within
+            # this one synchronous call. If this seat's current_pack_instance
+            # still showed the pack we just picked from, _route_pack_to_seat's
+            # dedup guard would mistake that stale value for "already
+            # holding it" and refuse to deliver it back, dropping the pack
+            # into limbo. Clearing to None first means a cycle-back is
+            # treated as a normal free-seat delivery instead.
+            for m in members:
+                log.info(
+                    "PackDraft | SET current_pack_instance [CLEAR_BEFORE_ROUTE] draft=%s div=%s seat=%s drafter=%s %r -> None (routing %r to seat=%s)",
+                    ctx.draft_id, div_idx, picker_seat, m['id'], m['state'].get('current_pack_instance'), instance_id, next_seat,
+                )
+                db.update_drafter_state(m['id'], {'current_pack_instance': None})
+            await self._route_pack_to_seat(ctx, div_idx, next_seat, instance_id)
 
         icon = '⏰' if auto else '✅'
         verb = 'auto-picked' if auto else 'picked'
@@ -487,53 +1090,104 @@ class PackDraftTheme(Theme):
         prefix = 'Auto-picked' if auto else 'Drafted'
         result = f"✅ {prefix} **{player}**. {remaining} pick(s) left for you."
 
-        # Every member's current_pack_instance/queue is kept identical, so
-        # the pop only needs to happen once, against any one of them. Skip
-        # (and drop) any queued instance that no longer exists — defensive
-        # against a stale/duplicate queue entry pointing at an instance
-        # that's since been fully drained and deleted, which would
-        # otherwise KeyError below.
-        shared_queue = list(members[0]['state'].get('queue', []))
-        next_instance = None
-        while shared_queue:
-            candidate = shared_queue.pop(0)
-            if candidate in div_state['pack_instances']:
-                next_instance = candidate
-                break
-            log.warning(
-                "PackDraft | _commit_pick: dropping stale queued instance %s for seat %s (div %s) — no longer exists",
-                candidate, picker_seat, div_idx,
+        # Re-fetch fresh instead of trusting this call's own `members`/
+        # `div_state` (captured before the possible recursion above).
+        members = self._seat_members(ctx, div_idx, picker_seat)
+
+        # If the routing above cycled the pack (or another one, via a
+        # further pref match down the chain) back around to this exact
+        # seat, _route_pack_to_seat's free-seat branch already delivered it
+        # directly — current_pack_instance won't be None anymore even
+        # though we cleared it before routing. Nothing left to pop/redeliver
+        # here in that case; just fall through and return this pick's own
+        # confirmation, same as the empty-queue case already does.
+        already_reclaimed = not drained and members[0]['state'].get('current_pack_instance') is not None
+        if already_reclaimed:
+            log.info(
+                "PackDraft | _commit_pick: seat=%s (div=%s) already re-claimed by a nested delivery during routing — skipping redeliver",
+                picker_seat, div_idx,
             )
-        for m in members:
-            db.update_drafter_state(m['id'], {'current_pack_instance': next_instance, 'queue': shared_queue})
-        ctx.save_state(state)
+        else:
+            fresh_pack_instances = ctx.state['divisions'][str(div_idx)]['pack_instances']
 
-        if next_instance:
-            if not auto:
-                # Send the pick confirmation now, before the gap, instead of
-                # leaving it to bot.py's caller once this whole call returns
-                # — otherwise it would arrive bundled with (or even after)
-                # the next pack DM below and be easy to miss.
-                replied = await ctx.reply_to_trigger(result)
-                if not replied:
-                    await ctx.dm(drafter['user_id'], result)
-                result = ''
-            gap = settings.get('pack_delivery_gap_seconds', 3)
-            if gap:
-                await asyncio.sleep(gap)
-            await self._deliver_pack_dm(ctx, div_idx, picker_seat, members, next_instance, div_state['pack_instances'][next_instance]['cards'])
+            # Every member's current_pack_instance/queue is kept identical, so
+            # the pop only needs to happen once, against any one of them. Skip
+            # (and drop) any queued instance that no longer exists — defensive
+            # against a stale/duplicate queue entry pointing at an instance
+            # that's since been fully drained and deleted, which would
+            # otherwise KeyError below.
+            shared_queue = list(members[0]['state'].get('queue', []))
+            next_instance = None
+            while shared_queue:
+                candidate = shared_queue.pop(0)
+                if candidate in fresh_pack_instances:
+                    next_instance = candidate
+                    break
+                log.warning(
+                    "PackDraft | _commit_pick: dropping stale queued instance %s for seat %s (div %s) — no longer exists",
+                    candidate, picker_seat, div_idx,
+                )
+            for m in members:
+                log.info(
+                    "PackDraft | SET current_pack_instance [POP_QUEUE] draft=%s div=%s seat=%s drafter=%s %r -> %r (queue now %r)",
+                    ctx.draft_id, div_idx, picker_seat, m['id'], m['state'].get('current_pack_instance'), next_instance, shared_queue,
+                )
+                db.update_drafter_state(m['id'], {'current_pack_instance': next_instance, 'queue': shared_queue})
 
-        if not div_state['pack_instances']:
+            if next_instance:
+                if not auto:
+                    # Send the pick confirmation now, before the gap, instead of
+                    # leaving it to bot.py's caller once this whole call returns
+                    # — otherwise it would arrive bundled with (or even after)
+                    # the next pack DM below and be easy to miss.
+                    replied = await ctx.reply_to_trigger(result)
+                    if not replied:
+                        await ctx.dm(drafter['user_id'], result)
+                    result = ''
+                gap = settings.get('pack_delivery_gap_seconds', 3)
+                if gap:
+                    await asyncio.sleep(gap)
+                next_cards = ctx.state['divisions'][str(div_idx)]['pack_instances'][next_instance]['cards']
+                await self._deliver_pack_dm(ctx, div_idx, picker_seat, members, next_instance, next_cards)
+
+        if not ctx.state['divisions'][str(div_idx)]['pack_instances']:
             await self._advance_or_complete_division(ctx, div_idx)
 
         return result
 
-    async def _route_pack_to_seat(self, ctx: DraftContext, div_idx: int, state: dict, seat_index: int, instance_id: str) -> None:
-        div_state = state['divisions'][str(div_idx)]
+    async def _route_pack_to_seat(self, ctx: DraftContext, div_idx: int, seat_index: int, instance_id: str) -> None:
+        # Reads ctx.state fresh rather than taking a `state` dict from the
+        # caller — this can recurse into _deliver_pack_dm's preference
+        # auto-pick, which does its own independent state read/write; a
+        # stale caller-supplied copy here (or saving it back afterward)
+        # would risk clobbering that nested write. See the comment in
+        # _commit_pick where this is called.
+        div_state = ctx.state['divisions'][str(div_idx)]
         members = self._seat_members(ctx, div_idx, seat_index)
         primary = self._seat_primary(members)
         current = primary['state'].get('current_pack_instance')
         queue = list(primary['state'].get('queue', []))
+
+        # A seat only counts as "free" if EVERY member agrees it's free —
+        # checking primary alone let a duo/trio where one teammate's row
+        # had already drifted from the other's (e.g. current=None while
+        # the other genuinely still held a pack) get silently treated as
+        # fully free, directly overwriting BOTH members and discarding
+        # whichever teammate had the real pack with no queueing, no
+        # warning, nothing. Confirmed happening live: a ROUTE_DIRECT that
+        # overwrote a member's real non-None current_pack_instance.
+        member_currents = {m['id']: m['state'].get('current_pack_instance') for m in members}
+        if len(set(member_currents.values())) > 1:
+            healed = next((v for v in member_currents.values() if v is not None), None)
+            log.warning(
+                "PackDraft | _route_pack_to_seat: seat %s (div %s) members disagree on current_pack_instance %s — "
+                "healing every member to %r before deciding how to route %s",
+                seat_index, div_idx, member_currents, healed, instance_id,
+            )
+            for m in members:
+                if m['state'].get('current_pack_instance') != healed:
+                    db.update_drafter_state(m['id'], {'current_pack_instance': healed})
+            current = healed
 
         if current == instance_id or instance_id in queue:
             # Defensive: this exact pack is already this seat's current or
@@ -551,8 +1205,11 @@ class PackDraftTheme(Theme):
         if current is None:
             log.info("PackDraft | routing %s directly to seat=%s (div=%s) — was free", instance_id, seat_index, div_idx)
             for m in members:
+                log.info(
+                    "PackDraft | SET current_pack_instance [ROUTE_DIRECT] draft=%s div=%s seat=%s drafter=%s %r -> %r",
+                    ctx.draft_id, div_idx, seat_index, m['id'], m['state'].get('current_pack_instance'), instance_id,
+                )
                 db.update_drafter_state(m['id'], {'current_pack_instance': instance_id})
-            ctx.save_state(state)
             await self._deliver_pack_dm(ctx, div_idx, seat_index, members, instance_id, div_state['pack_instances'][instance_id]['cards'])
         else:
             log.info(
@@ -566,10 +1223,29 @@ class PackDraftTheme(Theme):
         settings = self._settings(ctx)
         state = ctx.state
         div_state = state['divisions'][str(div_idx)]
+
+        # _commit_pick calls this once whenever the division's pack_instances
+        # just went empty — but a single top-level pick can drain MULTIPLE
+        # packs in one synchronous call chain (a pref match or lone-last-card
+        # auto-pick on whatever this seat's pack routes to next can itself
+        # immediately drain and route onward, recursively). Each nested
+        # _commit_pick call independently checks "is pack_instances empty
+        # now?" at its own return point, so the final round's completion
+        # could fire twice — once from the inner recursive call, once from
+        # the outer one that kicked it off. Confirmed live: a GM got two
+        # identical "Pack Draft picking is complete" DMs with their roster
+        # echoed twice, and the admin channel got the finish announcement
+        # twice. This flag makes the second call a no-op.
+        if div_state.get('complete'):
+            log.info("PackDraft | _advance_or_complete_division: div=%s already complete — skipping duplicate call", div_idx)
+            return
+
         next_round = div_state['round_index'] + 1
         log.info("PackDraft | _advance_or_complete_division: div=%s next_round=%s of %s", div_idx, next_round, settings['rounds'])
 
         if next_round >= settings['rounds']:
+            div_state['complete'] = True
+            ctx.save_state(state)
             await self._complete_division(ctx, div_idx)
             return
 
@@ -593,10 +1269,10 @@ class PackDraftTheme(Theme):
                 f"`!swap <Player> / <slot>` to rearrange. Happy with it? Run `!submitroster` with no "
                 f"arguments to submit exactly this roster.",
             )
-        label = self._division_label(div_idx)
-        await ctx.announce(f"🏁 Division {label} finished picking — waiting on roster submissions.")
+        label = self._division_label(ctx, div_idx)
+        await ctx.announce(f"🏁 {label} finished picking — waiting on roster submissions.")
         div_state = ctx.state['divisions'][str(div_idx)]
-        await self._thread_announce(ctx, div_state, f"🏁 Division {label} finished picking — waiting on roster submissions.")
+        await self._thread_announce(ctx, div_state, f"🏁 {label} finished picking — waiting on roster submissions.")
 
     async def on_roster_submitted(self, ctx: DraftContext, drafter: dict) -> None:
         div_idx = drafter.get('division')
@@ -614,12 +1290,12 @@ class PackDraftTheme(Theme):
             seen_seats.add(d['seat_index'])
             if not d['roster_submitted']:
                 missing_seats.append(f"Seat {d['seat_index'] + 1}")
-        label = self._division_label(div_idx)
+        label = self._division_label(ctx, div_idx)
         if missing_seats:
             progress = f"{len(missing_seats)} left to submit: {', '.join(missing_seats)}."
         else:
             progress = "All submitted — waiting on the commish to reveal."
-        await self._thread_announce(ctx, div_state, f"📋 A roster was submitted for Division {label}. {progress}")
+        await self._thread_announce(ctx, div_state, f"📋 A roster was submitted for {label}. {progress}")
 
     # ── Status / misc ────────────────────────────────────────────────────────
     async def on_status(self, ctx: DraftContext, drafter: dict) -> str:
@@ -627,20 +1303,20 @@ class PackDraftTheme(Theme):
         total_picks = settings['rounds'] * settings['pack_size']
         picks_made = len(db.get_picks(ctx.draft_id, drafter['id']))
         div_idx = drafter.get('division')
-        div_label = self._division_label(div_idx) if div_idx is not None else '?'
+        div_label = self._division_label(ctx, div_idx) if div_idx is not None else 'Division ?'
         instance_id = drafter['state'].get('current_pack_instance')
 
         if not instance_id:
             queue_len = len(drafter['state'].get('queue', []))
             waiting = f" ({queue_len} more queued up)" if queue_len else ''
-            return f"Division {div_label}. Picks so far: {picks_made}/{total_picks}. No pack in hand right now{waiting}."
+            return f"{div_label}. Picks so far: {picks_made}/{total_picks}. No pack in hand right now{waiting}."
 
         state = ctx.state
         cards = state.get('divisions', {}).get(str(div_idx), {}).get('pack_instances', {}).get(instance_id, {}).get('cards', [])
         timer_key = self._seat_timer_key(ctx, div_idx, drafter['seat_index'])
         remaining = self._format_remaining(_timer.remaining_seconds(timer_key))
         return (
-            f"Division {div_label}. Picks so far: {picks_made}/{total_picks}. On the clock: {remaining}.\n"
+            f"{div_label}. Picks so far: {picks_made}/{total_picks}. On the clock: {remaining}.\n"
             f"Your current pack:\n{self._format_pack(cards, self._active_prices(ctx))}"
         )
 
@@ -656,7 +1332,10 @@ class PackDraftTheme(Theme):
         pack_text = self._format_pack(cards, self._active_prices(ctx))
         deadline = drafter['state'].get('timer_deadline')
         deadline_part = f" Deadline: <t:{int(deadline)}:R>" if deadline else ''
-        return f"🃏 **Your current pack ({len(cards)} players):**\n{pack_text}\n\nReply with `!pick <player name> [year]`.{deadline_part}"
+        settings = self._settings(ctx)
+        total_picks = settings['rounds'] * settings['pack_size']
+        pick_number = len(db.get_picks(ctx.draft_id, drafter['id'])) + 1
+        return f"🃏 **Pick {pick_number}/{total_picks} — your current pack ({len(cards)} players):**\n{pack_text}\n\nReply with `!pick <player name> [year]`.{deadline_part}"
 
     async def admin_status(self, ctx: DraftContext) -> str:
         settings = self._settings(ctx)
@@ -665,12 +1344,12 @@ class PackDraftTheme(Theme):
         for div_idx in range(settings['num_divisions']):
             div_state = state.get('divisions', {}).get(str(div_idx))
             drafters = db.list_drafters_in_division(ctx.draft_id, div_idx)
-            label = self._division_label(div_idx)
+            label = self._division_label(ctx, div_idx)
             if not div_state or not drafters:
-                lines.append(f"**Division {label}**: not set up yet.")
+                lines.append(f"**{label}**: not set up yet.")
                 continue
             lines.append(
-                f"**Division {label}** — round {div_state['round_index'] + 1}/{settings['rounds']}, "
+                f"**{label}** — round {div_state['round_index'] + 1}/{settings['rounds']}, "
                 f"direction {'forward' if div_state['direction'] == 1 else 'reversed'}"
             )
             seats = sorted({d['seat_index'] for d in drafters if d['seat_index'] is not None})
@@ -698,12 +1377,21 @@ class PackDraftTheme(Theme):
         m, s = divmod(total, 60)
         return f'{m}m {s}s left'
 
-    def is_pick_phase_complete(self, ctx: DraftContext) -> bool:
+    def is_pick_phase_complete(self, ctx: DraftContext, drafter: dict | None = None) -> bool:
         settings = self._settings(ctx)
         total_picks = settings['rounds'] * settings['pack_size']
+        # Each division runs its own independent pack circulation — one
+        # finishing has no bearing on the others. Scope to just the calling
+        # drafter's division when given one (e.g. !submitroster gating a
+        # single GM's own submission), so a division that wraps up early
+        # isn't blocked on the ones still mid-draft. Omit `drafter` (as the
+        # whole-draft reveal/rostertimer call sites do) to check everyone.
+        pool = ctx.drafters() if drafter is None or drafter.get('division') is None else [
+            d for d in ctx.drafters() if d.get('division') == drafter.get('division')
+        ]
         return all(
             len(db.get_picks(ctx.draft_id, d['id'])) >= total_picks
-            for d in ctx.drafters()
+            for d in pool
         )
 
     def team_key(self, ctx: DraftContext, drafter: dict) -> str:
@@ -812,23 +1500,45 @@ class PackDraftTheme(Theme):
                 unslotted.append(player)
 
         if changed:
-            self._save_roster(drafter, slots, unslotted, years)
+            self._save_roster(ctx, drafter, slots, unslotted, years)
 
         return slots, years, unslotted
 
-    @staticmethod
-    def _save_roster(drafter: dict, slots: list, unslotted: list, years: dict) -> None:
-        state = drafter['state']
-        state['roster_slots'] = slots
-        state['roster_unslotted'] = unslotted
-        state['player_years'] = years
-        db.set_drafter_state(drafter['id'], state)
+    def _save_roster(self, ctx: DraftContext, drafter: dict, slots: list, unslotted: list, years: dict) -> None:
+        # update_drafter_state (fetch-fresh-then-merge), not set_drafter_state
+        # (raw overwrite of whatever `drafter['state']` the caller happened to
+        # be holding) — !mypicks and !myteam call into this via
+        # _ensure_roster_slots WITHOUT holding draft_lock, so their `drafter`
+        # snapshot can be stale by the time this runs (e.g. captured right
+        # before a concurrent !pick advances current_pack_instance/queue). A
+        # raw overwrite here would silently revert that pick's routing —
+        # confirmed live as the cause of several GMs' packs reverting to a
+        # stale value mid-draft.
+        #
+        # Mirrored to every teammate on this seat, not just whoever called
+        # !swap/!add/!addyear — a duo/trio's roster is ONE shared team, but
+        # each member has their own drafter row. Writing only to the caller
+        # let teammates silently drift onto their own private arrangement of
+        # the same picks — confirmed live: two GMs on the same seat saw
+        # completely different rosters (different bench players, different
+        # years) when each ran !myteam.
+        payload = {'roster_slots': slots, 'roster_unslotted': unslotted, 'player_years': years}
+        div_idx, seat_index = drafter.get('division'), drafter.get('seat_index')
+        if div_idx is None or seat_index is None:
+            db.update_drafter_state(drafter['id'], payload)
+            return
+        for m in self._seat_members(ctx, div_idx, seat_index):
+            db.update_drafter_state(m['id'], payload)
 
     async def format_picks(self, ctx: DraftContext, drafter: dict, picks: list[str]) -> str:
         """!mypicks — everything drafted so far, sorted by price (highest
         first). For the roster/lineup view instead, see format_team."""
         if not picks:
             return "You haven't drafted anyone yet."
+
+        def pos_tag(player: str) -> str:
+            eligible = positions_module.get_positions(player)
+            return f" [{'/'.join(eligible)}]" if eligible else ' [?]'
 
         prices = self._active_prices(ctx)
         if prices:
@@ -840,12 +1550,29 @@ class PackDraftTheme(Theme):
             for i, p in enumerate(ordered, start=1):
                 price = self._price_of(prices, p)
                 tag = f' (${price:.0f})' if price is not None else ' (no price on file)'
-                lines.append(f'{i}. {p}{tag}')
+                lines.append(f'{i}. {p}{tag}{pos_tag(p)}')
         else:
             ordered = sorted(picks, key=str.lower)
             lines = ['**Your picks (no price data available — sorted alphabetically):**']
             for i, p in enumerate(ordered, start=1):
-                lines.append(f'{i}. {p}')
+                lines.append(f'{i}. {p}{pos_tag(p)}')
+
+        counts = {pos: 0 for pos in self._settings(ctx)['roster_positions']}
+        unlisted = 0
+        for p in picks:
+            eligible = positions_module.get_positions(p)
+            if not eligible:
+                unlisted += 1
+                continue
+            for pos in eligible:
+                if pos in counts:
+                    counts[pos] += 1
+
+        lines.append('')
+        lines.append('**Position counts** (players eligible for more than one position count toward each):')
+        lines.append(', '.join(f'{pos}: {n}' for pos, n in counts.items()))
+        if unlisted:
+            lines.append(f'{unlisted} player(s) with no position on file.')
 
         lines.append('')
         lines.append("`!myteam` — your current roster/lineup · `!add <player>` — place one · `!swap` — rearrange")
@@ -868,7 +1595,7 @@ class PackDraftTheme(Theme):
             player = slots[i]
             if player:
                 year = years.get(player.lower())
-                name_part = f"{player} '{year}" if year else player
+                name_part = f"{player} {_display_year(year)}" if year else player
                 price = self._price_of(prices, player)
                 if price is not None:
                     total += price
@@ -889,13 +1616,19 @@ class PackDraftTheme(Theme):
 
         if unslotted:
             lines.append('')
+            unslotted_sorted = sorted(
+                unslotted,
+                key=lambda p: (self._price_of(prices, p) is None, -(self._price_of(prices, p) or 0), p.lower()),
+            )
             unslotted_display = []
-            for p in unslotted:
+            for p in unslotted_sorted:
+                year = years.get(p.lower())
+                name_part = f"{p} {_display_year(year)}" if year else p
                 price = self._price_of(prices, p)
-                unslotted_display.append(f"{p} (${price:.0f})" if price is not None else p)
-            lines.append(f"**Also drafted ({len(unslotted)}):** " + ', '.join(unslotted_display))
+                unslotted_display.append(f"{name_part} (${price:.0f})" if price is not None else name_part)
+            lines.append(f"**Also drafted ({len(unslotted_sorted)}):** " + ', '.join(unslotted_display))
             lines.append(
-                "Use `!add " + unslotted[0] + "` to auto-place one, or `!swap <player> / <slot>` to choose exactly where."
+                "Use `!add " + unslotted_sorted[0] + "` to auto-place one, or `!swap <player> / <slot>` to choose exactly where."
             )
 
         return '\n'.join(lines)
@@ -909,9 +1642,10 @@ class PackDraftTheme(Theme):
                 return ('slot', idx)
             return None
         picks = db.get_picks(ctx.draft_id, drafter['id'])
-        match = next((p for p in picks if p.lower() == ref.lower()), None)
+        query = _normalize_name(ref.lower())
+        match = next((p for p in picks if _normalize_name(p.lower()) == query), None)
         if not match:
-            candidates = [p for p in picks if ref.lower() in p.lower()]
+            candidates = [p for p in picks if query in _normalize_name(p.lower())]
             if len(candidates) == 1:
                 match = candidates[0]
         return ('player', match) if match else None
@@ -967,7 +1701,7 @@ class PackDraftTheme(Theme):
             else:
                 slots[idx_a], slots[idx_b] = slots[idx_b], slots[idx_a]
 
-            self._save_roster(drafter, slots, unslotted, years)
+            self._save_roster(ctx, drafter, slots, unslotted, years)
 
             warnings = []
             for idx in (idx_a, idx_b):
@@ -978,6 +1712,12 @@ class PackDraftTheme(Theme):
                         warnings.append(f"⚠️ **{slots[idx]}** isn't normally {pos}-eligible ({prefix} {pos}, slot {idx + 1}) — swapped anyway, but double check before `!submitroster`.")
 
             note = ('\n' + '\n'.join(warnings)) if warnings else ''
+            # Re-fetch instead of reusing this call's own `drafter` — it's
+            # been stale since _save_roster started merging via
+            # update_drafter_state instead of mutating drafter['state'] in
+            # place, so format_team would otherwise render the roster as it
+            # looked BEFORE this swap.
+            drafter = db.get_drafter(drafter['id'])
             picks = db.get_picks(ctx.draft_id, drafter['id'])
             roster_text = await self.format_team(ctx, drafter, picks)
             return f"✅ Updated.{note}\n\n{roster_text}"
@@ -986,20 +1726,23 @@ class PackDraftTheme(Theme):
         async with draft_lock(ctx.draft_id):
             drafter = db.get_drafter(drafter['id'])
             picks = db.get_picks(ctx.draft_id, drafter['id'])
-            match = next((p for p in picks if p.lower() == player.lower()), None)
+            query = _normalize_name(player.lower())
+            match = next((p for p in picks if _normalize_name(p.lower()) == query), None)
             if not match:
-                candidates = [p for p in picks if player.lower() in p.lower()]
+                candidates = [p for p in picks if query in _normalize_name(p.lower())]
                 if len(candidates) == 1:
                     match = candidates[0]
             if not match:
                 return f"❌ **{player}** isn't one of your drafted players."
 
             slots, years, unslotted = self._ensure_roster_slots(ctx, drafter)
-            years[match.lower()] = year.strip()
-            self._save_roster(drafter, slots, unslotted, years)
+            normalized_year = _normalize_season_year(year)
+            years[match.lower()] = normalized_year
+            self._save_roster(ctx, drafter, slots, unslotted, years)
+            drafter = db.get_drafter(drafter['id'])  # re-fetch — see comment in swap_slots
             picks = db.get_picks(ctx.draft_id, drafter['id'])
             roster_text = await self.format_team(ctx, drafter, picks)
-            return f"✅ **{match}**'s year set to **{year.strip()}**.\n\n{roster_text}"
+            return f"✅ **{match}**'s year set to **{normalized_year}**.\n\n{roster_text}"
 
     async def add_player(self, ctx: DraftContext, drafter: dict, player: str) -> str:
         async with draft_lock(ctx.draft_id):
@@ -1010,9 +1753,10 @@ class PackDraftTheme(Theme):
             slots, years, unslotted = self._ensure_roster_slots(ctx, drafter)
 
             picks = db.get_picks(ctx.draft_id, drafter['id'])
-            match = next((p for p in picks if p.lower() == player.lower()), None)
+            query = _normalize_name(player.lower())
+            match = next((p for p in picks if _normalize_name(p.lower()) == query), None)
             if not match:
-                candidates = [p for p in picks if player.lower() in p.lower()]
+                candidates = [p for p in picks if query in _normalize_name(p.lower())]
                 if len(candidates) == 1:
                     match = candidates[0]
             if not match:
@@ -1040,9 +1784,10 @@ class PackDraftTheme(Theme):
 
             slots[placed_idx] = match
             unslotted = [p for p in unslotted if p.lower() != match.lower()]
-            self._save_roster(drafter, slots, unslotted, years)
+            self._save_roster(ctx, drafter, slots, unslotted, years)
 
             prefix, pos = labels[placed_idx]
+            drafter = db.get_drafter(drafter['id'])  # re-fetch — see comment in swap_slots
             picks = db.get_picks(ctx.draft_id, drafter['id'])
             roster_text = await self.format_team(ctx, drafter, picks)
             return f"✅ Added **{match}** to your roster ({prefix} {pos}, slot {placed_idx + 1}).\n\n{roster_text}"
@@ -1057,7 +1802,65 @@ class PackDraftTheme(Theme):
         prices = self._active_prices(ctx)
         if not prices:
             return None, None
-        return prices, self._settings(ctx)['budget']
+        # Merge in the $1 filler prices so validate_roster's budget check
+        # doesn't flag a best_affordable_roster fallback that used them as
+        # "no price on file" — see _FILLER_POOL.
+        return {**prices, **_FILLER_PRICES}, self._settings(ctx)['budget']
+
+    def filler_player_names(self, ctx: DraftContext) -> set[str]:
+        return set(_FILLER_POOL)
+
+    @staticmethod
+    def _fill_with_replacement_players(labels: list[tuple[str, str]], slots: list[str | None],
+                                        slot_prices: list[float], budget: float,
+                                        drafted_lower: set[str]) -> list[str] | None:
+        """Last-resort repair for best_affordable_roster: fills any slot Phase
+        1 couldn't (no eligible drafted player, or the cheapest legal roster
+        still busts budget) with a random $1 filler from _FILLER_POOL matched
+        to that slot's position. If the roster still doesn't fit after that,
+        keeps swapping the most expensive remaining real pick out for a
+        filler (priciest first) until it does — an all-filler roster costs
+        at most $1 per slot, which fits any realistic budget, so this always
+        succeeds unless the filler pool itself runs out for some position.
+        Never picks a filler name the drafter already drafted for real
+        (however unlikely — the pool reuses real historical player names),
+        to avoid an ambiguous duplicate-look roster at reveal."""
+        slots = list(slots)
+        slot_prices = list(slot_prices)
+        used_fillers: set[str] = set()
+
+        def pick_filler(pos: str) -> str | None:
+            candidates = [
+                name for name, positions in _FILLER_POOL.items()
+                if pos in positions and name not in used_fillers and name.lower() not in drafted_lower
+            ]
+            if not candidates:
+                return None
+            choice = random.choice(candidates)
+            used_fillers.add(choice)
+            return choice
+
+        for i, (_prefix, pos) in enumerate(labels):
+            if slots[i] is None:
+                filler = pick_filler(pos)
+                if filler:
+                    slots[i] = filler
+                    slot_prices[i] = 1.0
+
+        while sum(slot_prices) > budget:
+            real_idxs = [i for i in range(len(slots)) if slots[i] is not None and slots[i] not in _FILLER_POOL]
+            if not real_idxs:
+                break  # everything left is already a filler (or empty) — can't reduce further
+            i = max(real_idxs, key=lambda i: slot_prices[i])
+            filler = pick_filler(labels[i][1])
+            if not filler:
+                break  # filler pool exhausted for this position — give up gracefully
+            slots[i] = filler
+            slot_prices[i] = 1.0
+
+        if any(s is None for s in slots):
+            return None  # filler pool couldn't cover every remaining gap either
+        return slots
 
     def best_affordable_roster(self, ctx: DraftContext, drafter: dict) -> list[str] | None:
         """Fallback for !theme rostertimer: fills every starter/bench slot
@@ -1110,10 +1913,15 @@ class PackDraftTheme(Theme):
                     slot_prices[i] = price
                     break
 
-        if any(s is None for s in slots):
-            return None  # no legal roster exists at all, regardless of budget
-        if sum(slot_prices) > budget:
-            return None  # even the cheapest legal roster busts the budget
+        if any(s is None for s in slots) or sum(slot_prices) > budget:
+            # No legal roster exists from this drafter's own picks alone, or
+            # even the cheapest one busts the budget (e.g. every single pick
+            # is expensive) — pad out with $1 filler players rather than
+            # leaving them permanently unable to submit anything. Skips the
+            # hill-climb below; this is a last resort, not an optimization
+            # target.
+            drafted_lower = {p.lower() for p in picks}
+            return self._fill_with_replacement_players(labels, slots, slot_prices, budget, drafted_lower)
 
         # Phase 2: hill-climb starters only — upgrade to pricier eligible
         # players while the swap still fits, until nothing more improves.
@@ -1168,20 +1976,29 @@ class PackDraftTheme(Theme):
     # ── Helpers ──────────────────────────────────────────────────────────────
     async def _deliver_pack_dm(self, ctx: DraftContext, div_idx: int, seat_index: int,
                                 members: list[dict], instance_id: str, cards: list[str]) -> None:
+        if await self._maybe_auto_pick_last_card(ctx, div_idx, seat_index, members, instance_id, cards):
+            return
+        if await self._maybe_auto_pick_from_prefs(ctx, div_idx, seat_index, members, instance_id, cards):
+            return
         settings = self._settings(ctx)
         primary = self._seat_primary(members)
         minutes = PickTimer.effective_minutes(
             settings['base_timer_minutes'], settings['decay_minutes'], settings['floor_minutes'], primary['skip_count'],
         )
-        div_label = self._division_label(div_idx)
+        div_label = self._division_label(ctx, div_idx)
         prices = self._active_prices(ctx)
         team_note = f" — {len(members)}-GM team, first `!pick` wins" if len(members) > 1 else ''
+        # Pick number labeling: lets a GM (or the commish, mid-investigation)
+        # say "this happened on pick 5" and have that be immediately
+        # traceable against logs, instead of everyone just saying "a pack".
+        total_picks = settings['rounds'] * settings['pack_size']
+        pick_number = len(db.get_picks(ctx.draft_id, primary['id'])) + 1
         # Discord's <t:...:R> renders as a live, auto-updating countdown
         # client-side ("in 59 minutes" ticking down on its own) — no bot
         # edits needed, unlike a plain "You have N minutes" static line.
         deadline_ts = int(time.time() + minutes * 60)
         content = (
-            f"🃏 **Division {div_label} — your pack{team_note} ({len(cards)} players):**\n{self._format_pack(cards, prices)}\n\n"
+            f"🃏 **{div_label} — Pick {pick_number}/{total_picks}{team_note} ({len(cards)} players):**\n{self._format_pack(cards, prices)}\n\n"
             f"Reply with `!pick <player name> [year]`. Deadline: <t:{deadline_ts}:R>"
         )
         delivered_any = False
@@ -1197,12 +2014,12 @@ class PackDraftTheme(Theme):
             # only skip it if NOBODY on the seat can see the pack at all.
             names = ', '.join(f"**{m['display_name']}** (<@{m['user_id']}>)" for m in failed)
             await ctx.announce(
-                f"⚠️ Couldn't DM {names} their Division {div_label} pack. They likely have server-member DMs "
+                f"⚠️ Couldn't DM {names} their {div_label} pack. They likely have server-member DMs "
                 f"off, or have blocked the bot. `!pack` in DM shows it fine once fixed."
             )
         if not delivered_any:
             await ctx.announce(
-                f"⚠️ Nobody on Seat {seat_index + 1} (Division {div_label}) could be DMed — no timer started. "
+                f"⚠️ Nobody on Seat {seat_index + 1} ({div_label}) could be DMed — no timer started. "
                 f"`!packskip <@{primary['user_id']}>` can force the team along."
             )
             return
@@ -1327,16 +2144,16 @@ class PackDraftTheme(Theme):
         if not channel:
             log.warning("PackDraft | public_channel_id %s not found/not cached", channel_id)
             return
-        label = self._division_label(div_idx)
+        label = self._division_label(ctx, div_idx)
         try:
             thread = await channel.create_thread(
-                name=f"Division {label} — {ctx.draft['name']}",
+                name=f"{label} — {ctx.draft['name']}",
                 type=discord.ChannelType.public_thread,
             )
             div_state['thread_id'] = thread.id
             ctx.save_state(state)
             await thread.send(
-                f"🃏 **Division {label}** pack draft is starting. Picks and pack movement are tracked "
+                f"🃏 **{label}** pack draft is starting. Picks and pack movement are tracked "
                 f"here by **seat number only** — rosters stay hidden until reveal."
             )
         except Exception:
@@ -1364,7 +2181,10 @@ class PackDraftTheme(Theme):
 
     @staticmethod
     def _price_of(prices: dict, player: str) -> float | None:
-        return prices.get(player, prices.get(player.lower()))
+        price = prices.get(player, prices.get(player.lower()))
+        if price is not None:
+            return price
+        return _FILLER_PRICES.get(player)  # $1 filler players never appear in the real price sheet
 
     async def _check_budget_feasibility(self, ctx: DraftContext, packs: list[list[str]]) -> str | None:
         """Warns (via the admin channel, and the returned string) if even the
@@ -1410,13 +2230,13 @@ class PackDraftTheme(Theme):
 
     @staticmethod
     def _resolve_player(text: str, cards: list[str]) -> str | None:
-        query = text.strip().lower()
+        query = _normalize_name(text.strip().lower())
         if not query:
             return None
         for c in cards:
-            if c.lower() == query:
+            if _normalize_name(c.lower()) == query:
                 return c
-        matches = [c for c in cards if query in c.lower()]
+        matches = [c for c in cards if query in _normalize_name(c.lower())]
         if len(matches) == 1:
             return matches[0]
         return None

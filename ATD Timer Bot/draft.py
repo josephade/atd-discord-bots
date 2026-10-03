@@ -198,6 +198,16 @@ class DraftState:
 
         Teams with 10+ picks are complete and excluded entirely.
         Teams with pending_makeup=True sort last regardless of stats.
+        Teams currently in Active Skip status (see is_active_skip()) sort
+        after everyone else who isn't — an auto-skip changes neither
+        money_spent nor picks_made, so without this a team stuck at the
+        cheapest money_spent could never fall out of "next up": every cycle
+        re-selects them, their 0-second AS timer instantly re-skips them,
+        forever, blocking every other team from ever picking (observed
+        live — skip_count ran past 39 on one team before the draft was
+        paused). This only reorders teams that are *already* doomed to an
+        instant skip regardless of order, so it never changes anything for
+        a team that hasn't hit the AS threshold.
         For everyone else, tiebreaker priority:
           1. money_spent ASC   (less spent → picks sooner)
           2. picks_made ASC    (fewer picks → picks sooner)
@@ -207,8 +217,10 @@ class DraftState:
         def key(idx):
             t = self.teams[idx]
             pending = 1 if t.get("pending_makeup") else 0
+            stuck   = 1 if self.is_active_skip(idx) else 0
             return (
                 pending,
+                stuck,
                 t.get("money_spent", 0),
                 len(t.get("picks", [])),
                 t.get("last_pick_number", 0),

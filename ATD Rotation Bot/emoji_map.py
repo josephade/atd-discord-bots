@@ -153,6 +153,8 @@ EMOJI_TEAM_MAP = {
     "MIL": "Milwaukee Bucks",
     "HOU": "Houston Rockets",
     "ATL": "Atlanta Hawks",
+    "Braves": "Buffalo Braves",
+    "CHI2": "Chicago Stags",
     "SMU": "SMU Mustangs",
     "CHA": "Charlotte Hornets",
     "PHO": "Phoenix Suns",

@@ -152,11 +152,11 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
         });
 
         const text = await res.text();
-        if (!res.ok) return { _error: `server_${res.status}` };
+        if (!res.ok) return { _error: `server_${res.status}`, _debugStatus: res.status, _debugBody: text.slice(0, 500) };
         try {
           return JSON.parse(text);
         } catch (e) {
-          return { _error: `Invalid response from shotmap server.` };
+          return { _error: `Invalid response from shotmap server.`, _debugStatus: res.status, _debugBody: text.slice(0, 500) };
         }
       }, { csrfToken, seasons: seasonsToUse, playerId, playoff, dark, modern });
     }
@@ -164,34 +164,46 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
     console.log('Submitting API request...');
     let result = await postShotmap(seasons);
 
-    // For multi-year playoff ranges, if the combined request fails, find which
-    // individual seasons have data and retry with only those.
-    if (result._error && playoff && seasons.length > 1) {
-      console.log('Combined playoff request failed — probing individual seasons...');
+    // If a combined multi-season request fails, probe each season
+    // individually and retry using only the ones that actually have data.
+    // A single season with no recorded shots at all — a year a player
+    // missed entirely to injury, a sparse/incompatible rookie season, etc.
+    // — can crash the server's own aggregation when combined with others,
+    // even though every season works fine requested on its own. Confirmed
+    // in production for both cases (a rookie season and a missed season on
+    // two different players). Previously this fallback only ran for
+    // playoff requests; a combined regular-season request just failed
+    // outright with no retry.
+    if (result._error && seasons.length > 1) {
+      console.log(`Combined ${playoff ? 'playoff ' : ''}request failed — probing individual seasons...`);
       const validSeasons = [];
       for (const s of seasons) {
         const probe = await postShotmap([s]);
         if (!probe._error && !probe.error && probe.image) {
           validSeasons.push(s);
-          console.log(`  ${s} — has playoff data`);
+          console.log(`  ${s} — has data`);
         } else {
-          console.log(`  ${s} — no playoff data`);
+          console.log(`  ${s} — no data`);
         }
       }
       if (validSeasons.length === 0) {
-        throw new Error(`**${foundName}** has no playoff data from ${seasonLabel}. They may not have made the playoffs during this period.`);
+        throw new Error(
+          playoff
+            ? `**${foundName}** has no playoff data from ${seasonLabel}. They may not have made the playoffs during this period.`
+            : `**${foundName}** has no data from ${seasonLabel}.`
+        );
       }
-      if (validSeasons.length === 1) {
-        result = await postShotmap(validSeasons);
-      } else {
-        result = await postShotmap(validSeasons);
-      }
+      result = await postShotmap(validSeasons);
       if (result._error || result.error) {
-        throw new Error(`Could not generate playoff shotmap for **${foundName}**. Try a narrower year range.`);
+        console.error(`[SHOTMAP_ERR] ${result._error || result.error} | status=${result._debugStatus} | body=${result._debugBody}`);
+        throw new Error(`Could not generate ${playoff ? 'playoff ' : ''}shotmap for **${foundName}**. Try a narrower year range.`);
       }
     }
 
-    if (result._error) throw new Error(`Could not generate shotmap for **${foundName}**. The data source may be temporarily down — try again later.`);
+    if (result._error) {
+      console.error(`[SHOTMAP_ERR] ${result._error} | status=${result._debugStatus} | body=${result._debugBody}`);
+      throw new Error(`Could not generate shotmap for **${foundName}**. The data source may be temporarily down — try again later.`);
+    }
     if (result.error) throw new Error(result.error);
     if (!result.image) throw new Error('No image returned from server');
 

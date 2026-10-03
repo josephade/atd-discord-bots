@@ -7,6 +7,7 @@ import re
 import time
 
 import discord
+import gspread
 from discord.ext import commands
 from googleapiclient.discovery import build
 from oauth2client.service_account import ServiceAccountCredentials
@@ -72,6 +73,11 @@ _SCOPES = [
 def _build_sheets_service():
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, _SCOPES)
     return build("sheets", "v4", credentials=creds)
+
+
+def _build_gspread_client():
+    creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, _SCOPES)
+    return gspread.authorize(creds)
 
 
 def _is_taken(cell_data: dict) -> bool:
@@ -153,18 +159,24 @@ def _fetch_roster_names(force: bool = False) -> set:
     This catches players that are drafted but whose cells haven't been colored.
     """
     global _roster_cache, _roster_cache_ts
+    if not ROSTER_SHEET_NAME:
+        return set()
     now = time.monotonic()
     if not force and _roster_cache is not None and (now - _roster_cache_ts) < _AVAILABILITY_TTL:
         return _roster_cache
 
-    service = _build_sheets_service()
-    result  = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{ROSTER_SHEET_NAME}'!A:Z",
-    ).execute()
+    # Fetched via gspread's title lookup, not a raw A1 range string — the
+    # Sheets values().get() API's range parser can't handle a "/" inside a
+    # quoted sheet title (confirmed: it 400s on the bare quoted title alone,
+    # before any range suffix is even added), which silently broke this for
+    # any tab name containing one, e.g. "ATD 111 - Risk/Reward Random R2".
+    client = _build_gspread_client()
+    sh     = client.open_by_key(SPREADSHEET_ID)
+    ws     = sh.worksheet(ROSTER_SHEET_NAME)
+    values = ws.get_all_values()
 
     names: set[str] = set()
-    for row in result.get("values", []):
+    for row in values:
         for cell in row:
             text = str(cell).strip()
             if text:
@@ -219,6 +231,13 @@ def _parse_pick_line(text: str) -> dict:
     """Parse 'LeBron James '23 $5' → {player, year, price}."""
     year  = None
     price = None
+
+    # Normalize curly/smart apostrophes -> straight apostrophe so the year
+    # regex matches (e.g. "'92" typed on a phone often autocorrects to "'92"
+    # with a curly quote). Without this, the year never gets split out and
+    # stays stuck as literal text inside the player name, which then can't
+    # match the roster sheet's clean name when checking availability.
+    text = text.replace('‘', "'").replace('’', "'").replace('ʼ', "'")
 
     # Strip leading "N." numbering
     text = re.sub(r"^\d+\.\s*", "", text.strip())

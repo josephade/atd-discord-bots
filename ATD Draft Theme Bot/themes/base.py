@@ -154,9 +154,13 @@ class Theme(ABC):
         """DM-facing text for `!status` — what this drafter is waiting on."""
 
     @abstractmethod
-    def is_pick_phase_complete(self, ctx: DraftContext) -> bool:
+    def is_pick_phase_complete(self, ctx: DraftContext, drafter: dict | None = None) -> bool:
         """True once every drafter has made all their picks (roster
-        submission can still be pending)."""
+        submission can still be pending). `drafter` is optional context for
+        formats with independent sub-groups (e.g. Pack Draft's divisions) —
+        passing it scopes the check to that drafter's own group instead of
+        the whole draft; omit it (as the reveal/rostertimer call sites do)
+        to check everyone."""
 
     async def format_picks(self, ctx: DraftContext, drafter: dict, picks: list[str]) -> str:
         """DM-facing text for `!mypicks`. Default: a flat numbered list in
@@ -188,6 +192,19 @@ class Theme(ABC):
     def team_label(self, ctx: DraftContext, drafter: dict) -> str:
         return drafter['display_name'] or str(drafter['user_id'])
 
+    def division_label(self, ctx: DraftContext, idx: int) -> str:
+        """Human-readable division name, for admin lookups (e.g. `!theme
+        team`) — default suits formats with no real division concept."""
+        return f"Division {idx + 1}"
+
+    def resolve_team_logo(self, raw: str) -> str:
+        """Best-effort: map a raw team-logo token (a Discord custom emoji
+        tag, or its bare name) to the team name it represents, for admin
+        lookups that only have a logo to go on (e.g. `!theme reveal <draft>
+        <emoji>`). Default: no logo→team mapping exists, so the raw input
+        passes through unchanged — only Pack Draft has an emoji map."""
+        return raw
+
     def linked_drafter_ids(self, ctx: DraftContext, drafter: dict) -> list[int]:
         """Drafter IDs that share drafter's team — a roster submission from
         any one of them applies to all of them."""
@@ -205,6 +222,15 @@ class Theme(ABC):
         fits. Default: not supported (no fallback beyond what's already
         arranged)."""
         return None
+
+    def filler_player_names(self, ctx: DraftContext) -> set[str]:
+        """Names best_affordable_roster is allowed to use even though the
+        drafter never actually drafted them (e.g. $1 replacement-level
+        padding for a roster that can't otherwise be filled/afforded) —
+        exempted from roster.validate_roster's normal "must be drafted by
+        you" check. Default: none (every theme without this override keeps
+        the strict drafted-only rule)."""
+        return set()
 
     def validate_final_roster(self, ctx: DraftContext, drafter: dict, submitted: list[str]) -> tuple[bool, list[str]]:
         """Extra format-specific validation on top of the generic
@@ -257,8 +283,37 @@ class Theme(ABC):
     async def load_packs(self, ctx: DraftContext, division: str, text: str) -> str:
         return "This draft format doesn't support manually loaded packs."
 
+    async def set_division_name(self, ctx: DraftContext, division: str, name: str) -> str:
+        return "This draft format doesn't have divisions."
+
     async def force_skip(self, ctx: DraftContext, drafter: dict) -> str:
         return "This draft format doesn't support forcing a skip."
+
+    async def add_teammate(self, ctx: DraftContext, existing_user_id: int, new_user_id: int) -> str:
+        """Adds new_user_id to whatever team/seat existing_user_id is already
+        on (e.g. turning a solo seat into a duo). Default: not supported —
+        only formats with a multi-GM-per-team concept (Pack Draft) need this."""
+        return "This draft format doesn't support adding a GM to an existing team."
+
+    async def move_drafter(self, ctx: DraftContext, user_id: int, division_ref: str, seat_number: int) -> str:
+        """Relocates an existing GM to a different division/seat — only
+        formats with a division concept (Pack Draft) need this. Default:
+        not supported."""
+        return "This draft format doesn't support moving a GM between divisions."
+
+    async def division_roster(self, ctx: DraftContext) -> str:
+        """Every GM, grouped by division/seat — only formats with a
+        division concept (Pack Draft) need this. Default: not supported."""
+        return "This draft format doesn't have divisions."
+
+    async def set_preferences(self, ctx: DraftContext, drafter: dict, text: str) -> str:
+        """`!pref <Player A>, <Player B>, ...` — a standing pick-priority
+        list for drafters who won't be online; formats that support it
+        should auto-pick the first still-available listed player the
+        instant a pack arrives, without waiting on the pick timer. `!pref`
+        with no text shows the current list; `!pref clear` removes it.
+        Default: not supported."""
+        return "This draft format doesn't support preference lists."
 
     async def resend_current(self, ctx: DraftContext, drafter: dict) -> str:
         return "Nothing to resend for this draft format — check `!status`."
@@ -304,6 +359,19 @@ class Theme(ABC):
         tracking ever drifts from the external turn-order bot's actual
         state. Default: not supported."""
         return "This draft format doesn't support pick overrides."
+
+    async def propose_power(self, ctx: DraftContext, drafter: dict) -> str:
+        """Called by `!activate` — propose activating the drafter's own
+        group's one-time special power, subject to whatever consensus
+        process the format requires (e.g. a nation-wide majority vote).
+        Default: not supported."""
+        return "This draft format doesn't have any activatable powers."
+
+    async def air_react(self, ctx: DraftContext, drafter: dict) -> str:
+        """Called by `!airreact` — propose a reactive counter-power while
+        another group's own power vote is still open. Default: not
+        supported."""
+        return "This draft format doesn't support reactive powers."
 
 
 # ── Shared Sheets side-effects ─────────────────────────────────────────────────

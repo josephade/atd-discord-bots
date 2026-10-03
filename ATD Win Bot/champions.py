@@ -20,15 +20,15 @@ CHAMPIONS = {
     21: {"w": ["dallama"],                                            "ru": ["htb"]},
     # 22 = Cancelled, 23 = Cancelled
     24: {"w": ["JSoapz"],                                             "ru": ["r3"]},
-    25: {"w": [],                                                     "ru": ["r3"]},
+    25: {"w": ["Easybruh"],                                           "ru": ["r3"]},
     26: {"w": ["JSoapz", "chicagofan"],                               "ru": ["myst imo", "dallama"]},
     27: {"w": ["sam"],                                                "ru": ["Snipez"]},
     28: {"w": ["Unlimited"],                                          "ru": ["Bony"]},
-    29: {"w": ["made"],                                               "ru": ["unknown-user", "myst imo"]},
+    29: {"w": ["made", "Easybruh"],                                   "ru": ["unknown-user", "myst imo"]},
     # 30 = NFL
     31: {"w": ["CCarp"],                                              "ru": ["unknown-user"]},
-    32: {"w": [],                                                     "ru": ["young slime"]},
-    33: {"w": ["Bony"],                                               "ru": ["JSoapz", "CCarp"]},
+    32: {"w": ["Easybruh"],                                           "ru": ["young slime"]},
+    33: {"w": ["Bony", "AJ"],                                         "ru": ["JSoapz", "CCarp"]},
     34: {"w": ["sorslab"],                                            "ru": []},
     35: {"w": ["Silveryo"],                                           "ru": ["sorslab", "unknown-user"]},
     36: {"w": ["Silveryo"],                                           "ru": ["Ceo"]},
@@ -44,7 +44,7 @@ CHAMPIONS = {
     46: {"w": ["Kay", "r3", "Crispy"],                                          "ru": ["Benzo"]},
     47: {"w": ["Matisse Thybulle", "jakit"],                          "ru": ["AJ", "unknown-user"]},
     # 48 = Football
-    49: {"w": [],                                                     "ru": ["zenon", "Ferra"]},
+    49: {"w": ["Easybruh"],                                           "ru": ["zenon", "Ferra"]},
     50: {"w": ["Silveryo"],                                           "ru": ["Mk"]},
     51: {"w": ["ozzy"],                                               "ru": ["Bony"]},
     52: {"w": ["Mk"],                                                 "ru": ["Francis", "Hilol"]},

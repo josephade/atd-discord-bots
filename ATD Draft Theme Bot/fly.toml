@@ -1,0 +1,26 @@
+app = "atd-draft-theme-bot"
+primary_region = "ewr"
+
+[deploy]
+  # This bot keeps its real state in-memory (pick timers, per-draft locks) —
+  # the default "rolling" strategy can briefly run the old and new machine
+  # versions at once, both connected to Discord on the same token and both
+  # writing to the same sqlite volume, which produced real live-draft
+  # corruption (duplicate/mismatched pack-holder state) during a redeploy.
+  # "immediate" updates the single existing machine in place instead of
+  # provisioning a second one, so there's never an overlap window.
+  strategy = "immediate"
+
+[build]
+
+[env]
+  STATE_DIR = "/data"
+
+[[mounts]]
+  source      = "atd_draft_theme_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

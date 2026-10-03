@@ -34,6 +34,13 @@ SELF_BOT_ID = int(os.getenv('SELF_BOT_ID', '0')) or None
 POOL_SPREADSHEET_ID = os.getenv('POOL_SPREADSHEET_ID')
 POOL_TAB_NAME        = os.getenv('POOL_TAB_NAME', 'ADP')
 
+# ── Google Sheets: Nation Flux pricing ───────────────────────────────────────
+# Reads the SAME live price sheet ATD Flux Bot writes to (a new "Round N"
+# column each time the commish runs !flux there) — this bot never writes to
+# it, only reads. Defaults match ATD Flux Bot's own .env for this league.
+FLUX_SPREADSHEET_ID = os.getenv('FLUX_SPREADSHEET_ID', '1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI')
+FLUX_WORKSHEET_GID  = int(os.getenv('FLUX_WORKSHEET_GID', '255290723'))
+
 # ── Google Sheets: team sheet / results ──────────────────────────────────────
 # Reuses the same spreadsheet ATD Team Sheet Bot manages. Final rosters are
 # only written here once a GM's submission passes validation, and (per-theme)

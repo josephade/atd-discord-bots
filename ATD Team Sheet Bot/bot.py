@@ -192,13 +192,27 @@ def _channel_has_budget(channel_id: int) -> bool:
     return channel_id not in _no_budget_channels
 
 
-# ATD 108's budget-mirror sibling channels — kept tracked so !flux budget
-# bumps propagate to them, but nobody actually submits picks there, so
-# pick-validation errors (e.g. "Unrecognised emoji") are just noise. Real
-# pick errors should only ever show up in the actual draft channel.
-# 934054851485270016 is a general/matchup channel (sheet-mapped for !matchup
-# lookups only) — regular chat there shouldn't be misread as pick attempts.
-_SILENT_PICK_ERROR_CHANNELS = {934052158532378634, 1471629828208988314, 934054851485270016}
+# Channels that are sheet-mapped (so !roster/!matchup/etc. work there) but
+# aren't where picks actually get made — budget-mirror siblings, general/
+# matchup-lookup channels, team-emoji reference posts, and the like. Being
+# mapped to a draft only means "this channel's commands read that tab"; it
+# doesn't mean every message here should be parsed as an attempted pick the
+# way it is in the real picks channel (e.g. #atd-selections). Persisted
+# (like _channel_sheet_map) so a commissioner can silence/unsilence a
+# channel at runtime with !silencepicks / !unsilencepicks instead of this
+# needing a code change + redeploy every time it comes up.
+_SILENT_PICK_ERROR_CHANNELS: set[int] = {
+    int(c) for c in _config.get(
+        "silent_pick_error_channels",
+        [934052158532378634, 1471629828208988314, 934054851485270016],
+    )
+}
+
+
+def _persist_silent_channels():
+    cfg = _load_config()
+    cfg["silent_pick_error_channels"] = sorted(_SILENT_PICK_ERROR_CHANNELS)
+    _save_config(cfg)
 
 
 def _get_budget(channel_id: int = None) -> int:
@@ -765,29 +779,35 @@ class SheetManager:
         return self._find_team_cell(team_name)
 
     def _hidden_columns(self) -> set:
-        """1-indexed column numbers hidden by the user on this tab (cached
-        per-instance). Many tabs hide the price column between teams —
-        Google's PDF export doesn't just skip a hidden column when it's part
-        of the requested range, it substitutes the next *visible* column to
-        fill the gap, silently pulling in the neighboring team's block. So
-        any hidden column must never be included in an export range."""
-        if not hasattr(self, '_hidden_cols_cache'):
-            try:
-                meta = self.ws.spreadsheet.fetch_sheet_metadata(
-                    params={'fields': 'sheets(properties(sheetId),data(columnMetadata))'})
-            except Exception as e:
-                print(f"[matchup] Could not fetch column metadata: {e}")
-                self._hidden_cols_cache = set()
-                return self._hidden_cols_cache
-            hidden = set()
-            for s in meta.get('sheets', []):
-                if s['properties']['sheetId'] != self.ws.id:
-                    continue
-                for i, col in enumerate(s.get('data', [{}])[0].get('columnMetadata', []), start=1):
-                    if col.get('hiddenByUser'):
-                        hidden.add(i)
-            self._hidden_cols_cache = hidden
-        return self._hidden_cols_cache
+        """1-indexed column numbers hidden by the user on this tab. Many tabs
+        hide the price column between teams — Google's PDF export doesn't
+        just skip a hidden column when it's part of the requested range, it
+        substitutes the next *visible* column to fill the gap, silently
+        pulling in the neighboring team's block. So any hidden column must
+        never be included in an export range.
+
+        Fetched fresh on every call, deliberately not cached: a SheetManager
+        instance is long-lived (reused across many commands via
+        _channel_managers), and a commissioner hiding/unhiding a column
+        after the first fetch would otherwise leave this permanently stale —
+        exactly what caused a since-hidden column to get included in a
+        !teamshot/!matchup range and bleed the neighboring team's block into
+        the export. !teamshot/!matchup aren't high-frequency commands, so
+        the extra metadata call each time is cheap insurance."""
+        try:
+            meta = self.ws.spreadsheet.fetch_sheet_metadata(
+                params={'fields': 'sheets(properties(sheetId),data(columnMetadata))'})
+        except Exception as e:
+            print(f"[matchup] Could not fetch column metadata: {e}")
+            return set()
+        hidden = set()
+        for s in meta.get('sheets', []):
+            if s['properties']['sheetId'] != self.ws.id:
+                continue
+            for i, col in enumerate(s.get('data', [{}])[0].get('columnMetadata', []), start=1):
+                if col.get('hiddenByUser'):
+                    hidden.add(i)
+        return hidden
 
     def get_matchup_range(self, team_row: int, col_idx_1based: int):
         """Return (spreadsheet_id, gid, a1_range) covering a team's header row
@@ -892,6 +912,13 @@ def _normalize_year(raw):
       2019-20 → 2019-20  (unchanged)
     Years 46–99 are treated as 1946–1999; 00–45 as 2000–2045.
     """
+    # Normalize curly/smart apostrophes to straight ones first — mobile
+    # autocorrect commonly swaps ' for ' while typing, and every pattern
+    # below matches only a straight apostrophe. Without this, a curly-quote
+    # input falls through every pattern and gets returned completely
+    # unnormalized (e.g. "09'" written to the sheet as literal "09'"
+    # instead of "2008-09").
+    raw = raw.replace('’', "'").replace('‘', "'").replace('ʼ', "'")
     raw = raw.strip()
     # Trailing apostrophe "13'" → treat as end-year → "2012-13"
     m = re.match(r"^(\d{2})'$", raw)
@@ -1050,7 +1077,7 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 COMMISSIONER_ROLE = "LeComissioner"
 
 
-_PUBLIC_COMMANDS = {'roster', 'find', 'available', 'teams', 'sheethelp', 'sheetinfo', 'claimteam', 'swap', 'myteam', 'addyear', 'matchup'}
+_PUBLIC_COMMANDS = {'roster', 'find', 'available', 'teams', 'sheethelp', 'sheetinfo', 'claimteam', 'swap', 'myteam', 'addyear', 'matchup', 'teamshot'}
 
 
 @bot.check
@@ -1236,6 +1263,15 @@ async def on_message(message):
     # Only handle pick messages in channels that have a sheet mapping
     manager = await _get_manager_async(message.channel.id)
     if not manager:
+        return
+
+    # These channels are budget-mirrors / general chat, not real draft
+    # channels — nobody is actually supposed to submit picks here. Skip pick
+    # processing entirely rather than just silencing failed-parse errors
+    # (previously: ordinary chat containing a recognized team emoji could
+    # still parse as a "successful" pick and get written to the sheet for
+    # real, e.g. banter like "Easybruh :UNC: is like..." landing on a roster).
+    if message.channel.id in _SILENT_PICK_ERROR_CHANNELS:
         return
 
     # Steal/block declarations (however they're phrased) are Timer Bot's to
@@ -1486,6 +1522,36 @@ async def cmd_removechannel(ctx, channel: discord.TextChannel):
     await ctx.send(f"✅ Removed mapping for **#{channel.name}**. The bot will no longer process picks there.")
 
 
+@bot.command(name='silencepicks')
+async def cmd_silencepicks(ctx, channel: discord.TextChannel = None):
+    """Mark a channel as sheet-mapped but not a real picks channel — messages
+    there stop being parsed/validated as pick attempts entirely. Usage:
+    !silencepicks [#channel] (defaults to the current channel)."""
+    channel = channel or ctx.channel
+    if channel.id in _SILENT_PICK_ERROR_CHANNELS:
+        await ctx.send(f"**#{channel.name}** is already silenced.")
+        return
+    _SILENT_PICK_ERROR_CHANNELS.add(channel.id)
+    _persist_silent_channels()
+    await ctx.send(
+        f"🔇 **#{channel.name}** silenced — messages there will no longer be parsed as pick attempts, "
+        f"even if the channel is sheet-mapped for other commands."
+    )
+
+
+@bot.command(name='unsilencepicks')
+async def cmd_unsilencepicks(ctx, channel: discord.TextChannel = None):
+    """Undo !silencepicks — messages in this channel go back to being parsed
+    as pick attempts. Usage: !unsilencepicks [#channel]."""
+    channel = channel or ctx.channel
+    if channel.id not in _SILENT_PICK_ERROR_CHANNELS:
+        await ctx.send(f"**#{channel.name}** isn't silenced.")
+        return
+    _SILENT_PICK_ERROR_CHANNELS.discard(channel.id)
+    _persist_silent_channels()
+    await ctx.send(f"🔊 **#{channel.name}** unsilenced — pick parsing is back on there.")
+
+
 @bot.command(name='setbudget')
 async def cmd_setbudget(ctx, amount: int):
     """Set the per-team budget shown on !roster, across every channel. Usage: !setbudget <amount>"""
@@ -1506,6 +1572,27 @@ async def cmd_setchannelbudget(ctx, amount: int):
         return
     _set_channel_budget(ctx.channel.id, amount)
     await ctx.send(f"✅ Budget for **#{ctx.channel.name}** set to **${amount}** (other channels unaffected).")
+
+
+@bot.command(name='resetbudgetbump')
+async def cmd_resetbudgetbump(ctx):
+    """!resetbudgetbump — zero out THIS channel's accumulated Rising Budget
+    Flux bump (added on top of the base budget each time a flux round runs).
+    Run this for a fresh draft reusing a channel that ran Rising Budget Flux
+    before — otherwise the old bump silently carries over on top of the new
+    base budget."""
+    old = _channel_budget_bumps.pop(ctx.channel.id, 0)
+    if not old:
+        await ctx.send(f"**#{ctx.channel.name}** has no budget bump to clear.")
+        return
+    cfg = _load_config()
+    channel_bumps = cfg.setdefault("channel_budget_bumps", {})
+    channel_bumps.pop(str(ctx.channel.id), None)
+    _save_config(cfg)
+    await ctx.send(
+        f"✅ Cleared **#{ctx.channel.name}**'s **+${old}** budget bump. "
+        f"Effective budget is now **${_get_budget(ctx.channel.id)}**."
+    )
 
 
 @bot.command(name='setnobudget')
@@ -1624,13 +1711,14 @@ async def cmd_channels(ctx):
         tab = entry["tab"]
         sid = entry["sheet_id"]
         short_id = sid[:10] + "…" if len(sid) > 10 else sid
-        lines.append(f"{ch_ref} → **{tab}** (`{short_id}`)")
+        silenced = " 🔇" if ch_id in _SILENT_PICK_ERROR_CHANNELS else ""
+        lines.append(f"{ch_ref} → **{tab}** (`{short_id}`){silenced}")
     embed = discord.Embed(
         title="Channel → Sheet Mappings",
         description="\n".join(lines),
         color=discord.Color.blue(),
     )
-    embed.set_footer(text=f"Per-team budget: ${_get_budget()}")
+    embed.set_footer(text=f"Per-team budget: ${_get_budget()} • 🔇 = picks silenced (!unsilencepicks to undo)")
     await ctx.send(embed=embed)
 
 
@@ -2848,17 +2936,26 @@ def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: 
 
 
 def _compose_matchup_image(img1: "Image.Image", img2: "Image.Image") -> bytes:
-    """Place two cropped team screenshots side by side."""
+    """Place two cropped team screenshots side by side.
+
+    The two ranges are exported independently and can come out at different
+    pixel heights even covering the same 11 rows — not an export-scaling
+    artifact (confirmed: happens identically with or without fit-to-width),
+    but because the underlying row heights genuinely differ between parts of
+    the sheet. Padding the shorter one with white just left a blank gap at
+    the bottom of that team's table, so instead it's scaled up proportionally
+    (both dimensions together, so text doesn't stretch/squash) to match the
+    taller one's height — same row count, same visual size, no gap."""
     h = max(img1.height, img2.height)
 
-    def _pad(img):
+    def _match_height(img):
         if img.height == h:
             return img
-        canvas = Image.new("RGB", (img.width, h), (255, 255, 255))
-        canvas.paste(img, (0, 0))
-        return canvas
+        scale = h / img.height
+        new_w = max(1, round(img.width * scale))
+        return img.resize((new_w, h), Image.LANCZOS)
 
-    img1, img2 = _pad(img1), _pad(img2)
+    img1, img2 = _match_height(img1), _match_height(img2)
     combined = Image.new("RGB", (img1.width + img2.width, h), (255, 255, 255))
     combined.paste(img1, (0, 0))
     combined.paste(img2, (img1.width, 0))
@@ -3002,6 +3099,75 @@ async def cmd_matchup(ctx, *, args: str = ''):
 
     file = discord.File(io.BytesIO(image_bytes), filename="matchup.png")
     await ctx.send(content=f"**{team1_name} vs {team2_name}**", file=file)
+
+
+@bot.command(name='teamshot')
+async def cmd_teamshot(ctx, *, args: str = ''):
+    """Post a real screenshot of one team's cells from the Google Sheet.
+    Usage: !teamshot <emoji> (uses this channel's mapped sheet) or
+    !teamshot ATD <num> <emoji> (works from ANY channel, by tab name, so it
+    doesn't need this channel to be sheet-mapped)."""
+    m = re.match(r'(?i)^ATD\s*(\d+)\s+(\S+)\s*$', args.strip())
+    if m:
+        draft_num = m.group(1)
+        team_raw = m.group(2)
+
+        target = f"ATD {draft_num}".upper()
+        lookup_channel_id = next(
+            (ch_id for ch_id, entry in _channel_sheet_map.items()
+             if entry.get("tab", "").upper().startswith(target)),
+            None,
+        )
+        if lookup_channel_id is None:
+            await ctx.send(f"❌ No tracked sheet found for **ATD {draft_num}**.")
+            return
+    else:
+        parts = args.split()
+        if len(parts) != 1:
+            await ctx.send(
+                "❌ Usage: `!teamshot <team emoji>` "
+                "or `!teamshot ATD <num> <team emoji>` (any channel)"
+            )
+            return
+        team_raw = parts[0]
+
+        lookup_channel_id = ctx.channel.id
+        if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent_id == 934054851485270016:
+            lookup_channel_id = ctx.channel.parent_id
+
+    team_name, _ = _resolve_team_name_from_emoji(team_raw)
+
+    manager = await _get_manager_async(lookup_channel_id)
+    if manager is None:
+        await ctx.send(
+            "❌ No sheet mapping configured for this channel. Use `!addchannel` or `!setsheet` first, "
+            "or specify the draft directly: `!teamshot ATD <num> <emoji>`."
+        )
+        return
+
+    loop = asyncio.get_event_loop()
+
+    try:
+        async with ctx.channel.typing():
+            row, col = await loop.run_in_executor(None, manager.find_team_position, team_name)
+            if not row:
+                await ctx.send(f"❌ Team **{team_name}** was not found in this channel's sheet.")
+                return
+
+            token = await loop.run_in_executor(None, _get_export_token)
+            sid, gid, rng = manager.get_matchup_range(row, col)
+            img = await loop.run_in_executor(None, _export_team_range_png, sid, gid, rng, token)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            image_bytes = buf.getvalue()
+    except Exception as exc:
+        print(f"[teamshot] Export failed: {exc}")
+        await ctx.send(_friendly_sheet_error(exc))
+        return
+
+    file = discord.File(io.BytesIO(image_bytes), filename="teamshot.png")
+    await ctx.send(content=f"**{team_name}**", file=file)
 
 
 class HelpView(discord.ui.View):

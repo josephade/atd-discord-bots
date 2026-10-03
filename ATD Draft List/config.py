@@ -23,8 +23,10 @@ PLAYERS_SHEET_NAME = os.getenv("PLAYERS_SHEET_NAME", "Sheet1")
 
 # The worksheet tab the Team Sheet Bot writes drafted players into.
 # Used for text-based duplicate detection (more reliable than color checks).
-# Defaults to PLAYERS_SHEET_NAME if not set separately.
-ROSTER_SHEET_NAME = os.getenv("ROSTER_SHEET_NAME") or PLAYERS_SHEET_NAME
+# Left unset (None) if not configured — must NOT default to PLAYERS_SHEET_NAME:
+# that's the price/ADP reference sheet, not a roster, and reading it as one
+# flags nearly every player as "already taken" (every listed price = a hit).
+ROSTER_SHEET_NAME = os.getenv("ROSTER_SHEET_NAME") or None
 
 _sa_json_env = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 if _sa_json_env:

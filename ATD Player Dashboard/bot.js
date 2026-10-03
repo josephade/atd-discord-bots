@@ -54,9 +54,9 @@ function setCached(cache, key, data, ttl) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // "2025" → "2024-25"
-function parseSeason(yearStr) {
+function parseSeason(yearStr, minYear = 2014) {
   const year = parseInt(yearStr);
-  if (isNaN(year) || year < 2014 || year > 2030) return null;
+  if (isNaN(year) || year < minYear || year > 2030) return null;
   return `${year - 1}-${String(year).slice(-2)}`;
 }
 
@@ -86,7 +86,7 @@ function findPlayer(query, playerMap) {
 
 // "Aaron Gordon 2025 playoffs" → { playerName, seasons: ['2024-25'], seasonType }
 // "Aaron Gordon 2024 2026 PS"  → { playerName, seasons: ['2023-24','2024-25','2025-26'], seasonType }
-function parseArgs(raw) {
+function parseArgs(raw, minYear = 2014) {
   const tokens = raw.trim().split(/\s+/);
 
   // Playoffs: accept "playoffs" or "PS"
@@ -107,15 +107,15 @@ function parseArgs(raw) {
     if (endYear - startYear > 15) return { error: 'Year range too large (max 15 seasons).' };
     seasons = [];
     for (let y = startYear; y <= endYear; y++) {
-      const s = parseSeason(String(y));
+      const s = parseSeason(String(y), minYear);
       if (s) seasons.push(s);
     }
-    if (!seasons.length) return { error: 'Invalid year range. Use 2014–2027.' };
+    if (!seasons.length) return { error: `Invalid year range. Use ${minYear}–2027.` };
     tokens.splice(firstIdx); // drop years and anything after
   } else if (yearIdxs.length === 1) {
     const idx = yearIdxs[0];
-    const season = parseSeason(tokens[idx]);
-    if (!season) return { error: `Invalid year "${tokens[idx]}". Use 2014–2027.` };
+    const season = parseSeason(tokens[idx], minYear);
+    if (!season) return { error: `Invalid year "${tokens[idx]}". Use ${minYear}–2027.` };
     tokens.splice(idx);
     seasons = [season];
   } else {
@@ -334,7 +334,11 @@ client.on('messageCreate', async (message) => {
     );
   }
 
-  const parsed = parseArgs(argsStr);
+  // Scoring is derived from box-score stats, not SportVU tracking, so the
+  // source site actually has data for it back to its earliest season (1973-74)
+  // — every other chart type needs tracking data that starts in 2013-14.
+  const minYear = cmd === 'scoring' ? 1974 : 2014;
+  const parsed = parseArgs(argsStr, minYear);
   if (parsed.error) return message.reply(parsed.error);
 
   const { playerName, seasons, seasonType } = parsed;
