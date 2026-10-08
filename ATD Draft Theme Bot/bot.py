@@ -92,14 +92,135 @@ async def _apply_morning_resume(draft: dict):
 @tasks.loop(time=dt_time(hour=0, minute=0, tzinfo=_ET))
 async def _nightly_pause():
     for draft in db.list_drafts(status='active'):
+        if draft['theme'] == 'auto_draft':
+            continue  # has its own Irish-time window instead — see below
         await _apply_night_pause(draft)
 
 
 @tasks.loop(time=dt_time(hour=10, minute=0, tzinfo=_ET))
 async def _morning_resume():
     for draft in db.list_drafts(status='paused'):
+        if draft['theme'] == 'auto_draft':
+            continue
         if draft['state'].get('night_paused'):
             await _apply_morning_resume(draft)
+
+
+# ── Auto Draft overnight window (Irish Time) ─────────────────────────────────
+# Same pause/resume shape as the ET window above, but on its own schedule and
+# scoped only to auto_draft (excluded from the ET loops above) — this
+# format's GMs are international, and unlike every other theme (which only
+# gets a silent admin-channel announce()), everyone gets DMed directly plus
+# a heads-up in the results channel, since missing the window here costs a
+# whole round rather than just a slower pick.
+_IRISH_TZ = ZoneInfo('Europe/Dublin')  # handles IST/GMT DST transitions automatically
+
+
+async def _auto_draft_announce_everyone(draft: dict, message: str) -> None:
+    draft_ctx = DraftContext(bot, draft['id'])
+    channel = await themes.auto_draft._results_channel(draft_ctx)
+    if channel:
+        await channel.send(message)
+    for d in db.list_drafters(draft['id']):
+        await draft_ctx.dm(d['user_id'], message)
+
+
+async def _apply_auto_draft_warning(draft: dict):
+    try:
+        await _auto_draft_announce_everyone(
+            draft,
+            "⏰ **5 minutes** until Auto Draft pauses for the night (5:00 AM Irish time) — get your list in now if you can!",
+        )
+    except Exception:
+        log.exception('_apply_auto_draft_warning | failed for draft_id=%s', draft['id'])
+
+
+async def _apply_auto_draft_pause(draft: dict):
+    theme = themes.get_theme(draft['theme'])
+    draft_ctx = DraftContext(bot, draft['id'])
+    try:
+        # Capture whatever time was actually left on the current round's
+        # clock before cancel() wipes round_deadline — stored as a
+        # duration (not the stale absolute timestamp) so _apply_auto_draft_
+        # resume can pick up with that same amount left, not a fresh hour.
+        state = draft_ctx.state
+        deadline = state.get('round_deadline')
+        if deadline is not None:
+            remaining = deadline - time.time()
+            if remaining > 0:
+                state['paused_remaining_seconds'] = remaining
+                draft_ctx.save_state(state)
+
+        db.set_draft_status(draft['id'], 'paused')
+        db.update_draft_state(draft['id'], {'night_paused': True})
+        await theme.cancel(draft_ctx)
+        await _auto_draft_announce_everyone(
+            draft,
+            "🌙 **Auto Draft paused for the night** (5:00 AM Irish time) — resumes automatically at **3:00 PM Irish "
+            "time**, continuing right where this round's clock left off. You can still DM `!list`/`!futurelist` "
+            "in the meantime — it just won't resolve until the draft resumes.",
+        )
+    except Exception:
+        log.exception('_apply_auto_draft_pause | failed for draft_id=%s', draft['id'])
+
+
+async def _apply_auto_draft_resume(draft: dict):
+    theme = themes.get_theme(draft['theme'])
+    draft_ctx = DraftContext(bot, draft['id'])
+    try:
+        db.set_draft_status(draft['id'], 'active')
+        db.update_draft_state(draft['id'], {'night_paused': False})
+        # Not theme.resume_timers() on purpose — that method's own DMs are
+        # worded for "bot process restarted" (a per-GM "🔄 Reconnected..."
+        # message), which would read strangely stacked under the clean
+        # "resumed" announce this sends instead. Uses the remaining-time
+        # duration _apply_auto_draft_pause stashed, so the clock picks up
+        # where it left off instead of granting a fresh hour; falls back
+        # to a full window only if that's missing for some reason (e.g. no
+        # round was actually open at the moment the pause fired).
+        settings = theme._settings(draft_ctx)
+        state = draft_ctx.state
+        if state.get('round_index', 0) < settings['rounds']:
+            teams = state.get('teams', [])
+            lists = state.get('lists', {})
+            if teams and len(lists) >= len(teams):
+                # Submissions stayed open through the pause (see on_list's
+                # night_paused check) — if everyone already got their list
+                # in overnight, resolve right now instead of opening a
+                # fresh clock nobody still needs.
+                async with themes.base.draft_lock(draft['id']):
+                    await theme._resolve_round(draft_ctx, forced=True)
+            else:
+                remaining_seconds = state.pop('paused_remaining_seconds', None)
+                minutes = (remaining_seconds / 60) if remaining_seconds else settings['response_deadline_minutes']
+                theme._start_round_timer(draft_ctx, state, minutes)
+        await _auto_draft_announce_everyone(
+            draft,
+            "☀️ **Auto Draft resumed** (3:00 PM Irish time) — this round's clock continues from right where it left off.",
+        )
+    except Exception:
+        log.exception('_apply_auto_draft_resume | failed for draft_id=%s', draft['id'])
+
+
+@tasks.loop(time=dt_time(hour=4, minute=55, tzinfo=_IRISH_TZ))
+async def _auto_draft_night_warning():
+    for draft in db.list_drafts(status='active'):
+        if draft['theme'] == 'auto_draft':
+            await _apply_auto_draft_warning(draft)
+
+
+@tasks.loop(time=dt_time(hour=5, minute=0, tzinfo=_IRISH_TZ))
+async def _auto_draft_night_pause():
+    for draft in db.list_drafts(status='active'):
+        if draft['theme'] == 'auto_draft':
+            await _apply_auto_draft_pause(draft)
+
+
+@tasks.loop(time=dt_time(hour=15, minute=0, tzinfo=_IRISH_TZ))
+async def _auto_draft_day_resume():
+    for draft in db.list_drafts(status='paused'):
+        if draft['theme'] == 'auto_draft' and draft['state'].get('night_paused'):
+            await _apply_auto_draft_resume(draft)
 
 
 def _validate_submission(theme, draft_ctx, drafter: dict, picks: list[str], submitted: list[str] | None,
@@ -233,6 +354,22 @@ def _not_active_message(draft: dict) -> str:
     return f"This draft is currently `{draft['status']}`."
 
 
+def _list_blocked_message(draft: dict) -> str | None:
+    """Like _not_active_message, but specifically for !list/!futurelist —
+    unlike every other picking command, these stay open through Auto
+    Draft's own overnight auto-pause (night_paused): the round's clock is
+    frozen and won't auto-resolve while paused, but there's no reason to
+    stop a GM who happens to be online from getting their list in before
+    it resumes. A manual commish pause (or anything else non-active) still
+    blocks it, same as always. Returns None when submission should be
+    allowed through."""
+    if draft['status'] == 'active':
+        return None
+    if draft['status'] == 'paused' and draft['state'].get('night_paused'):
+        return None
+    return _not_active_message(draft)
+
+
 def _resolve_draft(arg: str) -> dict | None:
     arg = arg.strip()
     if arg.isdigit():
@@ -247,6 +384,17 @@ def _resolve_active_drafter(user_id: int) -> tuple[dict, dict] | None:
     somehow in more than one active draft at once, picks the most recent —
     proper multi-draft session switching (`!use <id>`) isn't implemented yet."""
     candidates = db.get_active_drafters_for_user(user_id)
+    if not candidates:
+        return None
+    drafter = max(candidates, key=lambda d: d['draft_id'])
+    return db.get_draft(drafter['draft_id']), drafter
+
+
+def _resolve_makeup_drafter(user_id: int) -> tuple[dict, dict] | None:
+    """Like _resolve_active_drafter, but also reaches 'complete' drafts —
+    Auto Draft's makeup claims never expire, so a GM must still be able to
+    use !makeup after the draft has otherwise finished."""
+    candidates = db.get_drafters_for_user(user_id, ('setup', 'active', 'paused', 'complete'))
     if not candidates:
         return None
     drafter = max(candidates, key=lambda d: d['draft_id'])
@@ -280,11 +428,27 @@ def _parse_settings_kv(text: str) -> dict:
     return out
 
 
+async def _send_chunked(ctx, text: str) -> None:
+    """Splits on line boundaries and sends in <=1900-char pieces — a long
+    per-team listing (!theme teams/lists/waiver with enough teams) can
+    blow well past Discord's 2000-char message limit, which 400s with
+    "Invalid Form Body" if sent as one message. Same approach !packstatus
+    already uses."""
+    chunk = ''
+    for line in text.splitlines(keepends=True):
+        if len(chunk) + len(line) > 1900:
+            await ctx.send(chunk)
+            chunk = ''
+        chunk += line
+    if chunk.strip():
+        await ctx.send(chunk)
+
+
 # ── Admin commands (server channel, administrator only) ────────────────────────
 @bot.command(name='theme')
 @commands.has_permissions(administrator=True)
 async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
-    """!theme <list|drafts|create|adddrafter|settings|start|status|pause|resume|reveal> ..."""
+    """!theme <list|drafts|create|adddrafter|settings|start|status|pause|resume|reveal|teams|lists|history|setlist|makeup|extend|waiver|available|chances|nudge|closeround> ..."""
     action = action.lower()
 
     if action == 'list':
@@ -463,6 +627,149 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
         await ctx.send(f"🛑 Draft **{draft['name']}** cancelled — no further picks or timers will fire. It stays on record; `!theme create` a new one to start over.")
         return
 
+    if action == 'teams':
+        draft = _resolve_draft(rest)
+        if not draft:
+            await ctx.send('Usage: `!theme teams <draft_id_or_name>`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.list_teams(DraftContext(bot, draft['id']))
+        await _send_chunked(ctx, result)
+        return
+
+    if action == 'waiver':
+        draft = _resolve_draft(rest)
+        if not draft:
+            await ctx.send('Usage: `!theme waiver <draft_id_or_name>`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.show_waiver_order(DraftContext(bot, draft['id']))
+        await _send_chunked(ctx, result)
+        return
+
+    if action == 'available':
+        draft = _resolve_draft(rest)
+        if not draft:
+            await ctx.send('Usage: `!theme available <draft_id_or_name>`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        header, all_lines = await theme.available_players(DraftContext(bot, draft['id']))
+        if not all_lines:
+            await ctx.send(header)
+            return
+        page_size = 20
+        total_pages = max(1, (len(all_lines) + page_size - 1) // page_size)
+        pages = []
+        for i in range(0, len(all_lines), page_size):
+            chunk = all_lines[i:i + page_size]
+            embed = discord.Embed(title=header, description='\n'.join(chunk), color=discord.Color.blue())
+            embed.set_footer(text=f"Page {i // page_size + 1}/{total_pages}")
+            pages.append(embed)
+        view = _RosterPager(pages, ctx.author.id)
+        view.message = await ctx.send(embed=pages[0], view=view)
+        return
+
+    if action == 'lists':
+        rest_stripped = rest.strip()
+        draft_arg, round_arg = rest_stripped, None
+        tail = rest_stripped.rsplit(maxsplit=1)
+        if len(tail) == 2 and tail[1].isdigit():
+            draft_arg, round_arg = tail[0], int(tail[1])
+        draft = _resolve_draft(draft_arg)
+        if not draft:
+            await ctx.send('Usage: `!theme lists <draft_id_or_name> [round#]`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.current_round_lists(DraftContext(bot, draft['id']), round_arg)
+        await _send_chunked(ctx, result)
+        return
+
+    if action == 'history':
+        draft = _resolve_draft(rest)
+        if not draft:
+            await ctx.send('Usage: `!theme history <draft_id_or_name>`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.full_history(DraftContext(bot, draft['id']))
+        await _send_chunked(ctx, result)
+        return
+
+    if action == 'setlist':
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 3:
+            await ctx.send('Usage: `!theme setlist <draft_id_or_name> <team#/logo/@GM> <player list>`')
+            return
+        draft = _resolve_draft(parts[0])
+        if not draft:
+            await ctx.send('❌ Draft not found.')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.admin_submit_list(DraftContext(bot, draft['id']), parts[1], parts[2])
+        await ctx.send(result)
+        return
+
+    if action == 'makeup':
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 3:
+            await ctx.send('Usage: `!theme makeup <draft_id_or_name> <team#/logo/@GM> <player name>`')
+            return
+        draft = _resolve_draft(parts[0])
+        if not draft:
+            await ctx.send('❌ Draft not found.')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.admin_claim_makeup(DraftContext(bot, draft['id']), parts[1], parts[2])
+        await ctx.send(result)
+        return
+
+    if action == 'extend':
+        parts = rest.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].replace('.', '', 1).isdigit():
+            await ctx.send('Usage: `!theme extend <draft_id_or_name> <minutes>`')
+            return
+        draft = _resolve_draft(parts[0])
+        if not draft:
+            await ctx.send('❌ Draft not found.')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.extend_round(DraftContext(bot, draft['id']), float(parts[1]))
+        await ctx.send(result)
+        return
+
+    if action == 'chances':
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 3:
+            await ctx.send('Usage: `!theme chances <draft_id_or_name> <team#/logo/@GM> <player name>`')
+            return
+        draft = _resolve_draft(parts[0])
+        if not draft:
+            await ctx.send('❌ Draft not found.')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.check_chances(DraftContext(bot, draft['id']), parts[1], parts[2])
+        await ctx.send(result)
+        return
+
+    if action == 'nudge':
+        draft = _resolve_draft(rest)
+        if not draft:
+            await ctx.send('Usage: `!theme nudge <draft_id_or_name>`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.nudge_missing(DraftContext(bot, draft['id']))
+        await ctx.send(result)
+        return
+
+    if action == 'closeround':
+        draft = _resolve_draft(rest)
+        if not draft:
+            await ctx.send('Usage: `!theme closeround <draft_id_or_name>`')
+            return
+        theme = themes.get_theme(draft['theme'])
+        result = await theme.close_window(DraftContext(bot, draft['id']))
+        await ctx.send(result)
+        return
+
     if action == 'rostertimer':
         parts = rest.split()
         if len(parts) < 2:
@@ -537,7 +844,7 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
         return
 
     await ctx.send(
-        "Usage: `!theme <list|drafts|create|adddrafter|settings|start|status|pause|resume|reveal|cancel|rostertimer|divisionname> ...`\n"
+        "Usage: `!theme <list|drafts|create|adddrafter|settings|start|status|pause|resume|reveal|cancel|rostertimer|divisionname|teams|lists|history|setlist|makeup|extend|waiver|available|chances|nudge|closeround> ...`\n"
         "Type `!help` for the full reference."
     )
 
@@ -564,6 +871,28 @@ async def cmd_setteams(ctx, draft_ref: str = '', *, text: str = ''):
         return
     theme = themes.get_theme(draft['theme'])
     result = await theme.setup_teams(DraftContext(bot, draft['id']), text)
+    await ctx.send(result)
+
+
+@bot.command(name='setwaiver')
+@commands.has_permissions(administrator=True)
+async def cmd_setwaiver(ctx, draft_ref: str = '', *, text: str = ''):
+    """!setwaiver <draft_id_or_name> — admin override: paste one team per
+    line, in the new tiebreaker waiver order (Auto Draft): `1. 🦅 - @GM1`.
+    No secrecy here (unlike !setteams), so this works in a normal server
+    channel — paste an actual lottery result straight from wherever it
+    was posted."""
+    if not draft_ref or not text.strip():
+        await ctx.send(
+            'Usage:\n```\n!setwaiver <draft_id_or_name>\n1. 🦅 - @GM1\n2. 🐻 - @GM2 @GM3\n```'
+        )
+        return
+    draft = _resolve_draft(draft_ref)
+    if not draft:
+        await ctx.send('❌ Draft not found.')
+        return
+    theme = themes.get_theme(draft['theme'])
+    result = await theme.set_waiver_order(DraftContext(bot, draft['id']), text)
     await ctx.send(result)
 
 
@@ -1351,11 +1680,54 @@ async def cmd_list(ctx, *, text: str = ''):
         await ctx.send("You're not in an active draft right now.")
         return
     draft, drafter = resolved
-    if draft['status'] != 'active':
-        await ctx.send(_not_active_message(draft))
+    blocked = _list_blocked_message(draft)
+    if blocked:
+        await ctx.send(blocked)
         return
     theme = themes.get_theme(draft['theme'])
     reply = await theme.on_list(DraftContext(bot, draft['id']), drafter, text)
+    await ctx.send(reply)
+
+
+@bot.command(name='makeup')
+async def cmd_makeup(ctx, *, text: str = ''):
+    """!makeup <player name> — claim a pick owed from a round you were skipped
+    in (Auto Draft). Unlike every other picking command, this still works
+    after the draft is marked 'complete' — makeup claims don't expire."""
+    if not _dm_only(ctx):
+        return
+    resolved = _resolve_makeup_drafter(ctx.author.id)
+    if not resolved:
+        await ctx.send("You're not in a draft that supports makeup picks right now.")
+        return
+    draft, drafter = resolved
+    if draft['status'] == 'cancelled':
+        await ctx.send(_not_active_message(draft))
+        return
+    theme = themes.get_theme(draft['theme'])
+    reply = await theme.claim_makeup(DraftContext(bot, draft['id']), drafter, text)
+    await ctx.send(reply)
+
+
+@bot.command(name='futurelist')
+async def cmd_futurelist(ctx, *, text: str = ''):
+    """!futurelist <round#> Player One, Player Two, ... — pre-submit a list
+    for a round that hasn't opened yet (Auto Draft), for GMs in a timezone
+    that won't have them online when it does. Auto-applied the moment that
+    round actually opens."""
+    if not _dm_only(ctx):
+        return
+    resolved = _resolve_active_drafter(ctx.author.id)
+    if not resolved:
+        await ctx.send("You're not in an active draft right now.")
+        return
+    draft, drafter = resolved
+    blocked = _list_blocked_message(draft)
+    if blocked:
+        await ctx.send(blocked)
+        return
+    theme = themes.get_theme(draft['theme'])
+    reply = await theme.queue_future_list(DraftContext(bot, draft['id']), drafter, text)
     await ctx.send(reply)
 
 
@@ -1633,6 +2005,10 @@ async def cmd_help(ctx):
             '`!pick <player>` — make your pick (Pack Draft)\n'
             '`!pack` — resend your current pack (Pack Draft)\n'
             '`!list P1, P2, P3` — submit your round list (Anonymous Partner Draft / Auto Draft)\n'
+            '`!futurelist <round#> P1, P2, ...` — pre-submit a list for a round that hasn\'t opened yet, for '
+            'other timezones (Auto Draft)\n'
+            '`!makeup <player>` — claim a pick owed from a skipped round, free/uncontested, never expires '
+            '(Auto Draft)\n'
             '`!msg <text>` — message your partner (Anonymous Partner Draft)\n'
             '`!status` — what you\'re currently waiting on\n'
             '`!mypicks` — everything you\'ve drafted so far, sorted by price (privately)\n'
@@ -1704,17 +2080,73 @@ async def cmd_help(ctx):
             inline=False,
         )
         embed.add_field(
-            name='Auto Draft moderator commands',
+            name='Auto Draft commands',
             value=(
-                '`!setteams <id>` — **DM only**, logos must match ATD Team Sheet Bot\'s emoji_map.py; line '
-                'order also sets the starting tiebreaker waiver order\n'
+                '`!setteams <id>` — DM only; logos must match emoji_map.py; order sets the starting waiver '
+                'order\n'
+                '`!setwaiver <id>` — admin override of the waiver order, same `1. <logo> - @GM` format, '
+                'anytime\n'
                 '`!theme start <id>` — opens round 1 for every team at once\n'
-                'Each round, every team DMs `!list P1, P2, ..., P10` in priority order; once everyone\'s in '
-                '(or the grace deadline hits) the round resolves automatically — same-rank ties on a player '
-                'go to an equal-odds hidden lottery, and the winner moves to the back of the tiebreaker order. '
-                'Each finalized pick posts as a bare `<logo> <Player>` line in this draft\'s admin channel, so '
-                'ATD Team Sheet Bot (if it has that same channel mapped via `!setsheet`) writes it straight to '
-                'the sheet — no `!submitroster`/`!theme reveal` needed for this format.'
+                '`!theme teams <id>` — every team, GM(s), and anything outstanding (makeups, queued future '
+                'lists)\n'
+                '`!addteammate @existing_gm @new_gm` — add a GM to a team mid-draft (up to 3); backfills their '
+                '`!mypicks`\n'
+                '`!theme lists <id> [round#]` — submitted lists for current round, or a past round\'s saved '
+                'history\n'
+                '`!theme history <id>` — every team\'s list + outcome for every round resolved so far, all '
+                'in one place\n'
+                '`!theme setlist <id> <team#/logo/@GM> <player list>` — submit a list on a team\'s behalf, '
+                'same validation as `!list`\n'
+                '`!theme waiver <id>` — the full tiebreaker waiver order, 1st to last'
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name='Auto Draft commands (cont.)',
+            value=(
+                '`!theme available <id>` — undrafted players, 20/page with button paging; shows demand '
+                '(# of GMs listing, best rank). R1 sorts by least-listed; R2+ by ADP\n'
+                '`!theme chances <id> <team#/logo/@GM> <player>` — win/lose/tie that player, and who the '
+                'waiver order favors on a tie\n'
+                '`!theme makeup <id> <team#/logo/@GM> <player>` — claim an owed makeup pick for a team\n'
+                '`!theme extend <id> <minutes>` — adds time to the round\'s deadline, not a reset\n'
+                '`!theme nudge <id>` — DMs a reminder to teams still missing a list\n'
+                '`!theme closeround <id>` — closes the round immediately, resolving with whatever\'s '
+                'submitted so far'
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name='Auto Draft — Round 1 pool & makeups',
+            value=(
+                'Round 1 is locked to a 30-player pool — names outside it are rejected outright. A team '
+                'that\'s skipped or strikes out entirely (every name taken/lost a tiebreak) gets a random '
+                'leftover pool name in R1; from R2 on, it instead owes a free, uncontested, never-expiring '
+                'makeup pick via `!makeup <player>`. Holding MJ or LeBron once Rounds 6-10 arrive (any round '
+                'they got it) locks that team at the back, permanently — GMs are warned the instant either '
+                'name appears on any still-undrafted list, any round.'
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name='Auto Draft — round resolution',
+            value=(
+                'Each round, every team DMs `!list P1, P2, ..., P10`; submissions ping the results channel. '
+                'Ties go to whoever\'s higher in the START-of-round order (no randomness). Waiver position '
+                'tracks each team\'s MOST RECENT pick\'s ADP (round win, R1 fallback, or `!makeup`) — better '
+                'player = further back, recomputed immediately ("ADP tax"). Picks post as `<logo> <Player>` '
+                'for ATD Team Sheet Bot; the recap lists them sorted by ADP with real pick numbers shown.'
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name='Auto Draft — schedule',
+            value=(
+                'The draft auto-pauses 5:00 AM-3:00 PM **Irish time** every day (its own separate window from '
+                'the ET one other themes use) — a 5-minute warning, the pause, and the resume all DM every GM '
+                'and post in the results channel. GMs in other timezones can also pre-submit a future round\'s '
+                'list ahead of time with `!futurelist <round#> P1, P2, ...`, auto-applied the moment that round '
+                'opens.'
             ),
             inline=False,
         )
@@ -1752,16 +2184,34 @@ async def on_ready():
     # wrongly paused) for up to ~22h until the next scheduled tick fires.
     if datetime.now(_ET).hour < 10:
         for draft in db.list_drafts(status='active'):
-            await _apply_night_pause(draft)
+            if draft['theme'] != 'auto_draft':
+                await _apply_night_pause(draft)
     else:
         for draft in db.list_drafts(status='paused'):
-            if draft['state'].get('night_paused'):
+            if draft['theme'] != 'auto_draft' and draft['state'].get('night_paused'):
                 await _apply_morning_resume(draft)
+
+    # Same catch-up, for Auto Draft's separate Irish-time window.
+    irish_hour = datetime.now(_IRISH_TZ).hour
+    if 5 <= irish_hour < 15:
+        for draft in db.list_drafts(status='active'):
+            if draft['theme'] == 'auto_draft':
+                await _apply_auto_draft_pause(draft)
+    else:
+        for draft in db.list_drafts(status='paused'):
+            if draft['theme'] == 'auto_draft' and draft['state'].get('night_paused'):
+                await _apply_auto_draft_resume(draft)
 
     if not _nightly_pause.is_running():
         _nightly_pause.start()
     if not _morning_resume.is_running():
         _morning_resume.start()
+    if not _auto_draft_night_warning.is_running():
+        _auto_draft_night_warning.start()
+    if not _auto_draft_night_pause.is_running():
+        _auto_draft_night_pause.start()
+    if not _auto_draft_day_resume.is_running():
+        _auto_draft_day_resume.start()
 
 
 async def _handle_dm_shortcut(message: discord.Message):

@@ -1145,6 +1145,12 @@ def _has_sbl_intent(content: str) -> bool:
     return is_steal != is_block
 
 
+# ATD Draft Theme Bot's Auto Draft format's makeup-notice marker — see the
+# on_message check above. Keep this exact string in sync with the literal
+# text in ATD Draft Theme Bot/themes/auto_draft.py's _resolve_round.
+_MAKEUP_NOTICE_MARKER = 'needs to make up the pick in DMs.'
+
+
 def _resolve_team_from_emoji(emoji_text: str) -> str | None:
     """Mirror parse_message()'s emoji → sheet-team-name resolution. Timer Bot
     has no concept of the sheet's team names (or emoji_map.py at all) — it
@@ -1277,6 +1283,15 @@ async def on_message(message):
     # Steal/block declarations (however they're phrased) are Timer Bot's to
     # referee — don't record them as a literal pick here.
     if _has_sbl_intent(message.content):
+        return
+
+    # ATD Draft Theme Bot's Auto Draft format posts a "needs to make up the
+    # pick in DMs" notice (team logo + pick number + a GM mention, no real
+    # player) for anyone skipped in a round — same shape as a genuine pick
+    # message on purpose, so it has to be recognized and skipped explicitly
+    # rather than letting it fall through to parse_message and misfire a
+    # false "position unknown" rejection.
+    if _MAKEUP_NOTICE_MARKER in message.content:
         return
 
     print(f"\n[Msg] #{message.channel.name} | {message.author.display_name}: {message.content[:120]}")

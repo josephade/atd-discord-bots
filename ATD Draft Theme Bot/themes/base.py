@@ -289,6 +289,95 @@ class Theme(ABC):
     async def force_skip(self, ctx: DraftContext, drafter: dict) -> str:
         return "This draft format doesn't support forcing a skip."
 
+    async def nudge_missing(self, ctx: DraftContext) -> str:
+        """Commish safety valve to re-ping whoever hasn't yet submitted
+        whatever this format is currently waiting on (e.g. Auto Draft's
+        round list) — a reminder DM, not a state change. Default: not
+        supported."""
+        return "This draft format doesn't support nudging stragglers."
+
+    async def close_window(self, ctx: DraftContext) -> str:
+        """Commish safety valve to force the current submission window
+        closed right now, resolving with whatever's been submitted so far
+        instead of waiting out the deadline. Default: not supported."""
+        return "This draft format doesn't support closing the current window early."
+
+    async def claim_makeup(self, ctx: DraftContext, drafter: dict, text: str) -> str:
+        """`!makeup <player>` — claim a pick owed from a past missed round,
+        as a free/uncontested claim against whatever's still available
+        right now (not run back through the normal competitive process).
+        Default: not supported."""
+        return "This draft format doesn't support makeup picks."
+
+    async def queue_future_list(self, ctx: DraftContext, drafter: dict, text: str) -> str:
+        """`!futurelist <round#> <player list>` — pre-submit a round list
+        for a round that hasn't opened yet, for GMs who won't be online
+        when it does; auto-applied the moment that round actually opens.
+        Default: not supported."""
+        return "This draft format doesn't support queuing a future round's list."
+
+    async def list_teams(self, ctx: DraftContext) -> str:
+        """`!theme teams <id>` — every team, its GM(s), and anything
+        outstanding for it (owed makeups, queued future lists, etc.) in
+        one admin-facing listing. Default: not supported."""
+        return "This draft format doesn't have a team listing — use `!theme status` instead."
+
+    async def current_round_lists(self, ctx: DraftContext, round_number: int | None = None) -> str:
+        """`!theme lists <id> [round#]` — the actual submitted list
+        CONTENTS for every team in the given round (not just who has/
+        hasn't submitted — see `!theme status` for that). With no
+        round#, shows the currently-open round, before it resolves.
+        With a past round#, shows that round's submitted lists from
+        history, even though it's long since resolved. Default: not
+        supported."""
+        return "This draft format doesn't support viewing round lists."
+
+    async def full_history(self, ctx: DraftContext) -> str:
+        """`!theme history <id>` — every team's submitted list and outcome
+        for every round resolved so far, all in one place. Always reflects
+        whatever has resolved as of the moment it's called — no separate
+        refresh step. Default: not supported."""
+        return "This draft format doesn't support a full round-by-round history."
+
+    async def set_waiver_order(self, ctx: DraftContext, text: str) -> str:
+        """`!setwaiver <id>` — admin override: paste a lotto-style listing
+        (same `1. <logo/@GM> - @GM1 @GM2` format as !setteams), one team
+        per line in the new order, to directly set/reset the tiebreaker
+        waiver order. Default: not supported."""
+        return "This draft format doesn't have a tiebreaker waiver order to set."
+
+    async def admin_submit_list(self, ctx: DraftContext, team_ref: str, text: str) -> str:
+        """`!theme setlist <id> <team#/logo/@GM> <player list>` — admin
+        safety valve to submit a round list on behalf of a team (e.g. a
+        GM who DMed/told you their list directly) — goes through the exact
+        same validation as a real `!list`. Default: not supported."""
+        return "This draft format doesn't support submitting a list on another team's behalf."
+
+    async def admin_claim_makeup(self, ctx: DraftContext, team_ref: str, text: str) -> str:
+        """`!theme makeup <id> <team#/logo/@GM> <player name>` — admin
+        safety valve to claim a team's owed makeup pick on their behalf
+        (e.g. a GM who told you their pick directly) — goes through the
+        exact same validation as a real `!makeup`. Default: not
+        supported."""
+        return "This draft format doesn't support claiming a makeup pick on another team's behalf."
+
+    async def extend_round(self, ctx: DraftContext, extra_minutes: float) -> str:
+        """`!theme extend <id> <minutes>` — adds time to the CURRENT
+        round's deadline on top of whatever's actually left, rather than
+        resetting to a fresh full clock. Default: not supported."""
+        return "This draft format doesn't support extending the current round's deadline."
+
+    async def show_waiver_order(self, ctx: DraftContext) -> str:
+        """`!theme waiver <id>` — the full tiebreaker waiver order, 1st to
+        last. Default: not supported."""
+        return "This draft format doesn't have a tiebreaker waiver order."
+
+    async def available_players(self, ctx: DraftContext) -> tuple[str, list[str]]:
+        """`!theme available <id>` — undrafted players, button-paginated
+        20/page in bot.py. Returns (header, all_lines) unpaginated.
+        Default: not supported."""
+        return "This draft format doesn't support an available-players listing.", []
+
     async def add_teammate(self, ctx: DraftContext, existing_user_id: int, new_user_id: int) -> str:
         """Adds new_user_id to whatever team/seat existing_user_id is already
         on (e.g. turning a solo seat into a duo). Default: not supported —
@@ -314,6 +403,15 @@ class Theme(ABC):
         with no text shows the current list; `!pref clear` removes it.
         Default: not supported."""
         return "This draft format doesn't support preference lists."
+
+    async def check_chances(self, ctx: DraftContext, team_ref: str, player: str) -> str:
+        """`!theme chances <id> <team#/logo/@GM> <player name>` — based on
+        CURRENT round submissions only (a snapshot, not a guarantee —
+        people can still submit or change their list before it resolves),
+        whether that team would currently win the named player outright,
+        lose it, or tie and how the waiver order would break it.
+        Default: not supported."""
+        return "This draft format doesn't support checking a team's chances on a player."
 
     async def resend_current(self, ctx: DraftContext, drafter: dict) -> str:
         return "Nothing to resend for this draft format — check `!status`."

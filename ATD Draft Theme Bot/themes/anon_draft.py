@@ -765,40 +765,28 @@ class AnonDraftTheme(Theme):
             if pick_number is None or _timer.is_running((ctx.draft_id, team_idx)):
                 continue
 
+            # No "reconnected" DM to every GM here on purpose — this fires
+            # on every gateway reconnect AND every process restart (a
+            # routine deploy included), not just a genuine extended
+            # outage, so it was spamming everyone far more often than it
+            # was actually useful. The timer itself still re-arms (or
+            # resolves immediately if the deadline already passed) exactly
+            # as before — only the notification, and the DM-success gate
+            # on starting the timer, are gone.
             deadline = team.get('timer_deadline')
             if deadline is None:
                 minutes = PickTimer.effective_minutes(
                     settings['base_timer_minutes'], settings['decay_minutes'], settings['floor_minutes'], team.get('skip_count', 0),
                 )
-                delivered_any = False
-                for mid in team['member_ids']:
-                    drafter = db.get_drafter(mid)
-                    ok = await ctx.dm(
-                        drafter['user_id'],
-                        f"🔄 Reconnected — your timer has been reset to **{minutes:.0f} minutes** for pick "
-                        f"#{pick_number} (no prior deadline on file). DM me your pick: `!pick <player> <year>`.",
-                    )
-                    delivered_any = delivered_any or ok
-                if delivered_any:
-                    self._start_team_timer(ctx, ctx.state, team_idx, minutes)
-                    resumed += 1
+                self._start_team_timer(ctx, ctx.state, team_idx, minutes)
+                resumed += 1
                 continue
 
             remaining_seconds = deadline - time.time()
             if remaining_seconds <= 0:
-                for mid in team['member_ids']:
-                    drafter = db.get_drafter(mid)
-                    await ctx.dm(drafter['user_id'], "🔄 Reconnected — your timer had already run out while I was offline. Resolving now.")
                 await self._resolve_on_timeout(ctx, team_idx, pick_number)
             else:
                 minutes = remaining_seconds / 60
-                for mid in team['member_ids']:
-                    drafter = db.get_drafter(mid)
-                    await ctx.dm(
-                        drafter['user_id'],
-                        f"🔄 Reconnected — you still have **{minutes:.0f} minutes** left on pick #{pick_number}. "
-                        f"DM me your pick: `!pick <player> <year>`.",
-                    )
                 self._start_team_timer(ctx, ctx.state, team_idx, minutes)
             resumed += 1
         return resumed

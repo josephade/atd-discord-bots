@@ -188,6 +188,21 @@ def get_active_drafters_for_user(user_id: int) -> list[dict]:
         return [_row(r) for r in rows]
 
 
+def get_drafters_for_user(user_id: int, statuses: tuple[str, ...]) -> list[dict]:
+    """Like get_active_drafters_for_user, but with a caller-chosen status
+    set — for the rare command that needs to reach a draft outside the
+    normal setup/active/paused window (e.g. Auto Draft's `!makeup` claims,
+    which must still work after the draft is marked 'complete')."""
+    with _conn() as con:
+        placeholders = ','.join('?' for _ in statuses)
+        rows = con.execute(f'''
+            SELECT drafters.* FROM drafters
+            JOIN drafts ON drafts.id = drafters.draft_id
+            WHERE drafters.user_id = ? AND drafts.status IN ({placeholders})
+        ''', (user_id, *statuses)).fetchall()
+        return [_row(r) for r in rows]
+
+
 def list_drafters(draft_id: int) -> list[dict]:
     with _conn() as con:
         rows = con.execute(

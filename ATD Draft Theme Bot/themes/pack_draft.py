@@ -37,6 +37,7 @@ from config import POOL_SPREADSHEET_ID, POOL_TAB_NAME
 from emoji_map import EMOJI_TEAM_MAP
 from timer import PickTimer
 from .base import DraftContext, Theme, draft_lock
+from .player_years import get_default_year
 
 log = logging.getLogger(__name__)
 
@@ -804,6 +805,10 @@ class PackDraftTheme(Theme):
                     f"Your options:\n" + self._format_pack(cards, self._active_prices(ctx))
                 )
             result = await self._commit_pick(ctx, drafter, div_idx, instance_id, player, auto=False)
+            auto_filled = False
+            if not year:
+                year = get_default_year(player)
+                auto_filled = year is not None
             if year:
                 # Same effect as a follow-up !addyear, done inline — set_player_year
                 # isn't called directly since it acquires this same draft_lock itself.
@@ -811,7 +816,10 @@ class PackDraftTheme(Theme):
                 normalized_year = _normalize_season_year(year)
                 years[player.lower()] = normalized_year
                 self._save_roster(ctx, drafter, slots, unslotted, years)
-                result += f" Year set to **{_display_year(normalized_year)}**."
+                if auto_filled:
+                    result += f" Year auto-filled to **{_display_year(normalized_year)}**."
+                else:
+                    result += f" Year set to **{_display_year(normalized_year)}**."
             return result
 
     async def on_timeout(self, ctx: DraftContext, drafter: dict) -> None:
@@ -2074,6 +2082,14 @@ class PackDraftTheme(Theme):
                 continue
             seen_seats.add(seat_key)
 
+            # No "reconnected" DM to every GM here on purpose — this fires
+            # on every gateway reconnect AND every process restart (a
+            # routine deploy included), not just a genuine extended
+            # outage, so it was spamming everyone far more often than it
+            # was actually useful. The timer itself still re-arms (or
+            # auto-picks immediately if the deadline already passed)
+            # exactly as before — only the notification, and the
+            # DM-success gate on starting the timer, are gone.
             members = self._seat_members(ctx, div_idx, seat_index)
             primary = self._seat_primary(members)
             deadline = primary['state'].get('timer_deadline')
@@ -2083,37 +2099,15 @@ class PackDraftTheme(Theme):
                 minutes = PickTimer.effective_minutes(
                     settings['base_timer_minutes'], settings['decay_minutes'], settings['floor_minutes'], primary['skip_count'],
                 )
-                delivered_any = False
-                for m in members:
-                    ok = await ctx.dm(
-                        m['user_id'],
-                        f"🔄 Reconnected — your timer has been reset to **{minutes:.0f} minutes** for your current pack "
-                        f"(no prior deadline on file). Use `!pack` to see it again.",
-                    )
-                    delivered_any = delivered_any or ok
-                if delivered_any:
-                    self._start_pick_timer(ctx, div_idx, seat_index, members, minutes)
-                    resumed += 1
-                else:
-                    await ctx.announce(
-                        f"⚠️ Couldn't DM Seat {seat_index + 1}'s team on reconnect — no timer started. "
-                        f"`!pack` in DM will still work once fixed."
-                    )
+                self._start_pick_timer(ctx, div_idx, seat_index, members, minutes)
+                resumed += 1
                 continue
 
             remaining_seconds = deadline - time.time()
             if remaining_seconds <= 0:
-                for m in members:
-                    await ctx.dm(m['user_id'], "🔄 Reconnected — your timer had already run out while I was offline. Auto-picking now.")
                 await self.on_timeout(ctx, primary)
             else:
                 minutes = remaining_seconds / 60
-                for m in members:
-                    await ctx.dm(
-                        m['user_id'],
-                        f"🔄 Reconnected — you still have **{minutes:.0f} minutes** left on your current pack. "
-                        f"Use `!pack` to see it again.",
-                    )
                 self._start_pick_timer(ctx, div_idx, seat_index, members, minutes)
             resumed += 1
         return resumed

@@ -335,6 +335,16 @@ def _has_sbl_intent(content: str) -> bool:
     return is_steal != is_block
 
 
+# ATD Draft Theme Bot's Auto Draft format posts a "needs to make up the
+# pick in DMs" notice for anyone skipped in a round — no real player name
+# in it, but fuzzy matching here has no structural gate (unlike Team Sheet
+# Bot, which requires a real emoji token first), so free text in it can
+# still drift close enough to an already-drafted player to false-positive
+# a duplicate-pick ❌. Keep this string in sync with the literal text in
+# ATD Draft Theme Bot/themes/auto_draft.py's _resolve_round.
+_MAKEUP_NOTICE_MARKER = 'needs to make up the pick in DMs.'
+
+
 async def _handle_sbl_block(message: discord.Message):
     """Un-highlight a player via Timer Bot's SBL_BLOCK or SBL_VETO
     confirmation, making them available again.
@@ -756,6 +766,10 @@ async def on_message(message: discord.Message):
     # confirmation (handled above) is what actually un-highlights a player,
     # so don't let the raw declaration itself be treated as a pick attempt.
     if _has_sbl_intent(content):
+        return
+
+    # See _MAKEUP_NOTICE_MARKER — not a real pick, skip before fuzzy matching.
+    if _MAKEUP_NOTICE_MARKER in content:
         return
 
     match = find_best_match(content, names, row_map, keys, key_to_name)
