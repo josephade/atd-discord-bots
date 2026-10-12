@@ -800,7 +800,14 @@ class ProfileView(discord.ui.View):
         for dk, draft_data in sorted(lottos.items(), key=lambda x: int(re.search(r'\d+', x[0]).group())):
             for team_name, entry in draft_data.items():
                 if _drafter_match(d['name'], entry.get('drafters', [])):
-                    found.append((dk, team_name))
+                    # Mk's Clippers were D1 in these split drafts; the
+                    # historical lotto storage keys incorrectly say D2.
+                    display_key = dk
+                    if (dk in ('ATD 61-D2', 'ATD 67-D2')
+                            and team_name == 'Los Angeles Clippers'
+                            and _drafter_match(d['name'], ['Mk'])):
+                        display_key = dk.removesuffix('-D2') + '-D1'
+                    found.append((display_key, team_name))
         self.teams_drafted = found
 
         self._buttons = {}
@@ -910,7 +917,14 @@ class ProfileView(discord.ui.View):
             embed.add_field(name="⭐  Favourite Players", value="*Not set — use `!favplayer`*", inline=False)
 
         if self.player_counts:
-            top10 = sorted(self.player_counts.items(), key=lambda x: (-x[1], _get_adp(x[0])))[:10]
+            # Higher numeric ADP wins ties; missing ADP stays below known values.
+            top10 = sorted(
+                self.player_counts.items(),
+                key=lambda x: (
+                    -x[1],
+                    -adp if (adp := _get_adp(x[0])) != 9999.0 else float('inf'),
+                ),
+            )[:10]
             lines = [
                 f"{MEDALS[i] if i < 3 else f'{i+1}.':<3} {player:<22} ×{count}"
                 for i, (player, count) in enumerate(top10)
