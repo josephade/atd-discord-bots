@@ -9,18 +9,27 @@
 import json
 import os
 import sqlite3
+import re
+import unicodedata
+import math
 from datetime import datetime, timezone
+from contextlib import contextmanager
 
 from config import DB_PATH
 
 os.makedirs(os.path.dirname(DB_PATH) or '.', exist_ok=True)
 
 
-def _conn() -> sqlite3.Connection:
+@contextmanager
+def _conn():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute('PRAGMA foreign_keys = ON')
-    return con
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
 
 
 def _now() -> str:
@@ -262,6 +271,47 @@ def record_pick(draft_id: int, drafter_id: int, player: str, round_number: int |
             (draft_id, drafter_id, player, round_number, pick_number, int(auto_pick), _now()),
         )
         return cur.lastrowid
+
+
+def commit_partner_pick(draft_id: int, pair_index: int, round_index: int, player: str, auto_pick: bool, state: dict, expected_state: dict) -> bool:
+    """Commit both partners' picks and scheduler state in one transaction."""
+    def key(value):
+        folded = ''.join(c for c in unicodedata.normalize('NFKD', value).casefold() if not unicodedata.combining(c))
+        return re.sub(r'[^a-z0-9]', '', folded)
+    with _conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        draft = con.execute('SELECT * FROM drafts WHERE id=?', (draft_id,)).fetchone()
+        if not draft or draft['status'] != 'active' or draft['theme'] != 'partner_draft':
+            return False
+        old = json.loads(draft['state_json'])
+        if old != expected_state:
+            return False
+        pair = old['pairs'][pair_index]
+        if round_index in pair.get('completed_rounds', []):
+            return False
+        turn = old['turns'][old['turn_index']] if old['turn_index'] < len(old['turns']) else None
+        if round_index not in pair.get('owed_rounds', []) and turn != {'pair': pair_index, 'round': round_index}:
+            return False
+        if any(key(row[0]) == key(player) for row in con.execute('SELECT player FROM picks WHERE draft_id=?', (draft_id,))):
+            return False
+        for member_id in (pair['a'], pair['b']):
+            if con.execute('SELECT 1 FROM picks WHERE draft_id=? AND drafter_id=? AND round_number=?',
+                           (draft_id, member_id, round_index + 1)).fetchone():
+                return False
+        try:
+            prices = {key(name): float(value) for name, value in old['prices'].items()}
+            budget = float(json.loads(draft['settings_json']).get('budget', 100))
+            spent = sum(prices[key(row[0])] for row in con.execute('SELECT player FROM picks WHERE draft_id=? AND drafter_id=?', (draft_id, pair['a'])))
+            price = prices[key(player)]
+            if not all(math.isfinite(value) and value >= 0 for value in (budget, spent, price)) or spent + price > budget:
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        for member_id in (pair['a'], pair['b']):
+            con.execute('INSERT INTO picks (draft_id,drafter_id,player,round_number,pick_number,auto_pick,created_at) VALUES (?,?,?,?,?,?,?)',
+                        (draft_id, member_id, player, round_index + 1, round_index + 1, int(auto_pick), _now()))
+        con.execute('UPDATE drafts SET state_json=? WHERE id=?', (json.dumps(state, allow_nan=False), draft_id))
+        return True
 
 
 def get_picks(draft_id: int, drafter_id: int) -> list[str]:

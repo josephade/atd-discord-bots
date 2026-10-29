@@ -5,12 +5,14 @@ import logging
 import os
 import re
 import time
+import threading
 
 import discord
 import gspread
 from discord.ext import commands
 from googleapiclient.discovery import build
 from oauth2client.service_account import ServiceAccountCredentials
+from player_years import get_default_year
 
 from config import (
     DISCORD_TOKEN,
@@ -96,19 +98,54 @@ _availability_cache_ts: float = 0.0
 _roster_cache: set | None = None
 _roster_cache_ts: float = 0.0
 _AVAILABILITY_TTL = 60  # seconds
+_availability_lock = threading.Lock()
 # lowercase → original-case name as it appears in the sheet
 _canonical_names: dict[str, str] = {}
 
 # Tracks the last auto-pick so we can retry if the timer bot rejects it
 _last_autopick: dict | None = None  # {"user": discord.User, "pick_num": int}
 
-# Per-user pending tasks that clear the pick list after a confirmed pick.
-# Cancelled and rescheduled on retry so the list only clears once the
-# timer bot stops rejecting.
-_clear_tasks: dict[str, asyncio.Task] = {}
+def _iter_player_rows():
+    """Read only names and fill colours, in bounded batches.
+
+    Fetching all grid metadata for A:D can exhaust the bot's 512 MB VM,
+    especially when formatting extends far beyond the populated players.
+    The values endpoint gives the last populated row without that metadata.
+    """
+    service = _build_sheets_service()
+    title = PLAYERS_SHEET_NAME.replace("'", "''")
+    try:
+        api = service.spreadsheets()
+        values = api.values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f"'{title}'!A:D",
+            fields="values",
+        ).execute()
+        row_count = len(values.get("values", []))
+        del values
+        for start in range(1, row_count + 1, 250):
+            result = api.get(
+                spreadsheetId=SPREADSHEET_ID,
+                ranges=[f"'{title}'!A{start}:D{min(start + 249, row_count)}"],
+                includeGridData=True,
+                fields="sheets(data(rowData(values(formattedValue,effectiveFormat(backgroundColor)))))",
+            ).execute()
+            for sheet in result.get("sheets", []):
+                for block in sheet.get("data", []):
+                    for offset, row in enumerate(block.get("rowData", [])):
+                        yield start + offset, row
+            del result
+    finally:
+        service.close()
 
 
 def _fetch_availability(force: bool = False) -> dict:
+    # Background list checks and a live auto-pick can run at the same time.
+    # Keep only one grid fetch in flight, including cache updates.
+    with _availability_lock:
+        return _fetch_availability_inner(force)
+
+
+def _fetch_availability_inner(force: bool = False) -> dict:
     """
     Read the players sheet with grid data and return a mapping:
         player_name_lower -> True (available) | False (blacked out / taken)
@@ -119,23 +156,17 @@ def _fetch_availability(force: bool = False) -> dict:
     if not force and _availability_cache is not None and (now - _availability_cache_ts) < _AVAILABILITY_TTL:
         return _availability_cache
 
-    service = _build_sheets_service()
-    result  = service.spreadsheets().get(
-        spreadsheetId=SPREADSHEET_ID,
-        ranges=[f"'{PLAYERS_SHEET_NAME}'!A:D"],
-        includeGridData=True,
-    ).execute()
-
     availability: dict[str, bool] = {}
-    sheets = result.get("sheets", [])
-    if sheets:
-        for row in sheets[0].get("data", [{}])[0].get("rowData", []):
-            for cell in row.get("values", []):
-                text = (cell.get("formattedValue") or "").strip()
-                if text:
-                    availability[text.lower()] = not _is_taken(cell)
-                    _canonical_names[text.lower()] = text
+    canonical_names = {}
+    for _, row in _iter_player_rows():
+        for cell in row.get("values", []):
+            text = (cell.get("formattedValue") or "").strip()
+            if text:
+                availability[text.lower()] = not _is_taken(cell)
+                canonical_names[text.lower()] = text
 
+    _canonical_names.clear()
+    _canonical_names.update(canonical_names)
     _availability_cache = availability
     _availability_cache_ts = now
     return availability
@@ -200,6 +231,11 @@ def _player_available(player_name: str, availability: dict, roster_names: set | 
     just as a fallback when the color sheet is entirely missing."""
     name_lower = player_name.lower().strip()
 
+    # A previous auto-pick may be seconds ahead of Sheets' colour update.
+    # Honour the live channel tracker as well as the two sheet sources.
+    if any(name_lower in drafted for drafted in _drafted_this_session):
+        return False
+
     # Roster sheet — ground truth, written directly by Team Sheet Bot.
     if roster_names is not None:
         if name_lower in roster_names:
@@ -225,6 +261,14 @@ _PRICE_RE = re.compile(r"\$\s*(\d+(?:\.\d+)?)")
 # Alternatives: 'YY (apostrophe) | YYYY-YY(YY) | bare YYYY | YY-YY (no apostrophe,
 # e.g. "22-23" — same short-form GMs use without thinking to add the apostrophe).
 _YEAR_RE  = re.compile(r"'(\d{2})\b|(\d{4})-(\d{2,4})\b|\b(\d{4})\b|\b(\d{2})-(\d{2})\b")
+
+
+def _with_default_year(pick: dict) -> dict:
+    """Fill only omitted years from the commissioner's recorded defaults."""
+    if pick.get("year"):
+        return pick
+    year = get_default_year(pick["player"])
+    return {**pick, "year": year} if year else pick
 
 
 def _parse_pick_line(text: str) -> dict:
@@ -265,10 +309,11 @@ def _parse_pick_line(text: str) -> dict:
             year    = f"{century + start}-{ym.group(6)}"
         text = (text[: ym.start()] + text[ym.end() :]).strip()
 
-    return {"player": text, "year": year, "price": price}
+    return _with_default_year({"player": text, "year": year, "price": price})
 
 
 def _format_pick(pick: dict) -> str:
+    pick = _with_default_year(pick)
     parts = [pick["player"]]
     if pick.get("year"):
         parts.append(f"'{pick['year'][-2:]}")
@@ -284,14 +329,22 @@ def _is_valid_emoji(s: str) -> bool:
     if not s:
         return False
     s = s.strip()
-    if re.match(r'^<a?:[^:]+:\d+>$', s):   # <:name:id> or <a:name:id>
-        return True
-    if re.match(r'^:[A-Za-z0-9_~]+:$', s):  # :text_emoji:
-        return True
-    return False
+    custom = re.fullmatch(r'<a?:[^:]+:(\d+)>', s)
+    if custom:
+        return any(e.id == int(custom.group(1)) and getattr(e, 'available', True)
+                   for e in bot.emojis)
+    # :OKC: is plain text. Only a real Discord mention or Unicode emoji
+    # can be used as the team's marker in a draft pick.
+    return bool(re.fullmatch(
+        r'(?:[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF\u2600-\u27BF\u2300-\u23FF])'
+        r'(?:[\uFE0F\u200D\U0001F3FB-\U0001F3FF]|[\U0001F300-\U0001FAFF\u2600-\u27BF])*', s))
 
 
 def _build_pick_message(pick_num: int, emoji: str, pick: dict) -> str:
+    if not _is_valid_emoji(emoji):
+        raise ValueError("A resolved team emoji is required before posting a pick")
+    # Also covers lists saved before default seasons were supported.
+    pick = _with_default_year(pick)
     parts = [f"{pick_num}."]
     if emoji:
         parts.append(emoji)
@@ -307,37 +360,99 @@ def _build_pick_message(pick_num: int, emoji: str, pick: dict) -> str:
 
 
 # ── Auto-pick logic ───────────────────────────────────────────────────────────
-async def _lookup_emoji_from_lotto(user_id: int) -> str | None:
-    """Search the lotto channel (then draft channel) for the lotto message and return this user's emoji."""
+_lotto_teams_cache: dict | None = None
+_lotto_teams_cache_ts = 0.0
+_lotto_lookup_lock = asyncio.Lock()
+
+
+async def _load_lotto_teams() -> dict:
+    """Read the newest lotto, including co-GMs. Never fill gaps from old drafts."""
+    global _lotto_teams_cache, _lotto_teams_cache_ts
+    async with _lotto_lookup_lock:
+        now = time.monotonic()
+        if _lotto_teams_cache is not None and now - _lotto_teams_cache_ts < 60:
+            return _lotto_teams_cache
+        teams = await _scan_lotto_teams()
+        _lotto_teams_cache = teams
+        _lotto_teams_cache_ts = now
+        return teams
+
+
+async def _scan_lotto_teams() -> dict:
     search_channels = []
     if LOTTO_CHANNEL_ID:
         ch = bot.get_channel(LOTTO_CHANNEL_ID)
         if ch:
             search_channels.append(ch)
     draft_ch = bot.get_channel(DRAFT_CHANNEL_ID)
-    if draft_ch:
+    if draft_ch and draft_ch not in search_channels:
         search_channels.append(draft_ch)
 
     for ch in search_channels:
         try:
-            async for msg in ch.history(limit=100):
+            async for msg in ch.history(limit=500):
                 if re.search(r'^\s*1\.', msg.content, re.MULTILINE):
-                    for emoji_str, user_ids in _extract_lotto_lines(msg.content):
-                        if user_id in user_ids:
-                            return emoji_str
+                    lines = list(_extract_lotto_lines(msg.content))
+                    if len(lines) < 2:
+                        continue
+                    return {uid: _resolve_emoji_input(emoji) for emoji, uids in lines for uid in uids}
         except Exception as e:
             log.warning("LOTTO LOOKUP | channel %d failed: %s", ch.id, e)
-    return None
+    return {}
+
+
+async def _lookup_emoji_from_lotto(user_id: int) -> str | None:
+    return (await _load_lotto_teams()).get(user_id)
+
+
+async def _ensure_team_emoji(uid: str) -> str:
+    """Repair missing/shortcode markers before a list is shown or used."""
+    _ensure_user(uid)
+    original = _data[uid].get("emoji", "")
+    resolved = _resolve_emoji_input(original)
+    if not _is_valid_emoji(resolved):
+        resolved = _resolve_emoji_input(await _lookup_emoji_from_lotto(int(uid)) or "")
+    if _is_valid_emoji(resolved):
+        if resolved != original:
+            _data[uid]["emoji"] = resolved
+            _save_data(_data)
+            log.info("TEAM LINK | uid=%s | %r -> %s", uid, original, resolved)
+        return resolved
+    return ""
+
+
+async def _repair_team_emojis():
+    for uid in list(_data):
+        try:
+            await _ensure_team_emoji(uid)
+        except Exception as e:
+            log.warning("TEAM LOOKUP | uid=%s failed: %s", uid, e)
+
+
+async def _confirm_team_setup(ctx, uid: str):
+    try:
+        emoji = await _ensure_team_emoji(uid)
+    except Exception as e:
+        log.warning("TEAM LOOKUP | uid=%s failed: %s", uid, e)
+        emoji = ""
+    if emoji:
+        await ctx.send(f"Team linked: {emoji}. Your list is ready for auto-picking.")
+    else:
+        await ctx.send(
+            "⚠️ List saved, but I couldn't identify the team from the current lotto. "
+            "Auto-picking needs a team emoji. Use `!setemoji` in the server and "
+            "select the actual team emoji from Discord's emoji picker."
+        )
 
 
 async def _do_auto_pick(channel: discord.TextChannel, user: discord.User, pick_num: int,
-                         extra_excluded: set[str] | None = None):
+                         extra_excluded: set[str] | None = None, retry_picks: list | None = None):
     async with _autopick_lock:
-        await _do_auto_pick_inner(channel, user, pick_num, extra_excluded or set())
+        await _do_auto_pick_inner(channel, user, pick_num, extra_excluded or set(), retry_picks)
 
 
 async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, pick_num: int,
-                               extra_excluded: set[str]):
+                               extra_excluded: set[str], retry_picks: list | None = None):
     """extra_excluded: player names (lowercase) to skip for THIS call only —
     e.g. a player the user was just barred from repicking after being
     blocked/stolen from (Timer Bot-side rule, not a global availability
@@ -351,7 +466,9 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
         log.info("AUTO-PICK | %s | paused — skipping", user.display_name)
         return
 
-    picks = user_data.get("picks", [])
+    source_list = user_data.get("picks", [])
+    source_lists = {team_uid: entry.get("picks") for team_uid, entry in _data.items()}
+    picks = list(retry_picks if retry_picks is not None else source_list)
     if not picks:
         log.warning("AUTO-PICK | %s | pick list empty", user.display_name)
         try:
@@ -378,7 +495,7 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
 
     if not _is_valid_emoji(emoji):
         log.info("AUTO-PICK | %s | no emoji set — searching lotto message", user.display_name)
-        found = await _lookup_emoji_from_lotto(user.id)
+        found = _resolve_emoji_input(await _lookup_emoji_from_lotto(user.id) or "")
         if found and _is_valid_emoji(found):
             log.info("AUTO-PICK | %s | emoji auto-found from lotto: %s", user.display_name, found)
             emoji = found
@@ -415,12 +532,12 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
     availability = {}
     roster_names = set()
     try:
-        availability = _fetch_availability(force=True)
+        availability = await asyncio.to_thread(_fetch_availability, force=True)
         log.info("AUTO-PICK | fetched %d player entries from PLAYERS sheet", len(availability))
     except Exception as e:
         log.error("AUTO-PICK | PLAYERS sheet fetch failed: %s", e)
     try:
-        roster_names = _fetch_roster_names(force=True)
+        roster_names = await asyncio.to_thread(_fetch_roster_names, force=True)
         log.info("AUTO-PICK | fetched %d entries from ROSTER sheet", len(roster_names))
     except Exception as e:
         log.error("AUTO-PICK | ROSTER sheet fetch also failed: %s", e)
@@ -469,33 +586,39 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
     # into on_message before channel.send() even returns, and the real-time pick
     # tracker below relies on _last_autopick already pointing at this user to know
     # the announcement it just saw is its own auto-pick, not a manual pick to react to.
-    _last_autopick = {"user": user, "pick_num": pick_num}
+    previous_autopick = _last_autopick
+    pending = {"user": user, "pick_num": pick_num,
+               "retry_picks": picks[chosen_idx + 1:], "posted_at": time.monotonic()}
+    _last_autopick = pending
+    team_lists = {
+        team_uid: source_lists.get(team_uid) for team_uid, entry in _data.items()
+        if team_uid == uid or _resolve_emoji_input(entry.get("emoji", "")) == emoji
+    }
 
     # Post the pick
     pick_msg = _build_pick_message(pick_num, emoji, chosen_pick)
-    await channel.send(pick_msg)
+    try:
+        await channel.send(pick_msg)
+    except Exception:
+        _drafted_this_session.discard(chosen_pick["player"].lower())
+        if _last_autopick is pending:
+            _last_autopick = previous_autopick
+        raise
     log.info("AUTO-PICK | %s | Pick #%d | %s", user.display_name, pick_num, pick_msg)
 
-    # Remove the chosen pick so retries can find the next available player.
-    # The rest of the list is cleared after 30 s — long enough for the timer bot
-    # to reject a bad pick and trigger a retry, but quick enough to feel instant.
-    picks.pop(chosen_idx)
-    _data[uid]["picks"] = picks
-    _save_data(_data)
-
-    # Cancel any existing clear task then schedule a fresh one.
-    existing = _clear_tasks.get(uid)
-    if existing and not existing.done():
-        existing.cancel()
-
-    async def _clear_round_picks(uid_: str):
-        await asyncio.sleep(30)
-        if uid_ in _data:
-            _data[uid_]["picks"] = []
+    # The active list belongs to this turn only. Clear it immediately and
+    # persist the empty list, so a restart or fast next turn cannot reuse it.
+    # Retry options live only in the pending attempt for this pick number.
+    # Preserve a fresh list submitted while channel.send was in flight.
+    if retry_picks is None:
+        changed = False
+        for team_uid, saved_list in team_lists.items():
+            if saved_list and _data[team_uid].get("picks") is saved_list:
+                _data[team_uid]["picks"] = []
+                changed = True
+                log.info("ROUND COMPLETE | cleared remaining picks for uid=%s", team_uid)
+        if changed:
             _save_data(_data)
-            log.info("ROUND COMPLETE | cleared remaining picks for uid=%s", uid_)
-
-    _clear_tasks[uid] = asyncio.create_task(_clear_round_picks(uid))
 
     # DM confirmation
     try:
@@ -523,13 +646,23 @@ def _resolve_emoji_input(raw: str) -> str:
     another server's emoji — gets resolved by name against every custom emoji this
     bot can see and swapped for the real mention, since Discord never renders bare
     `:name:` text as an emoji on its own. Left as-is if no match is found."""
-    s = raw.strip()
-    m = re.match(r'^:([A-Za-z0-9_~]+):$', s)
-    if not m:
+    s = (raw or "").strip()
+    custom = re.fullmatch(r'<a?:([^:]+):(\d+)>', s)
+    m = re.fullmatch(r':([A-Za-z0-9_~]+):', s)
+    if custom:
+        for emoji in bot.emojis:
+            if emoji.id == int(custom.group(2)) and getattr(emoji, 'available', True):
+                return str(emoji)
+        name = custom.group(1).lower()
+    elif m:
+        name = m.group(1).lower()
+    else:
         return s
-    name = m.group(1).lower()
-    for e in bot.emojis:
-        if e.name.lower() == name:
+    channel = bot.get_channel(DRAFT_CHANNEL_ID)
+    guild = getattr(channel, 'guild', None)
+    # Prefer the draft server when multiple guilds use the same emoji name.
+    for e in list(getattr(guild, 'emojis', [])) + list(bot.emojis):
+        if e.name.lower() == name and getattr(e, 'available', True):
             return str(e)
     return s
 
@@ -573,57 +706,65 @@ def _reresolve_stored_emojis():
 async def on_ready():
     log.info("ATD Draft List Bot ready — %s", bot.user)
     _reresolve_stored_emojis()
+    asyncio.create_task(_repair_team_emojis())
     channel = bot.get_channel(DRAFT_CHANNEL_ID)
     if channel:
         asyncio.create_task(_backfill_drafted_session(channel))
 
 
+def _current_draft_history(messages):
+    """Accept newest-first history only when this draft's pick #1 is found."""
+    current = []
+    for message in messages:
+        current.append(message)
+        if re.match(r'^1\s*\.', message.content.strip()) and not _has_sbl_intent(message.content):
+            return list(reversed(current))
+    return []
+
+
 async def _backfill_drafted_session(channel: discord.TextChannel):
-    """On startup, mark already-taken players so auto-picks skip them immediately."""
-    count = 0
+    """Seed sheet-lag protection from this draft only, never older drafts.
 
-    # 1. Fetch the roster sheet — this is the ground truth for what's been picked.
+    Sheet/roster availability is checked directly on each lookup. Copying it
+    into the session set would make a corrected sheet entry stay taken forever.
+    """
     try:
-        roster_names = await asyncio.get_event_loop().run_in_executor(None, _fetch_roster_names)
+        messages = []
+        async for msg in channel.history(limit=2000):
+            messages.append(msg)
+            if re.match(r'^1\s*\.', msg.content.strip()) and not _has_sbl_intent(msg.content):
+                break
+        current = _current_draft_history(messages)
+        if not current:
+            log.warning("BACKFILL | no current-draft pick #1 found; using sheets and live picks only")
+            return
         all_pick_names = {
             p["player"].lower()
             for user_data in _data.values()
             for p in user_data.get("picks", [])
         }
-        for name in all_pick_names:
-            if name not in _drafted_this_session:
-                # player name is substring of a roster entry → already taken
-                for rname in roster_names:
-                    if name in rname:
-                        _drafted_this_session.add(name)
-                        count += 1
-                        break
-    except Exception as e:
-        log.error("BACKFILL | roster fetch failed: %s", e)
-
-    # 2. Also scan recent channel history for pick messages (catches sheet lag).
-    try:
-        all_pick_names = {
-            p["player"].lower()
-            for user_data in _data.values()
-            for p in user_data.get("picks", [])
-        }
-        async for msg in channel.history(limit=500):
+        count = 0
+        for msg in current:
+            if msg.author.bot and (not TIMER_BOT_ID or msg.author.id == TIMER_BOT_ID):
+                for line in msg.content.splitlines():
+                    if line.strip().startswith(("SBL_BLOCK |", "SBL_VETO |")):
+                        parts = line.split("|")
+                        if len(parts) >= 2:
+                            _drafted_this_session.discard(parts[1].strip().lower())
             if re.match(r'^\d+\s*\.', msg.content.strip()) and not _has_sbl_intent(msg.content):
                 content_lower = msg.content.lower()
                 for name in all_pick_names:
                     if name in content_lower and name not in _drafted_this_session:
                         _drafted_this_session.add(name)
                         count += 1
+        log.info("BACKFILL | marked %d current-draft players taken; older drafts excluded", count)
     except Exception as e:
         log.error("BACKFILL | channel history failed: %s", e)
-
-    log.info("BACKFILL | marked %d players as taken on startup", count)
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    global _last_autopick
+    global _last_autopick, _availability_cache, _roster_cache
 
     # ── Timer bot rejection — retry with next available pick ──────────────────
     # Fires on either rejection Timer Bot sends for an auto-posted pick:
@@ -636,10 +777,12 @@ async def on_message(message: discord.Message):
     if (
         message.author.bot
         and message.channel.id == DRAFT_CHANNEL_ID
+        and (not TIMER_BOT_ID or message.author.id == TIMER_BOT_ID)
         and bot.user in message.mentions
         and "pick someone else" in message.content.lower()
         and ("has already been taken" in message.content or "was just blocked from you" in message.content)
         and _last_autopick
+        and time.monotonic() - _last_autopick["posted_at"] < 60
     ):
         retry_excluded: set[str] = set()
         m = re.search(r'[—–-]\s*\*{0,2}(.+?)\*{0,2}\s+has already been taken', message.content)
@@ -653,13 +796,9 @@ async def on_message(message: discord.Message):
                 log.info("REJECTION | '%s' barred for this repick — retrying (not globally excluded)", m.group(1).strip())
         retry_user     = _last_autopick["user"]
         retry_pick_num = _last_autopick["pick_num"]
+        retry_picks    = _last_autopick["retry_picks"]
         _last_autopick = None
-        # Cancel the clear task so remaining picks survive for the retry
-        retry_uid = str(retry_user.id)
-        existing = _clear_tasks.get(retry_uid)
-        if existing and not existing.done():
-            existing.cancel()
-        asyncio.create_task(_do_auto_pick(message.channel, retry_user, retry_pick_num, retry_excluded))
+        asyncio.create_task(_do_auto_pick(message.channel, retry_user, retry_pick_num, retry_excluded, retry_picks))
         return
 
     # ── Timer bot SBL_BLOCK / SBL_VETO — player back in the pool ──────────────
@@ -722,6 +861,11 @@ async def on_message(message: discord.Message):
         and not _has_sbl_intent(message.content)
     ):
         content_lower = message.content.lower()
+        if re.match(r'^1\s*\.', message.content.strip()):
+            _drafted_this_session.clear()
+            _availability_cache = None
+            _roster_cache = None
+            log.info("NEW DRAFT | pick #1 cleared previous draft tracking and sheet caches")
 
         # An auto-posted pick is announced under THIS bot's own account, so
         # message.author is us, not the GM it was picked for — _do_auto_pick_inner
@@ -746,27 +890,20 @@ async def on_message(message: discord.Message):
             picks = user_data.get("picks", [])
             if not picks:
                 continue
-            is_picker = message.author.id == int(uid)
+            team_emoji = _resolve_emoji_input(user_data.get("emoji", ""))
+            is_picker = (message.author.id == int(uid)
+                         or (_is_valid_emoji(team_emoji) and team_emoji in message.content))
+            # Any manual pick by the owner completes their turn, including
+            # a player not on their list or already seen by the live tracker.
+            if is_picker:
+                _data[uid]["picks"] = []
+                _save_data(_data)
+                log.info("ROUND COMPLETE | manual pick cleared list for uid=%s", uid)
+                continue
             for pick in list(picks):
                 name_lower = pick["player"].lower()
-                if name_lower not in _drafted_this_session and name_lower in content_lower:
+                if name_lower in content_lower:
                     _drafted_this_session.add(name_lower)
-                    if is_picker:
-                        log.info("PICK TRACKED | '%s' picked by owner — clearing their list", pick["player"])
-                        _data[uid]["picks"] = []
-                        _save_data(_data)
-                        try:
-                            user = bot.get_user(int(uid))
-                            if not user:
-                                user = await bot.fetch_user(int(uid))
-                            if user:
-                                await user.send(
-                                    f"✅ Detected your manual pick of **{pick['player']}**. "
-                                    f"Your pick list has been cleared for the next round."
-                                )
-                        except Exception:
-                            pass
-                        break
                     pos = picks.index(pick) + 1
                     picks.remove(pick)
                     _save_data(_data)
@@ -789,7 +926,13 @@ async def on_message(message: discord.Message):
         return
 
     # ── First-time DM greeting ────────────────────────────────────────────────
-    if isinstance(message.channel, discord.DMChannel):
+    # Skipped for owner/admin commands run against the system itself (not a
+    # genuine first pick-list interaction) -- !alllists in particular is run
+    # by the commissioner checking everyone's lists, not a new drafter's
+    # first message, so it shouldn't trigger (or consume) the greeting.
+    _first_word = message.content.strip().split()[0].lower() if message.content.strip() else ''
+    _is_admin_command = _first_word.lstrip('!') in ('alllists',)
+    if isinstance(message.channel, discord.DMChannel) and not _is_admin_command:
         uid = str(message.author.id)
         if uid not in _data or not _data[uid].get("greeted"):
             _ensure_user(uid)
@@ -904,6 +1047,7 @@ async def cmd_setlistfor(ctx, target: str, *, text: str = ""):
     await ctx.send(msg)
 
     # Check availability and warn about taken players
+    await _confirm_team_setup(ctx, uid)
     async def _check_and_warn():
         try:
             availability = await asyncio.get_event_loop().run_in_executor(None, _fetch_availability)
@@ -967,6 +1111,9 @@ async def cmd_setemoji(ctx, member_or_emoji: str = None, *, rest: str = ""):
         return
 
     resolved = _resolve_emoji_input(emoji_str)
+    if not _is_valid_emoji(resolved):
+        await ctx.send("❌ That emoji hasn't resolved. Select the actual team emoji from Discord's emoji picker in the server, then run `!setemoji` again.")
+        return
     warning = ""
     if resolved == emoji_str and re.match(r'^:[A-Za-z0-9_~]+:$', emoji_str):
         warning = (
@@ -1014,22 +1161,10 @@ async def cmd_checkplayer(ctx, *, player_name: str):
     """!checkplayer Player Name — debug: show what the sheet says about a player."""
     await ctx.send(f"🔍 Checking sheet for **{player_name}**…")
     try:
-        service = _build_sheets_service()
-        result  = service.spreadsheets().get(
-            spreadsheetId=SPREADSHEET_ID,
-            ranges=[f"'{PLAYERS_SHEET_NAME}'!A:D"],
-            includeGridData=True,
-        ).execute()
-
-        sheets = result.get("sheets", [])
-        if not sheets:
-            await ctx.send("❌ No sheets returned — check `PLAYERS_SHEET_NAME` in config.")
-            return
-
         name_lower = player_name.lower().strip()
         matches    = []
 
-        for row_idx, row in enumerate(sheets[0].get("data", [{}])[0].get("rowData", [])):
+        for row_num, row in _iter_player_rows():
             for col_idx, cell in enumerate(row.get("values", [])):
                 text = (cell.get("formattedValue") or "").strip()
                 if name_lower in text.lower() or text.lower() in name_lower:
@@ -1040,7 +1175,7 @@ async def cmd_checkplayer(ctx, *, player_name: str):
                     g     = bg.get("green", 1.0)
                     b     = bg.get("blue",  1.0)
                     matches.append(
-                        f"Row {row_idx+1} Col {col_idx+1}: `{text}` | "
+                        f"Row {row_num} Col {col_idx+1}: `{text}` | "
                         f"RGB({r:.2f}, {g:.2f}, {b:.2f}) | "
                         f"{'❌ TAKEN' if taken else '✅ Available'}"
                     )
@@ -1071,7 +1206,7 @@ def _extract_lotto_lines(text: str):
     """
     for line in text.splitlines():
         # Must start with a pick number
-        m = re.match(r'^\s*\d+\.\s*(.*?)\s*-\s*((?:<@!?\d+>\s*)+)$', line.strip())
+        m = re.match(r'^\s*\d+\.\s*(.*?)\s*[-–—]\s*(.+)$', line.strip())
         if not m:
             continue
         before_dash = m.group(1)
@@ -1155,6 +1290,7 @@ async def cmd_alllists(ctx):
     if not in_dm and not ctx.author.guild_permissions.administrator:
         return
 
+    await _repair_team_emojis()
     if not _data:
         await ctx.send("No drafters have registered a pick list yet.")
         return
@@ -1194,7 +1330,7 @@ async def cmd_alllists(ctx):
             _save_data(_data)
         emoji_display = raw_emoji if _is_valid_emoji(raw_emoji) else "(not set)"
         status_icon   = "▶️" if enabled else "⏸️"
-        status_text   = "Active" if enabled else "Paused"
+        status_text   = ("Active" if _is_valid_emoji(raw_emoji) else "Needs team emoji") if enabled else "Paused"
         pick_count    = len(picks)
 
         if not picks:
@@ -1232,6 +1368,11 @@ async def cmd_setup(ctx, *, emoji_str: str = ""):
     """!setup <:emoji:id> — register your team emoji (works in server or DM)."""
     raw = emoji_str.strip()
     resolved = _resolve_emoji_input(raw)
+    if not _is_valid_emoji(resolved):
+        resolved = await _ensure_team_emoji(str(ctx.author.id))
+        if not resolved:
+            await ctx.send("⚠️ I couldn't find your team in the current lotto. Run `!setup` in the server and select the actual team emoji from Discord's emoji picker.")
+            return
     warning = ""
     if raw and resolved == raw and re.match(r'^:[A-Za-z0-9_~]+:$', raw):
         warning = (
@@ -1246,7 +1387,7 @@ async def cmd_setup(ctx, *, emoji_str: str = ""):
     _save_data(_data)
     display = resolved or "(none)"
     await ctx.send(
-        f"✅ Team emoji set to `{display}`.{warning}\n"
+        f"✅ Team emoji set to {display}.{warning}\n"
         f"Now add your picks with `!setlist` or `!addpick`."
     )
 
@@ -1294,6 +1435,7 @@ async def cmd_setlist(ctx, *, text: str = ""):
     await ctx.send(msg)
 
     # Check availability in the background and send warnings as a follow-up
+    await _confirm_team_setup(ctx, uid)
     async def _check_and_warn():
         try:
             availability = await asyncio.get_event_loop().run_in_executor(None, _fetch_availability)
@@ -1346,6 +1488,7 @@ async def cmd_addpick(ctx, *, text: str):
         )
     else:
         await ctx.send(f"✅ Added at position **#{pos}**: {_format_pick(pick)}")
+    await _confirm_team_setup(ctx, uid)
 
 
 @bot.command(name="insertpick")
@@ -1371,6 +1514,7 @@ async def cmd_insertpick(ctx, position: int, *, text: str):
     _save_data(_data)
 
     await ctx.send(f"✅ Inserted at position **#{pos}**: {_format_pick(pick)}")
+    await _confirm_team_setup(ctx, uid)
 
 
 @bot.command(name="removepick")
@@ -1440,7 +1584,7 @@ async def cmd_mylist(ctx):
     uid       = str(ctx.author.id)
     user_data = _data.get(uid, {})
     picks     = user_data.get("picks", [])
-    raw_emoji = (user_data.get("emoji") or "").strip()
+    raw_emoji = await _ensure_team_emoji(uid)
     raw_emoji = _resolve_emoji_input(raw_emoji)
     if raw_emoji != user_data.get("emoji", ""):
         _ensure_user(uid)
@@ -1450,7 +1594,7 @@ async def cmd_mylist(ctx):
 
     emoji_display = raw_emoji if _is_valid_emoji(raw_emoji) else "(not set — use `!setup <:emoji:id>` in the server)"
     status_icon   = "▶️" if enabled else "⏸️"
-    status_text   = "Active" if enabled else "Paused"
+    status_text   = ("Active" if _is_valid_emoji(raw_emoji) else "Needs team emoji") if enabled else "Paused"
 
     embed = discord.Embed(
         title=f"{status_icon} Your Pick List",
@@ -1650,6 +1794,7 @@ async def cmd_help(ctx):
             "Each pick can include:\n"
             "• **Player name** (required): `LeBron James`\n"
             "• **Year** (optional): `'23` or `2022-23`\n"
+            "  Omit it to use the player's recorded default year, when available.\n"
             "• **Price** (optional): `$5`\n\n"
             "Example: `LeBron James '23 $5`"
         ),

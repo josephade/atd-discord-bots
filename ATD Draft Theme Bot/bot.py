@@ -22,7 +22,7 @@ import lotto
 import roster
 import sheets
 import themes
-from config import DISCORD_TOKEN, OWNER_ID, ROSTER_SPREADSHEET_ID, ROSTER_TAB_NAME
+from config import DISCORD_TOKEN, OWNER_ID, OWNER_REPORT_CHANNEL_ID, ROSTER_SPREADSHEET_ID, ROSTER_TAB_NAME
 from emoji_map import EMOJI_TEAM_MAP
 from themes.base import DraftContext
 
@@ -244,6 +244,8 @@ async def _attempt_auto_submit(draft: dict, drafter: dict) -> tuple[bool, str]:
     theme = themes.get_theme(draft['theme'])
     draft_ctx = DraftContext(bot, draft['id'])
     picks = db.get_picks(draft['id'], drafter['id'])
+    if not theme.requires_roster_submission:
+        return theme.roster_ready(draft_ctx, drafter), 'Completed picks are the final roster; no submission needed.'
     price_lookup, budget = theme.roster_requirements(draft_ctx)
 
     as_arranged = theme.current_roster_list(draft_ctx, drafter)
@@ -276,6 +278,12 @@ async def _resolve_roster_deadline(draft_id: int):
         return
     theme = themes.get_theme(draft['theme'])
     draft_ctx = DraftContext(bot, draft_id)
+    if not theme.requires_roster_submission:
+        state = draft_ctx.state
+        state.pop('roster_deadline', None)
+        draft_ctx.save_state(state)
+        _roster_timers.pop(draft_id, None)
+        return
 
     seen_keys: set[str] = set()
     auto_submitted: list[str] = []
@@ -285,7 +293,8 @@ async def _resolve_roster_deadline(draft_id: int):
         if key in seen_keys or d['roster_submitted']:
             continue
         seen_keys.add(key)
-        label = theme.team_label(draft_ctx, d)
+        label = (f"Anonymous team {len(seen_keys)}" if draft['theme'] == 'partner_draft'
+                 else theme.team_label(draft_ctx, d))
         ok, detail = await _attempt_auto_submit(draft, d)
         if ok:
             auto_submitted.append(f"{label} ({detail})")
@@ -451,6 +460,29 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
     """!theme <list|drafts|create|adddrafter|settings|start|status|pause|resume|reveal|teams|lists|history|setlist|makeup|extend|waiver|available|chances|nudge|closeround> ..."""
     action = action.lower()
 
+    if action == 'timer':
+        if ctx.author.id != OWNER_ID:
+            return
+        parts = rest.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await ctx.send('Usage: `!theme timer <draft ID> <Timer Bot channel ID>` before starting the draft.')
+            return
+        draft = _resolve_draft(parts[0])
+        if not draft or draft['theme'] not in ('anon_budget_draft', 'partner_draft'):
+            await ctx.send('Choose an Anonymous Budget or Partner draft.')
+            return
+        if draft['status'] != 'setup':
+            await ctx.send('Link the timer before starting the draft.')
+            return
+        channel = bot.get_channel(int(parts[1]))
+        if not channel or not ctx.guild or channel.guild.id != draft['guild_id']:
+            await ctx.send('Choose a draft channel in the same server that this bot can access.')
+            return
+        db.update_draft_state(draft['id'], {'timer_channel_id': channel.id})
+        mode = 'partner' if draft['theme'] == 'partner_draft' else 'anon'
+        await ctx.send(f'Timer channel linked. In <#{channel.id}>, run `!timermode {mode}` then `!timerlink {draft["id"]}` before starting Theme Bot.')
+        return
+
     if action == 'list':
         lines = [f"• `{key}` — {t.display_name}" for key, t in themes.REGISTRY.items()]
         await ctx.send('**Available themes:**\n' + '\n'.join(lines))
@@ -549,8 +581,11 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
         ]
         for d in drafters:
             picks = len(db.get_picks(draft['id'], d['id']))
-            submitted = '✅' if d['roster_submitted'] else '—'
-            lines.append(f"  • {d['display_name']} — {picks} picks — roster submitted: {submitted}")
+            if themes.get_theme(draft['theme']).requires_roster_submission:
+                submitted = '✅' if d['roster_submitted'] else '—'
+                lines.append(f"  • {d['display_name']} — {picks} picks — roster submitted: {submitted}")
+            else:
+                lines.append(f"  • {d['display_name']} — {picks} picks — no roster submission needed")
         await ctx.send('\n'.join(lines))
         return
 
@@ -571,6 +606,9 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
         theme = themes.get_theme(draft['theme'])
         draft_ctx = DraftContext(bot, draft['id'])
         label = theme.team_label(draft_ctx, drafter)
+        if draft['theme'] == 'partner_draft' and draft['status'] != 'complete':
+            role = drafter['state'].get('pair_role', '?').upper()
+            label = f'Anonymous team — Partner {role}'
         div_idx = drafter.get('division')
         div_part = f" in {theme.division_label(draft_ctx, div_idx)}" if div_idx is not None else ''
         delivered = await draft_ctx.dm(
@@ -801,6 +839,9 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
 
         theme = themes.get_theme(draft['theme'])
         draft_ctx = DraftContext(bot, draft['id'])
+        if not theme.requires_roster_submission:
+            await ctx.send('No roster deadline is needed for this format. Completed picks are the final rosters.')
+            return
         if not theme.is_pick_phase_complete(draft_ctx):
             await ctx.send("⚠️ Picking isn't finished yet — you can still set a deadline, but nobody can `!submitroster` until everyone's done picking.")
 
@@ -852,17 +893,21 @@ async def cmd_theme(ctx, action: str = '', *, rest: str = ''):
 # ── Anonymous Draft / Anonymous Budget Draft admin commands ─────────────────────
 @bot.command(name='setteams')
 async def cmd_setteams(ctx, draft_ref: str = '', *, text: str = ''):
-    """!setteams <draft_id_or_name> — DM only. Paste one team per line after
+    """!setteams <draft_id_or_name> — owner DM/private channel. One team per line after
     the draft id: `1. 🦅 - @GM1 @GM2`. Carries the secret logo->GM mapping,
-    so this must be sent as a DM, never in a server channel."""
-    if not _dm_only(ctx):
-        await ctx.send('This carries secret GM mappings — DM it to me directly, not in a server channel.')
-        return
+    so server use is restricted to the configured private owner channel."""
     if ctx.author.id != OWNER_ID:
         return
+    if ctx.guild:
+        if not OWNER_REPORT_CHANNEL_ID or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+            await ctx.send('Use your configured private owner channel or DM me to set secret teams.')
+            return
+        if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+            await ctx.send('Hide this channel from @everyone before setting secret teams.')
+            return
     if not draft_ref or not text.strip():
         await ctx.send(
-            'Usage (DM only):\n```\n!setteams <draft_id_or_name>\n1. 🦅 - @GM1\n2. 🐻 - @GM2 @GM3\n```'
+            'Usage (private owner channel or DM):\n```\n!setteams <draft_id_or_name>\n1. 🦅 - @GM1\n2. 🐻 - @GM2 @GM3\n```'
         )
         return
     draft = _resolve_draft(draft_ref)
@@ -937,7 +982,7 @@ async def _reveal_draft(ctx, arg: str):
             continue
         seen_keys.add(key)
         label = theme.team_label(draft_ctx, d)
-        if not d['roster_submitted']:
+        if not theme.roster_ready(draft_ctx, d):
             missing.append(label)
             continue
 
@@ -962,7 +1007,10 @@ async def _reveal_draft(ctx, arg: str):
         team_divisions[final_label] = div_idx
 
     if missing:
-        await ctx.send('❌ Waiting on roster submissions from: ' + ', '.join(missing))
+        if draft['theme'] == 'partner_draft':
+            await ctx.send(f'Waiting on roster submissions from {len(missing)} anonymous teams.')
+        else:
+            await ctx.send('❌ Waiting on roster submissions from: ' + ', '.join(missing))
         return
     if not teams:
         await ctx.send('❌ No submitted rosters to reveal yet.')
@@ -981,7 +1029,8 @@ async def _reveal_draft(ctx, arg: str):
     db.set_draft_status(draft['id'], 'complete')
     await ctx.send(f"🎉 **Draft revealed!** Results written to tab **{tab_name}**.")
     for d in db.list_drafters(draft['id']):
-        roster_list = d['state'].get('final_roster')
+        roster_list = (theme.final_roster_rows(draft_ctx, d) if not theme.requires_roster_submission
+                       else d['state'].get('final_roster'))
         if roster_list:
             await draft_ctx.dm(d['user_id'], f"🏁 The draft has been revealed! Your final roster:\n" + '\n'.join(f'• {p}' for p in roster_list))
 
@@ -1427,10 +1476,10 @@ def _team_roster_embed(theme, draft_ctx: DraftContext, d: dict) -> discord.Embed
         if (gm := db.get_drafter(lid))
     ) or d['display_name']
 
-    if not d['roster_submitted']:
+    if not theme.roster_ready(draft_ctx, d):
         return discord.Embed(
             title=f"❌ {label}",
-            description=f"**GM:** {gm_names}\n\n_Not submitted yet._",
+            description=f"**GM:** {gm_names}\n\n_" + ('Not submitted yet.' if theme.requires_roster_submission else 'Picking is not finished yet.') + '_',
             color=discord.Color.red(),
         )
 
@@ -1491,11 +1540,12 @@ async def cmd_submittedrosters(ctx):
         await ctx.send('No drafters yet.')
         return
 
-    submitted_count = sum(1 for d in team_drafters if d['roster_submitted'])
+    submitted_count = sum(1 for d in team_drafters if theme.roster_ready(draft_ctx, d))
     pages = []
     for i, d in enumerate(team_drafters):
         embed = _team_roster_embed(theme, draft_ctx, d)
-        embed.set_footer(text=f"{draft['name']} — Team {i + 1}/{len(team_drafters)} — {submitted_count}/{len(team_drafters)} submitted")
+        status_label = 'submitted' if theme.requires_roster_submission else 'ready'
+        embed.set_footer(text=f"{draft['name']} — Team {i + 1}/{len(team_drafters)} — {submitted_count}/{len(team_drafters)} {status_label}")
         pages.append(embed)
 
     view = _RosterPager(pages, ctx.author.id)
@@ -1832,11 +1882,14 @@ async def cmd_add(ctx, *, player: str = ''):
 @bot.command(name='allteams')
 async def cmd_allteams(ctx, *, arg: str = ''):
     """!allteams <draft_id_or_name> — owner-only: every team's picks so far,
-    bypassing the normal hidden-until-reveal rule. DM only."""
+    bypassing the normal hidden-until-reveal rule. Private owner channel only."""
     if ctx.author.id != OWNER_ID:
         return
-    if not _dm_only(ctx):
-        await ctx.send('Please DM this command to me directly.')
+    if not ctx.guild or not OWNER_REPORT_CHANNEL_ID or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        await ctx.send('This command is only available in your configured private owner channel.')
+        return
+    if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        await ctx.send('Hide this channel from @everyone before using the owner report.')
         return
     if not arg:
         await ctx.send('Usage: `!allteams <draft_id_or_name>`')
@@ -1950,6 +2003,10 @@ async def cmd_submitroster(ctx, *, text: str = ''):
     theme = themes.get_theme(draft['theme'])
     draft_ctx = DraftContext(bot, draft['id'])
 
+    if not theme.requires_roster_submission:
+        await ctx.send('No roster submission is needed for this format. Your completed picks are your final roster.')
+        return
+
     if not theme.is_pick_phase_complete(draft_ctx, drafter):
         scope = 'your division' if drafter.get('division') is not None else 'everyone'
         await ctx.send(f"Picking isn't finished yet — hang tight until {scope}'s done.")
@@ -1984,11 +2041,14 @@ async def cmd_submitroster(ctx, *, text: str = ''):
         channel = bot.get_channel(draft['admin_channel_id'])
         if channel:
             fresh_drafter = db.get_drafter(drafter['id'])
-            embed = _team_roster_embed(theme, draft_ctx, fresh_drafter)
             team_drafters = _dedup_teams(theme, draft_ctx, draft['id'])
             submitted_count = sum(1 for d in team_drafters if d['roster_submitted'])
-            embed.set_footer(text=f"{draft['name']} — {submitted_count}/{len(team_drafters)} teams submitted")
-            await channel.send('📋 New roster submitted:', embed=embed)
+            if draft['theme'] == 'partner_draft':
+                await channel.send(f"Roster accepted — {submitted_count}/{len(team_drafters)} anonymous teams submitted.")
+            else:
+                embed = _team_roster_embed(theme, draft_ctx, fresh_drafter)
+                embed.set_footer(text=f"{draft['name']} — {submitted_count}/{len(team_drafters)} teams submitted")
+                await channel.send('📋 New roster submitted:', embed=embed)
     await theme.on_roster_submitted(draft_ctx, drafter)
 
 
@@ -2027,8 +2087,9 @@ async def cmd_help(ctx):
             '`!swap <Player A> / <Player B>` — swap two players\' roster slots (Pack Draft)\n'
             '`!swap <Player> / <slot>` — move a player to a specific slot, 1-10 (Pack Draft)\n'
             '`!addyear <Player> <Year>` — set a drafted player\'s year (Pack Draft)\n'
-            '`!submitroster P1, P2, ...` — submit your final roster for validation\n'
-            '`!submitroster` (no arguments) — submit your current arrangement, once every slot is filled'
+            '`!submitroster P1, P2, ...` — submit your final roster in formats requiring submission\n'
+            '`!submitroster` (no arguments) — submit your current arrangement, once every slot is filled\n'
+            'Anonymous Budget and Partner Draft use completed picks automatically; no roster submission.'
         ),
         inline=False,
     )
@@ -2062,7 +2123,7 @@ async def cmd_help(ctx):
         embed.add_field(
             name='Anonymous Draft moderator commands',
             value=(
-                '`!setteams <id>` — **DM only**, carries the secret logo→GM mapping\n'
+                '`!setteams <id>` — **owner DM/private owner channel**, secret logo→GM mapping\n'
                 '`!theme start <id>` — opens pick #1; turn order runs itself from here\n'
                 '`!anonoverride <id> <pick#> <team#/logo>` — safety valve to force-open a pick\n'
                 'Picks post automatically to the results channel as each one finalizes.'
@@ -2072,7 +2133,7 @@ async def cmd_help(ctx):
         embed.add_field(
             name='Nation Flux moderator commands',
             value=(
-                '`!setteams <id>` — **DM only**, `EARTH`/`FIRE`/`WATER`/`AIR` headers, 8 teams each\n'
+                '`!setteams <id>` — **owner DM/private owner channel**, `EARTH`/`FIRE`/`WATER`/`AIR` headers, 8 teams each\n'
                 '`!theme start <id>` — opens pick #1 in all 4 nations at once\n'
                 'Each nation votes to activate its own one-time power with `!activate` / `!airreact`; '
                 'prices are read live from the Flux Bot sheet, never typed by a GM.'
@@ -2082,7 +2143,7 @@ async def cmd_help(ctx):
         embed.add_field(
             name='Auto Draft commands',
             value=(
-                '`!setteams <id>` — DM only; logos must match emoji_map.py; order sets the starting waiver '
+                '`!setteams <id>` — owner DM/private owner channel; logos must match emoji_map.py; order sets the starting waiver '
                 'order\n'
                 '`!setwaiver <id>` — admin override of the waiver order, same `1. <logo> - @GM` format, '
                 'anytime\n'
@@ -2156,6 +2217,13 @@ async def cmd_help(ctx):
 @bot.event
 async def on_ready():
     log.info('ATD Draft Theme Bot ready — %s', bot.user)
+    import timer_bridge
+    await timer_bridge.start(bot)
+    import flux_gate
+    try:
+        await flux_gate.recover(bot)
+    except Exception:
+        log.exception('Could not recover Flux completion messages; round holds remain in place')
     resumed_total = 0
     for draft in db.list_drafts(status='active'):
         theme = themes.get_theme(draft['theme'])
@@ -2234,6 +2302,8 @@ async def _handle_dm_shortcut(message: discord.Message):
 
 @bot.event
 async def on_message(message: discord.Message):
+    import flux_gate
+    await flux_gate.observe(bot, message)
     await bot.process_commands(message)
 
     if not message.author.bot:

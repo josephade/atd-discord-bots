@@ -1,6 +1,9 @@
 app = "atd-team-sheet-bot"
 primary_region = "ewr"
 
+[deploy]
+  strategy = "immediate"
+
 [build]
 
 [mounts]

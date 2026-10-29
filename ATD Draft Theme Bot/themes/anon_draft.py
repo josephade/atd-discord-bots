@@ -23,6 +23,7 @@
 # made, unlike Pack Draft/Partner Draft's hidden-until-reveal model.
 
 import logging
+import math
 import re
 import time
 
@@ -195,6 +196,9 @@ class AnonDraftTheme(Theme):
         state = ctx.state
         team = state['teams'][team_idx]
         settings = self._settings(ctx)
+        from flux_gate import hold_for_round
+        if hold_for_round(ctx, state, (pick_number - 1) // len(state['teams']) + 1):
+            return
         price_hint = ' `<price>`' if settings['require_price'] else ''
 
         if not force and pick_number <= state.get('last_finalized_pick_number', 0):
@@ -228,6 +232,7 @@ class AnonDraftTheme(Theme):
             await ctx.dm(
                 drafter['user_id'],
                 f"🏀 **Pick #{pick_number} — you're on the clock!**\n"
+                f"Your team: {team['logo']}\n"
                 f"Deadline: <t:{deadline_ts}:R>\n"
                 f"DM me your pick: `!pick <player> <year>`{price_hint}",
             )
@@ -241,6 +246,10 @@ class AnonDraftTheme(Theme):
         deadline = time.time() + minutes * 60
         state['teams'][team_idx]['timer_deadline'] = deadline
         ctx.save_state(state)
+
+        if state.get('timer_channel_id'):
+            _timer.cancel((ctx.draft_id, team_idx))
+            return
 
         async def _on_timeout():
             # Re-fetch fresh rather than capturing pick_number now — an
@@ -267,9 +276,13 @@ class AnonDraftTheme(Theme):
         next_pick_number = pick_number + 1
         if next_pick_number > total_picks:
             state['live_pick_number'] = None
+            state['scheduled_turns_finished'] = True
             ctx.save_state(state)
-            db.set_draft_status(ctx.draft_id, 'complete')
-            await ctx.announce(f"🏁 **Anonymous Draft complete!** All {total_picks} picks made.")
+            if self.is_pick_phase_complete(ctx):
+                db.set_draft_status(ctx.draft_id, 'complete')
+                await ctx.announce(f"🏁 **Anonymous Draft complete!** All {total_picks} picks made.")
+            else:
+                await ctx.announce('Scheduled turns finished. Outstanding makeup picks are still open.')
             return
         state['live_pick_number'] = next_pick_number
         ctx.save_state(state)
@@ -310,6 +323,8 @@ class AnonDraftTheme(Theme):
     # lapses.
     async def on_pick(self, ctx: DraftContext, drafter: dict, text: str) -> str:
         async with draft_lock(ctx.draft_id):
+            if ctx.state.get('flux_wait'):
+                return 'The round is finished. Waiting for a commissioner to complete Flux before accepting picks.'
             team_idx = drafter['state'].get('team_index')
             if team_idx is None:
                 return "You're not assigned to a team yet."
@@ -478,11 +493,15 @@ class AnonDraftTheme(Theme):
 
     async def _resolve_on_timeout(self, ctx: DraftContext, team_idx: int, pick_number: int) -> None:
         async with draft_lock(ctx.draft_id):
+            if ctx.draft['status'] != 'active':
+                return
             state = ctx.state
             team = state['teams'][team_idx]
             entry = next((p for p in team['open_picks'] if p['pick_number'] == pick_number), None)
-            if entry is None:
+            if entry is None or entry.get('skipped'):
                 return  # already resolved by an in-time submission
+            if state.get('timer_channel_id') and (team.get('timer_deadline') is None or team['timer_deadline'] > time.time()):
+                return
 
             if team.get('timer_pick_number') == pick_number:
                 team['timer_pick_number'] = None
@@ -540,13 +559,19 @@ class AnonDraftTheme(Theme):
         price_part = f" ${price:.0f}" if price is not None else ''
         year_part = f" '{_display_year(year)}" if year else ''
 
-        results_channel = ctx.bot.get_channel(_RESULTS_CHANNEL_ID)
+        results_channel_id = ctx.state.get('timer_channel_id') or _RESULTS_CHANNEL_ID
+        results_channel = ctx.bot.get_channel(results_channel_id)
         if results_channel:
-            await results_channel.send(f"{team['logo']} picks **{player}**{year_part}{price_part}")
+            sent = await results_channel.send(f"{pick_number}. {team['logo']} {player}{year_part}{price_part}")
+            fresh = ctx.state
+            fresh['announcement_revision'] = fresh.get('announcement_revision', 0) + 1
+            if isinstance(getattr(sent, 'id', None), int):
+                fresh['last_pick_message_id'] = sent.id
+            ctx.save_state(fresh)
         else:
             log.warning(
                 "AnonDraft | results channel %s not found/not cached — pick announcement not posted",
-                _RESULTS_CHANNEL_ID,
+                results_channel_id,
             )
 
         for mid in team['member_ids']:
@@ -555,6 +580,9 @@ class AnonDraftTheme(Theme):
 
         if was_live:
             await self._advance_live_pick(ctx, pick_number)
+        elif ctx.state.get('scheduled_turns_finished') and self.is_pick_phase_complete(ctx):
+            db.set_draft_status(ctx.draft_id, 'complete')
+            await ctx.announce('All picks and makeup picks are finished. The draft is ready to reveal.')
 
     def _check_budget(self, ctx: DraftContext, team: dict, price: float | None) -> str | None:
         """Overridden by the Anon Budget subclass. Base format has no budget."""
@@ -670,6 +698,8 @@ class AnonDraftTheme(Theme):
                 return None
             try:
                 price = float(parts[-1].lstrip('$'))
+                if not math.isfinite(price) or price < 0:
+                    return None
             except ValueError:
                 return None
             parts = parts[:-1]
@@ -758,7 +788,14 @@ class AnonDraftTheme(Theme):
         of whether the auto-timeout survives a restart."""
         settings = self._settings(ctx)
         state = ctx.state
+        if state.get('flux_wait'):
+            return 0
         teams = state.get('teams', [])
+        live = state.get('live_pick_number')
+        if live and teams and not any(t.get('timer_pick_number') == live for t in teams):
+            idx = self._team_index_for_pick(live, len(teams), settings['rounds'])
+            await self._open_pick_for_team(ctx, idx, live)
+            return 1
         resumed = 0
         for team_idx, team in enumerate(teams):
             pick_number = team.get('timer_pick_number')
@@ -775,15 +812,15 @@ class AnonDraftTheme(Theme):
             # on starting the timer, are gone.
             deadline = team.get('timer_deadline')
             if deadline is None:
-                minutes = PickTimer.effective_minutes(
+                minutes = (team.pop('paused_timer_seconds') / 60 if 'paused_timer_seconds' in team else PickTimer.effective_minutes(
                     settings['base_timer_minutes'], settings['decay_minutes'], settings['floor_minutes'], team.get('skip_count', 0),
-                )
-                self._start_team_timer(ctx, ctx.state, team_idx, minutes)
+                ))
+                self._start_team_timer(ctx, state, team_idx, minutes)
                 resumed += 1
                 continue
 
             remaining_seconds = deadline - time.time()
-            if remaining_seconds <= 0:
+            if remaining_seconds <= 0 and not state.get('timer_channel_id'):
                 await self._resolve_on_timeout(ctx, team_idx, pick_number)
             else:
                 minutes = remaining_seconds / 60
@@ -800,6 +837,8 @@ class AnonDraftTheme(Theme):
         # instant the draft reopens at 10 AM.
         state = ctx.state
         for team_idx, team in enumerate(state.get('teams', [])):
+            if team.get('timer_deadline') is not None:
+                team['paused_timer_seconds'] = max(0, team['timer_deadline'] - time.time())
             team['timer_deadline'] = None
             _timer.cancel((ctx.draft_id, team_idx))
             _proposal_timer.cancel((ctx.draft_id, team_idx))

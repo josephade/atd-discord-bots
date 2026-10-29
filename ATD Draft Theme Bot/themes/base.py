@@ -122,6 +122,7 @@ class DraftContext:
 
 
 class Theme(ABC):
+    requires_roster_submission = True
     key: str = ''
     display_name: str = ''
 
@@ -243,7 +244,14 @@ class Theme(ABC):
         Default: a flat list of player names (one sheet column). Override
         to return a list of (player, year, price) tuples instead for a
         Player/Year/Price 3-column block per team — see write_draft_results."""
+        if not self.requires_roster_submission:
+            return db.get_picks(ctx.draft_id, drafter['id'])
         return list(drafter['state'].get('final_roster', []))
+
+    def roster_ready(self, ctx: DraftContext, drafter: dict) -> bool:
+        if not self.requires_roster_submission:
+            return self.is_pick_phase_complete(ctx, drafter)
+        return bool(drafter['roster_submitted'])
 
     async def on_roster_submitted(self, ctx: DraftContext, drafter: dict) -> None:
         """Called by `!submitroster` right after a roster is accepted, in

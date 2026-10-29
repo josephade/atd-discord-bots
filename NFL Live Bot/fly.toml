@@ -1,0 +1,22 @@
+app = "nfl-live-bot"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
+  PUPPETEER_NO_SANDBOX = "true"
+
+[processes]
+  app = "node bot.js"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[[restart]]
+  policy = "always"
+  processes = ["app"]

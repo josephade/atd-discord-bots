@@ -1,4 +1,6 @@
 # roster.py
+import math
+
 # Final-roster validation shared by every theme: a submitted roster must be
 # made entirely of players that drafter actually picked, and must fit the
 # budget (when the theme has one).
@@ -21,8 +23,12 @@ def validate_budget(submitted: list[str], price_lookup: dict[str, float],
     total = 0.0
     missing = []
     for player in submitted:
-        price = price_lookup.get(player) or price_lookup.get(player.lower())
-        if price is None:
+        price = price_lookup.get(player, price_lookup.get(player.lower()))
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            price = None
+        if price is None or not math.isfinite(price) or price < 0:
             missing.append(player)
         else:
             total += price
@@ -43,6 +49,12 @@ def validate_roster(picks: list[str], submitted: list[str], price_lookup: dict[s
         )
 
     if price_lookup is not None and budget is not None:
+        try:
+            budget = float(budget)
+        except (TypeError, ValueError):
+            return False, errors + ['Budget must be a finite, non-negative amount.']
+        if not math.isfinite(budget) or budget < 0:
+            return False, errors + ['Budget must be a finite, non-negative amount.']
         budget_ok, total, missing = validate_budget(submitted, price_lookup, budget)
         if missing:
             errors.append(f"No price on file for: {', '.join(missing)}")

@@ -1,10 +1,14 @@
 app = "atd-timer-bot"
 primary_region = "ewr"
 
+[deploy]
+  strategy = "immediate"
+
 [build]
 
 [env]
   STATE_DIR = "/data"
+  THEME_BRIDGE_URL = "http://atd-draft-theme-bot.internal:8081"
 
 [[mounts]]
   source      = "atd_timer_data"

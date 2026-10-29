@@ -38,6 +38,7 @@ EMOJI_TEAM_MAP = {
     "Celtics": "Boston Celtics",
     "Clippers": "Los Angeles Clippers",
     "CornellBigRed": "Cornell Big Red",
+    "Alabama": "Alabama Crimson Tide",
     "Duke": "Duke Blue Devils",
     "Gonzaga": "Gonzaga Bulldogs",
     "Kentucky": "Kentucky Wildcats",

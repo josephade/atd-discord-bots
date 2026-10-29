@@ -1,0 +1,20 @@
+{
+  "name": "nfl-live-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live NFL player stat cards for Discord",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node --test",
+    "preview": "node preview.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.6.1",
+    "puppeteer": "^25.15.0"
+  }
+}

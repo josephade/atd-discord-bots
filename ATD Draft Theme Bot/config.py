@@ -10,6 +10,8 @@ DISCORD_GUILD_ID   = int(os.getenv('DISCORD_GUILD_ID', '0')) or None
 # Discord user ID allowed to run owner-only commands (e.g. !allteams, which
 # bypasses reveal-gating to see every team's picks so far).
 OWNER_ID = int(os.getenv('OWNER_ID', '681833601830354944'))
+OWNER_REPORT_CHANNEL_ID = int(os.getenv('OWNER_REPORT_CHANNEL_ID', '0')) or None
+FLUX_BOT_ID = int(os.getenv('FLUX_BOT_ID', '1466803932310405181'))
 
 # Server channel where admin commands run and status/recap posts go.
 # DM commands work regardless of this — it's only used for admin-facing output.

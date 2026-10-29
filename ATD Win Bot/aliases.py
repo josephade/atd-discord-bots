@@ -3,6 +3,7 @@
 # Values are the canonical Win Sheet name (case preserved).
 # Add entries here whenever someone changes their name.
 DRAFTER_ALIASES = {
+    "silver":               "Silveryo",
     "lebron d james r":     "Dogboy",
     "lucario":              "Element",
     "ahoppppppp":           "ahop",

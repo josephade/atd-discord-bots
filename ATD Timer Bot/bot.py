@@ -44,6 +44,7 @@ from config import (ATD_CHAT_CHANNEL_ID, DISCORD_TOKEN,
                     TRUSTED_BOT_IDS)
 from draft import DraftState, HISTORY_FILE, build_snake_order, reroll_from_round, state_file, _state_dir
 from adp import ADP_MAP
+from theme_clock import ThemeClocks
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -136,6 +137,19 @@ def _get_session(channel_id: int) -> DraftSession:
     if channel_id not in _sessions:
         _sessions[channel_id] = DraftSession(channel_id)
     return _sessions[channel_id]
+
+
+_theme_clocks = ThemeClocks(bot, _sessions)
+
+
+@bot.check
+async def _anonymous_command_guard(ctx):
+    session = _sessions.get(ctx.channel.id)
+    if session and session.draft.mode in ('anon', 'partner'):
+        allowed = {'timermode', 'timerlink', 'timerunlink', 'timerstatus', 'timerhelp'}
+        if ctx.command.name not in allowed:
+            raise commands.CheckFailure('This anonymous draft is controlled by Theme Bot. Use its pause/resume and picking commands.')
+    return True
 
 
 # Channels that aren't a draft themselves, but are allowed to remotely view or
@@ -1857,12 +1871,16 @@ async def _try_process_pick(s: DraftSession, message: discord.Message, is_edit: 
 @bot.event
 async def on_ready():
     log.info("Bot online — logged in as %s (id: %s)", bot.user, bot.user.id)
+    _theme_clocks.start()
 
     for ch_id in _list_saved_channels():
         s = _get_session(ch_id)
         channel = bot.get_channel(ch_id)
         ch_name = f"#{channel.name}" if channel else str(ch_id)
         log.info("Restoring session | ch=%d (%s) | state=%s", ch_id, ch_name, s.draft.state)
+
+        if s.draft.mode in ('anon', 'partner'):
+            continue
 
         if not channel:
             log.warning("Channel %d not in cache — will restore timers when first used", ch_id)
@@ -1995,6 +2013,9 @@ async def _missed_pick_scanner():
 async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
+    if message.channel.id in _sessions and _sessions[message.channel.id].draft.mode in ('anon', 'partner'):
+        return
+
     _from_trusted_bot = message.author.id in TRUSTED_BOT_IDS
     if message.author.bot and not _from_trusted_bot:
         return
@@ -2106,16 +2127,85 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     await _try_process_pick(s, after, is_edit=True)
 
 
+def _command_usage_error(ctx, *, parameter=None, invalid=False):
+    """Render public command syntax instead of exposing Python parameter names."""
+    import inspect
+
+    command = ctx.command
+    prefix = ctx.clean_prefix or "!"
+    invoked = ctx.invoked_with or command.qualified_name
+    call = prefix + invoked
+    labels = {
+        "member": ("@GM", "a GM mention", "@GM"),
+        "pick_number": ("pick number", "a pick number", "74"),
+        "slot": ("slot number", "a lotto slot number", "2"),
+        "money": ("dollars", "a dollar amount", "20"),
+        "amount": ("amount", "an amount", "5"),
+        "count": ("count", "a count", "2"),
+        "picks": ("picks", "a pick count", "3"),
+        "last_pick": ("last pick number", "the last pick number", "74"),
+        "minutes": ("minutes", "a duration in minutes", "60"),
+        "pick_text": ("player and year", "a player name and season", "Devin Booker 2022-23"),
+        "player_name": ("player name", "a player name", "Devin Booker"),
+        "name": ("drafter name", "a drafter name", "Mondon"),
+        "teams_per_gm": ("teams per GM", "the number of teams per GM", "2"),
+    }
+    usage, example = [], []
+    for name, param in command.clean_params.items():
+        label, _, sample = labels.get(name, (name.replace("_", " "), "the required input", "text"))
+        annotation = getattr(param.annotation, "__name__", str(param.annotation))
+        if annotation in ("Member", "User", "discord.Member", "discord.User"):
+            label, sample = "@GM", "@GM"
+        elif annotation == "int" and sample == "text":
+            sample = "2"
+        optional = param.default is not inspect.Parameter.empty
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            usage.append(f"[{label} ...]")
+        else:
+            usage.append(f"[{label}]" if optional else (label if label == "@GM" else f"<{label}>"))
+        example.append(sample)
+
+    overrides = _COMMAND_INPUT_EXAMPLES.get(command.qualified_name)
+    syntax, sample = overrides if overrides else (" ".join(usage), " ".join(example))
+    if parameter is None:
+        reason = "Invalid command input." if invalid else "This command needs more information."
+    else:
+        annotation = getattr(parameter.annotation, "__name__", str(parameter.annotation))
+        if annotation in ("Member", "User", "discord.Member", "discord.User"):
+            reason = ("I couldn't find that GM. Mention them using @."
+                      if invalid else "Mention the GM you want to use this command for.")
+        elif invalid and annotation == "int":
+            label = labels.get(parameter.name, (parameter.name.replace("_", " "),))[0]
+            reason = f"Enter a whole number for {label}."
+        else:
+            label = labels.get(parameter.name, (None, "the required input"))[1]
+            reason = f"Invalid {label}." if invalid else f"Please provide {label}."
+    return f"❌ {reason}\nUsage: `{call}{' ' + syntax if syntax else ''}`\nExample: `{call}{' ' + sample if sample else ''}`"
+
+
+_COMMAND_INPUT_EXAMPLES = {
+    "nextpick": ("@GM", "@theflightmike"),
+    "timersettimer": ("[@GM] <minutes> (0 = clear)", "@GM 60"),
+    "timersbladjust": ("@GM <steals|blocks|locks> <amount>", "@GM steals 1"),
+    "timersblfor": ("@GM <block|steal|lock> <player name>", "@GM block Kevin McHale"),
+    "timerclearqueue": ("@GM", "@GM"),
+    "timerslotedit": ("<slot number> @GM [@co-GM]", "2 @GM"),
+    "timerpickedit": ("<pick number> @GM [@co-GM]", "74 @GM"),
+}
+
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-    if isinstance(error, commands.CheckFailure):
-        await ctx.send(str(error))
-    elif isinstance(error, commands.MissingPermissions):
+    if isinstance(error, commands.MissingPermissions):
         await ctx.send(f"❌ You need the **{COMMISSIONER_ROLE}** role or administrator permissions.")
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send(str(error))
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing: `{error.param.name}`")
+        await ctx.send(_command_usage_error(ctx, parameter=error.param))
+    elif isinstance(error, commands.UserInputError):
+        await ctx.send(_command_usage_error(ctx, parameter=getattr(ctx, "current_parameter", None), invalid=True))
     else:
         raise error
 
@@ -2541,7 +2631,49 @@ async def timerpickedit(ctx, pick_number: int, *, args: str = ""):
     await ctx.send(embed=embed)
 
 
-_VALID_MODES = ("snake", "roundless", "snake+sbl", "roundless+sbl", "snake+budget")
+_VALID_MODES = ("snake", "roundless", "snake+sbl", "roundless+sbl", "snake+budget", "anon", "partner")
+
+
+@bot.command(name='timerlink')
+@is_commissioner()
+async def timerlink(ctx, draft_id: int):
+    s = _get_session(ctx.channel.id)
+    if s.draft.mode not in ('anon', 'partner'):
+        await ctx.send('First select `!timermode anon` or `!timermode partner`.')
+        return
+    if s.draft.theme_draft_id and s.draft.theme_draft_id != draft_id:
+        await ctx.send('Unlink the existing draft before choosing another.')
+        return
+    previous = s.draft.theme_draft_id
+    s.draft.theme_draft_id = draft_id
+    try:
+        data = await _theme_clocks.fetch(s)
+    except Exception:
+        s.draft.theme_draft_id = previous
+        await ctx.send('Could not link. In Theme Bot first run `!theme timer <draft ID> <this channel ID>`, and check that anon/partner modes match.')
+        return
+    s.draft.save(s.channel_id)
+    _theme_clocks.start()
+    await ctx.send('Linked. Theme Bot controls the anonymous teams and order; Timer Bot handles their public clocks.')
+    await _theme_clocks.render(s, data)
+
+
+@bot.command(name='timerunlink')
+@is_commissioner()
+async def timerunlink(ctx):
+    s = _get_session(ctx.channel.id)
+    if s.draft.theme_draft_id:
+        try:
+            data = await _theme_clocks.fetch(s)
+        except Exception:
+            await ctx.send('Cannot verify the draft state. Restore the connection before unlinking.')
+            return
+        if data['status'] == 'active':
+            await ctx.send('Pause the draft in Theme Bot before unlinking its clock.')
+            return
+    s.draft.theme_draft_id = None
+    s.draft.save(s.channel_id)
+    await ctx.send('Timer display unlinked. Relink before resuming a Theme draft that uses external clocks.')
 
 
 def _sbl_note(s: "DraftSession") -> str:
@@ -2570,8 +2702,29 @@ async def timermode(ctx, mode: str = ""):
             "**roundless** — dynamic pick order based on money spent\n"
             "**snake+sbl** — snake order plus Steal/Block/Lock\n"
             "**roundless+sbl** — roundless order plus Steal/Block/Lock\n"
-            "**snake+budget** — snake order, no LeBron/MJ penalty, no round 3/6 flip"
+            "**snake+budget** — snake order, no LeBron/MJ penalty, no round 3/6 flip\n"
+            "**anon** — anonymous Budget Draft clocks, validated by Theme Bot\n"
+            "**partner** — anonymous Partner Draft clocks, order supplied by Theme Bot"
         )
+        return
+
+    if s.draft.theme_draft_id:
+        await ctx.send('Unlink this Theme draft with `!timerunlink` before changing modes.')
+        return
+
+    if mode in ('anon', 'partner'):
+        if s.draft.state not in ('idle', 'lotto', 'complete'):
+            await ctx.send('Finish or reset the current draft before selecting an anonymous mode.')
+            return
+        s.draft.mode = mode
+        s.draft.save(s.channel_id)
+        await ctx.send(f'**{mode} mode selected.** Logo-only clocks; no GM mentions or budget display. Link with `!timerlink <Theme draft ID>`. Theme Bot controls the order and pick validation.')
+        return
+
+    if s.draft.mode in ('anon', 'partner'):
+        s.draft.mode = mode
+        s.draft.save(s.channel_id)
+        await ctx.send(f'**{mode} mode selected.** Load a lotto before starting a regular draft.')
         return
 
     if s.draft.state == "idle":
@@ -2624,6 +2777,10 @@ async def timermode(ctx, mode: str = ""):
 async def timerstart(ctx, *label_parts):
     """!timerstart [snake|roundless|snake+sbl|roundless+sbl|snake+budget] [label] — begin the draft."""
     s = _get_session(ctx.channel.id)
+
+    if s.draft.mode in ('anon', 'partner') or (label_parts and label_parts[0].lower() in ('anon', 'partner')):
+        await ctx.send('Use `!timermode anon` or `!timermode partner`, then `!timerlink <Theme draft ID>`. Start the draft in Theme Bot.')
+        return
 
     if s.draft.state != "lotto":
         await ctx.send("❌ Load a lotto first with `!timerloadlotto` or `!timerlotto`.")
@@ -3140,6 +3297,18 @@ async def timerunskip(ctx):
 async def timerstatus(ctx):
     s = await _resolve_viewable_session(ctx)
     if s is None:
+        return
+
+    if s.draft.mode in ('anon', 'partner'):
+        if not s.draft.theme_draft_id:
+            await ctx.send('Anonymous mode selected. Waiting for `!timerlink <Theme draft ID>`.')
+            return
+        try:
+            data = await _theme_clocks.fetch(s)
+        except Exception:
+            await ctx.send('Theme Bot connection unavailable. No turns will be advanced locally.')
+            return
+        await ctx.send(embed=_theme_clocks.embed(data), allowed_mentions=discord.AllowedMentions.none())
         return
 
     if s.draft.state not in ("active", "paused", "window_paused", "complete"):
@@ -3731,8 +3900,8 @@ async def avgtimepicker(ctx, member: discord.Member = None):
 
 @bot.command(name="timersettimer")
 @is_commissioner()
-async def timersettimer(ctx, minutes: int):
-    """!timersettimer <minutes> — override the timer for all future picks. Use 0 to revert to defaults."""
+async def timersettimer(ctx, target: str, minutes: int = None):
+    """!timersettimer [@GM] <minutes> — set a draft or team base timer; 0 clears it."""
     s = await _resolve_command_session(ctx)
     if s is None:
         return
@@ -3741,19 +3910,64 @@ async def timersettimer(ctx, minutes: int):
         await ctx.send("❌ Draft is already complete. Use `!timereset` first.")
         return
 
-    if minutes == 0:
-        s.draft.timer_override = None
-        s.draft.save(s.channel_id)
-        await ctx.send("✅ Timer override cleared — back to default round timers.")
+    team_indices = None
+    if minutes is None:
+        try:
+            minutes = int(target)
+        except ValueError:
+            await ctx.send("Usage: `!timersettimer <minutes>` or `!timersettimer @GM <minutes>` (0 clears).")
+            return
+    else:
+        try:
+            member = await commands.MemberConverter().convert(ctx, target)
+        except commands.BadArgument:
+            await ctx.send("❌ GM not found. Use `!timersettimer @GM <minutes>`.")
+            return
+        team_indices = [i for i, team in enumerate(s.draft.teams) if member.id in team["user_ids"]]
+        if not team_indices:
+            await ctx.send(f"❌ {member.display_name} is not in this draft.")
+            return
+
+    if minutes < 0:
+        await ctx.send("❌ Minutes must be 0 or greater. Use 0 to clear an override.")
         return
 
-    s.draft.timer_override = minutes * 60
-    s.draft.save(s.channel_id)
-    await ctx.send(f"✅ Timer set to **{minutes} minutes** for all future picks.")
+    if team_indices is None:
+        s.draft.timer_override = minutes * 60 if minutes else None
+        message = (f"✅ Draft base timer set to **{minutes} minutes**. Individual GM overrides still apply."
+                   if minutes else "✅ Draft timer override cleared — back to default round timers. Individual GM overrides still apply.")
+    else:
+        for idx in team_indices:
+            if minutes:
+                s.draft.teams[idx]["timer_override"] = minutes * 60
+            else:
+                s.draft.teams[idx].pop("timer_override", None)
+        names = ", ".join(s.draft.teams[idx]["name"] for idx in team_indices)
+        message = (f"✅ **{names}**: base timer set to **{minutes} minutes** for this draft."
+                   if minutes else f"✅ **{names}**: individual timer cleared; using the draft/round timer.")
+        message += " Co-GMs share this timer. Skip penalties still apply."
 
-    if s.draft.state == "active":
-        await _delete_active_ping(s)
-        await _start_timer(s)
+    current_idx = s.draft.current_team_idx
+    affects_current = current_idx is not None and (
+        current_idx in team_indices if team_indices is not None
+        else s.draft.teams[current_idx].get("timer_override") is None
+    )
+    if affects_current and s.draft.state in ("active", "paused", "window_paused"):
+        # A commissioner timer change starts a fresh clock for the current pick.
+        # Preserve manual pauses and replace closed-window resume tasks safely.
+        s.draft.next_timer_override_secs = None
+        if s.draft.state == "paused":
+            s.draft.paused_remaining = s.draft.effective_timer(s.draft.round_number, current_idx)
+            s.draft.timer_start = None
+        else:
+            if s.window_task and not s.window_task.done():
+                s.window_task.cancel()
+            s.draft.paused_remaining = None
+            await _delete_active_ping(s)
+            await _start_timer(s)
+        message += " The current pick's clock has been reset; pauses are preserved."
+    s.draft.save(s.channel_id)
+    await ctx.send(message)
 
 
 # ── Roundless sync commands ───────────────────────────────────────────────────
@@ -4618,7 +4832,8 @@ async def timerhelp(ctx):
             "`!timersetup @u1 @u2 …` — Manually register participants\n"
             "`!timerlotto` — Randomly shuffle draft order\n"
             "`!timerorder 3 1 2 …` — Set draft order manually\n"
-            "`!timermode snake|roundless|snake+sbl|roundless+sbl|snake+budget` — Switch draft mode\n"
+            "`!timermode snake|roundless|snake+sbl|roundless+sbl|snake+budget|anon|partner` — Switch draft mode\n"
+            "`!timerlink <Theme draft ID>` / `!timerunlink` — Connect/disconnect anonymous clocks\n"
             "`!timercheckmode` — Show the current draft mode (read-only, anyone can run it)\n"
             "`!timerstart [mode] [label]` — Begin the draft (mode defaults to snake)\n"
         ),
@@ -4651,7 +4866,7 @@ async def timerhelp(ctx):
             "`!timersetpick <pick#> @GM` — Jump and force a specific GM next\n"
             "`!timerslotedit <slot#> @u1 @u2` — Replace a lotto slot's owners (by fixed roster position)\n"
             "`!timerpickedit <pick#> @u1 @u2` — Replace whoever's actually scheduled for a pick number (accounts for rerolls)\n"
-            "`!timersettimer <min>` — Override timer (0 = revert to defaults)\n"
+            "`!timersettimer [@GM] <min>` — Set draft/GM timer (0 = clear)\n"
             "`!timeraddowner <slot#> @user` — Add a co-GM to a specific lotto slot\n"
             "`!timerremoveowner <slot#> @user` — Remove a co-GM from a specific lotto slot\n"
             "`!timerproxy @user` / `!timerremoveproxy @user` — Add/remove a proxy picker\n"

@@ -1,0 +1,672 @@
+{
+  "source": "https://basketball.realgm.com/nba/draft/future_drafts/team",
+  "verifiedOn": "2026-10-29",
+  "coverage": [
+    2027,
+    2028,
+    2029,
+    2030
+  ],
+  "teams": {
+    "Atlanta Hawks": [
+      {
+        "year": 2027,
+        "first": "To SAN; Less favorable of MIL and NOP if either or both 5-30 (via NOP)",
+        "second": "31-55 Own; 56-60 to DAL"
+      },
+      {
+        "year": 2028,
+        "first": "More favorable of (i) ATL and (ii) less favorable of UTH and CLE then least favorable of all to CLE (via UTH swap for CLE; via ATL swap for CLE or UTH)",
+        "second": "To BRK (via GOS)"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "More favorable of ATL and MIA to CHA then other to OKC (via OKC); CLE"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To OKC; NYK (via POR)"
+      }
+    ],
+    "Boston Celtics": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "More favorable of BOS and ORL to UTH then other to PHX (via BOS to ORL to BOS to UTH; via ORL to CHA to PHX)"
+      },
+      {
+        "year": 2028,
+        "first": "1 Own; 2-30 Own or SAN (via SAN swap for BOS) [BOS then has a complex swap right with PHL]; LAC 17-30 or [by swap from BOS] more favorable of (i) less favorable of BOS and SAN and (ii) more favorable of PHL 1-8 and LAC 1-16 [or (ii) LAC 1-16 if PHL 9-30] then least favorable of all to PHL (via SAN swap for BOS; via BOS swap of BOS or SAN for PHL or LAC)",
+        "second": "31-45 to SAN if BOS 1 in 2028; 46-60 to NYK (via ORL to PHX); Most favorable of GOS, MIL and OKC (via GOS to POR to WAS to PHL; via MIL to BRK to HOU to OKC to PHL; via OKC to PHL)"
+      },
+      {
+        "year": 2029,
+        "first": "Most and least favorable of BOS, POR and MIL to POR; second most favorable to WAS (via BOS to POR; via MIL to POR; via POR to WAS)",
+        "second": "To OKC"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To BRK (via HOU); CHA 56-60; Most favorable of PHX, POR and WAS (via PHX and POR to WAS to PHL)"
+      }
+    ],
+    "Brooklyn Nets": [
+      {
+        "year": 2027,
+        "first": "Own or HOU (via HOU swap for BRK); NYK",
+        "second": "More favorable of BRK and DAL to WAS then other to MIL (via DAL to BRK to DET to MIL; via DET to WAS); LAL if LAL conveys 1st round pick to UTH in 2027"
+      },
+      {
+        "year": 2028,
+        "first": "If (i) PHL 9-30 is third most favorable and (ii) NYK is most or second most favorable of BRK, PHL 9-30, PHX and NYK, then most and third most favorable to BRK; or most / two most favorable to BRK in all other scenarios; least favorable of BRK, PHX and NYK to NYK if NYK and / or if PHL 9-30 is less favorable than BRK and PHX; or second most favorable of BRK, PHX and NYK to NYK in all other scenarios; more favorable of (i) WAS and (ii) least / less favorable of BRK, PHL 9-30 and PHX to WAS then least favorable of all to PHX [WAS can then swap with MIL] (via BRK swap of BRK or PHL for PHX; via BRK swap of BRK or PHX for NYK; via WAS swap for PHX, BRK or PHL)",
+        "second": "Own; ATL (via GOS); MEM (via PHX); PHL if PHL 1-8 in 2028"
+      },
+      {
+        "year": 2029,
+        "first": "Own; Least favorable of DAL, PHX and HOU (via DAL and PHX to BRK; via DAL or PHX to HOU; via HOU swap for DAL or PHX); NYK",
+        "second": "Own; DAL; GOS; MEM (via PHX)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "Own; BOS (via HOU); DAL (via BOS to MEM); LAL"
+      }
+    ],
+    "Charlotte Hornets": [
+      {
+        "year": 2027,
+        "first": "Own; DAL 3-30; MIA 15-30",
+        "second": "To OKC if SAN 1-16 in 2027 or to SAC if SAN 17-30 in 2027 (via NYK to ATL to SAN to SAC); MEM (via LAC to HOU); More favorable of POR and NOP (via POR)"
+      },
+      {
+        "year": 2028,
+        "first": "Own or swap for MIN; MIA if not already settled",
+        "second": "More favorable of CHA and LAC then other to DET [DET may convey to UTH] (via CHA to DAL); HOU; MIA if DAL does not convey 1st round pick to CHA in 2027 (via SAN to DAL); ORL"
+      },
+      {
+        "year": 2029,
+        "first": "Own; Least / less favorable of UTH, CLE and MIN 6-30 (via UTH to PHX)* *CHA will also have a complex swap right with MIN and PHX will receive a least favorable pick",
+        "second": "Own; More favorable of ATL and MIA (via OKC); DEN if DEN has conveyed a first potential 1st round pick to OKC by 2029; MIN if MIN conveys 1st round pick to UTH in 2029"
+      },
+      {
+        "year": 2030,
+        "first": "Own* *CHA will have a complex swap right with MIN, receiving MIN, SAN or DAL",
+        "second": "31-55 Own; 56-60 to BOS; More favorable of UTH and LAC (via UTH)"
+      }
+    ],
+    "Chicago Bulls": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "To OKC (via WAS to NOP to WAS to DAL); CLE (via ATL to MIN)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "Most favorable of CHI, IND and PHX; less favorable of (i) CHI and (ii) more favorable of IND and PHX to IND (via PHX to IND; via CHI swap for IND or PHX)"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "Own; Least favorable of DET, MIL and NYK (via MIL to BRK to DET; via NYK to DET; via SAC to CHI)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "Own or swap for IND"
+      }
+    ],
+    "Cleveland Cavaliers": [
+      {
+        "year": 2027,
+        "first": "Most favorable of CLE, MIN and UTH (cannot be 1-5) to MEM; second most favorable to UTH and least favorable to PHX (via UTH)",
+        "second": "To CHI (via ATL to MIN)"
+      },
+      {
+        "year": 2028,
+        "first": "Least favorable of CLE, UTH and ATL; less favorable of (i) more favorable of CLE and UTH and (ii) LAL to LAL then most favorable of all to UTH; more favorable of (i) ATL and (ii) less favorable of CLE and UTH to ATL (via UTH swap for CLE; via UTH swap of UTH or CLE for LAL; via ATL swap for CLE or UTH)",
+        "second": "To UTH"
+      },
+      {
+        "year": 2029,
+        "first": "Most / two most favorable of CLE, UTH and MIN 6-30 to UTH; least / less favorable to CHA (via CLE and MIN to UTH; via UTH to PHX to CHA; via CHA swap of CHA, CLE or UTH for MIN)* *CHA will also have a complex swap right with MIN and PHX will receive a least favorable pick",
+        "second": "To ATL"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To SAN"
+      }
+    ],
+    "Dallas Mavericks": [
+      {
+        "year": 2027,
+        "first": "1-2 Own; 3-30 to CHA",
+        "second": "More favorable of DAL and BRK to WAS then other to MIL (via DET to WAS; via DAL to BRK to DET to MIL); ATL 56-60"
+      },
+      {
+        "year": 2028,
+        "first": "Own or OKC (via OKC swap for DAL)",
+        "second": "To LAC (via SAC to IND)"
+      },
+      {
+        "year": 2029,
+        "first": "Two most favorable of DAL, HOU and PHX to HOU then other to BRK (via DAL and PHX to BRK; via DAL or PHX to HOU; via HOU swap for DAL or PHX); LAL",
+        "second": "To BRK"
+      },
+      {
+        "year": 2030,
+        "first": "Own or SAN (via SAN swap for DAL); less favorable of (i) MIN 2-30 and (ii) more favorable of DAL and SAN [or MIN if MIN not conveyable] to MIN then most / more favorable of all to SAN [MIN may convey to CHA] (via SAN swap for DAL; via SAN swap of SAN or DAL for MIN)",
+        "second": "To BRK (via BOS to MEM)"
+      }
+    ],
+    "Denver Nuggets": [
+      {
+        "year": 2027,
+        "first": "1-5 Own; two most / more favorable of DEN 6-30, OKC and LAC to OKC; more favorable of (i) least / less favorable of DEN 6-30, OKC and LAC and (ii) TOR to LAC then least favorable of all to TOR (via OKC swap of OKC or DEN for LAC; via LAC swap of DEN, OKC or LAC for TOR)",
+        "second": "To UTH (via CLE to CHI to BOS)"
+      },
+      {
+        "year": 2028,
+        "first": "1-5 Own; 6-30 to OKC if not already settled",
+        "second": "31-33 Own; 34-60 to WAS (via SAN to SAC); MIN (via SAN)"
+      },
+      {
+        "year": 2029,
+        "first": "1-5 Own; 6-30 to OKC if not already settled; or 1-5 Own; 6-30 to OKC if DEN conveys a first potential 1st round pick to OKC in 2027",
+        "second": "To CHA if DEN has conveyed a first potential 1st round pick to OKC by 2029 or to OKC if DEN has not conveyed a first potential 1st round pick to OKC by 2029"
+      },
+      {
+        "year": 2030,
+        "first": "1-5 Own; 6-30 to OKC if not already settled and if DEN has conveyed a first potential 1st round pick to OKC by 2028",
+        "second": "Most favorable of DEN, HOU and MIA to MEM; two least favorable to OKC (via DEN to CHA to OKC or DEN to OKC; via OKC to MEM)"
+      }
+    ],
+    "Detroit Pistons": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "Own"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "31-55 Own*; 56-60 to PHL; Less favorable of CHA and LAC (via CHA to DAL)*; MIA if DAL conveys 1st round pick to CHA in 2027 (via SAN to DAL)*; NYK* *Least / less favorable of these to UTH"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "Two most favorable of DET, MIL and NYK then other to CHI (via MIL to BRK to DET; via NYK to DET; via DET to MEM; via MEM to DET; via SAC to CHI)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "Own"
+      }
+    ],
+    "Golden State Warriors": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "More favorable of GOS and PHX to PHL then other to WAS [PHL may convey to WAS] (via WAS)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "Most favorable of GOS, MIL and OKC to BOS then others to PHL (via GOS to POR to WAS to PHL; via MIL to BRK to HOU to OKC to PHL; via OKC to PHL)"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "To BRK"
+      },
+      {
+        "year": 2030,
+        "first": "1-20 Own; 21-30 to MEM (via WAS to DAL)",
+        "second": "To MEM if GOS does not convey 1st round pick to MEM in 2030 (via WAS to DAL)"
+      }
+    ],
+    "Houston Rockets": [
+      {
+        "year": 2027,
+        "first": "Own or swap for BRK; PHX (via BRK)",
+        "second": "Most favorable of HOU, OKC, IND and MIA to PHL; second most favorable to NOP and third most favorable to NYK; more favorable of (i) SAN and (ii) least favorable of HOU, OKC, IND and MIA to SAN then least favorable of all to MIA [PHL may convey to WAS] (via HOU to DET to OKC to NYK to NOP; via IND and MIA to OKC to UTH to SAN to MIA; via OKC to PHL); Less favorable of POR and NOP if 56-60 (via POR to BOS)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "To CHA"
+      },
+      {
+        "year": 2029,
+        "first": "Two most favorable of HOU, DAL and PHX then other to BRK (via DAL and PHX to BRK; via DAL or PHX to HOU; via HOU swap for DAL or PHX)",
+        "second": "To MEM (via OKC to WAS to DAL)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "Most favorable of HOU, DEN and MIA to MEM then others to OKC (via DEN to CHA to OKC or DEN to OKC; via OKC to MEM)"
+      }
+    ],
+    "Indiana Pacers": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "Most favorable of IND, OKC, HOU and MIA to PHL; second most favorable to NOP and third most favorable to NYK; more favorable of (i) SAN and (ii) least favorable of IND, OKC, HOU and MIA to SAN then least favorable of all to MIA [PHL may convey to WAS] (via IND and MIA to OKC to UTH to SAN to MIA; via HOU to DET to OKC to NYK to NOP; via OKC to PHL); UTH (via CLE)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "Less favorable of (i) more favorable of IND and PHX and (ii) CHI then most favorable of all to CHI; less favorable of IND and PHX to NYK (via PHX to IND; via CHI swap for IND or PHX)"
+      },
+      {
+        "year": 2029,
+        "first": "Forfeited by LAC: To LAC",
+        "second": "More favorable of IND and WAS then other to POR (via IND to NYK)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "Own or CHI (via CHI swap for IND)"
+      }
+    ],
+    "Los Angeles Clippers": [
+      {
+        "year": 2027,
+        "first": "More favorable of (i) least / less favorable of LAC, DEN 6-30 and OKC and (ii) TOR then least favorable of all to TOR; two most / more favorable of LAC, DEN 6-30 and OKC to OKC (via OKC swap of OKC or DEN for LAC; via LAC swap of LAC, DEN or OKC for TOR)",
+        "second": "To UTH (via ATL to LAC)"
+      },
+      {
+        "year": 2028,
+        "first": "LAC 17-30 to BOS or [via swap from BOS] more favorable of (i) more favorable of LAC 1-16 and PHL 1-8 [or (i) LAC 1-16 if PHL 9-30] and (ii) less favorable of BOS and SAN to BOS then least favorable of all to PHL (via SAN swap for BOS; via BOS swap of BOS or SAN for LAC or PHL)",
+        "second": "More favorable of LAC and CHA to CHA then other to DET [DET may convey to UTH] (via CHA to DAL); DAL (via SAC to IND)"
+      },
+      {
+        "year": 2029,
+        "first": "1-3 Own; 4-30 Own or PHL (via PHL swap for LAC); Forfeited by LAC: IND",
+        "second": "To SAN (via PHL)"
+      },
+      {
+        "year": 2030,
+        "first": "Forfeited",
+        "second": "More favorable of LAC and UTH to CHA then other to LAC (via LAC to UTH); TOR"
+      }
+    ],
+    "Los Angeles Lakers": [
+      {
+        "year": 2027,
+        "first": "1-4 Own; 5-30 to MEM (via UTH)",
+        "second": "To BRK if LAL conveys 1st round pick to MEM in 2027 or to MEM if LAL does not convey 1st round pick to MEM in 2027 (via UTH to MEM)"
+      },
+      {
+        "year": 2028,
+        "first": "Less favorable of (i) LAL and (ii) more favorable of UTH and CLE then most favorable of all to UTH (via UTH swap for CLE; via UTH swap of UTH or CLE for LAL)",
+        "second": "More favorable of LAL and WAS to ORL then other to WAS (via WAS to LAL to ORL; via LAL to WAS)"
+      },
+      {
+        "year": 2029,
+        "first": "To DAL",
+        "second": "To MEM (via WAS)"
+      },
+      {
+        "year": 2030,
+        "first": "Own or UTH (via UTH swap for LAL)",
+        "second": "To BRK"
+      }
+    ],
+    "Memphis Grizzlies": [
+      {
+        "year": 2027,
+        "first": "Own; LAL 5-30; Most favorable of UTH (cannot be 1-5), CLE and MIN (via UTH)",
+        "second": "To CHA (via LAC to HOU); LAL if LAL does not convey 1st round pick to MEM in 2027 (via UTH)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "To BRK (via PHX)"
+      },
+      {
+        "year": 2029,
+        "first": "Own or swap for ORL 3-30",
+        "second": "To BRK (via PHX); HOU (via OKC to WAS to DAL); LAL (via WAS); ORL if ORL 1-2 in 2029; POR (via PHL to IND)"
+      },
+      {
+        "year": 2030,
+        "first": "More favorable of (i) MEM and (ii) less favorable of PHX and WAS then least favorable of all to PHX (via WAS swap for PHX; via MEM swap for PHX or WAS); GOS 21-30 (via WAS to DAL); ORL",
+        "second": "31-50 Own; 51-60 to MIN; Most favorable of DEN, HOU and MIA (via DEN to CHA to OKC or DEN to OKC; via OKC to MEM); GOS if GOS does not convey 1st round pick to MEM in 2030 (via WAS to DAL)"
+      }
+    ],
+    "Miami Heat": [
+      {
+        "year": 2027,
+        "first": "1-14 Own; 15-30 to CHA",
+        "second": "Least favorable of MIA, OKC, HOU, IND and SAN; most favorable of MIA, OKC, HOU and IND to PHL; second most favorable to NOP and third most favorable to NYK; more favorable of (i) SAN and (ii) least favorable of MIA, OKC, HOU and IND to SAN [PHL may convey to WAS] (via MIA and IND to OKC to UTH to SAN to MIA; via HOU to DET to OKC to NYK to NOP; via OKC to PHL)"
+      },
+      {
+        "year": 2028,
+        "first": "To CHA if not already settled",
+        "second": "To DET if DAL conveys 1st round pick to CHA in 2027 or to CHA if DAL does not convey 1st round pick to CHA in 2027 [DET may convey to UTH] (via SAN to DAL)"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "More favorable of MIA and ATL to CHA then other to OKC (via OKC)"
+      },
+      {
+        "year": 2030,
+        "first": "Least favorable of MIA, MIL and POR; more favorable of (i) MIA and (ii) less favorable MIL and POR to MIL (via POR swap for MIL; via MIL swap of MIL or POR for MIA)",
+        "second": "Most favorable of MIA, DEN and HOU to MEM then others to OKC (via DEN to CHA to OKC or DEN to OKC; via OKC to MEM)"
+      }
+    ],
+    "Milwaukee Bucks": [
+      {
+        "year": 2027,
+        "first": "More favorable of MIL and NOP to NOP then other to ATL if 5-30 or MIL and NOP to NOP if both 1-4 (via NOP)",
+        "second": "Own (via PHL to DET); Less favorable of BRK and DAL (via DAL to BRK to DET to MIL)"
+      },
+      {
+        "year": 2028,
+        "first": "Less favorable of (i) less favorable of MIL and POR and (ii) more favorable of (a) WAS and (b) least / less favorable of BRK, PHL 9-30 and PHX then more favorable of (i) and (ii) to WAS (via POR swap for MIL; via BRK swap of BRK or PHL for PHX; via WAS swap for PHX, BRK or PHL; via WAS swap of WAS, BRK, PHL or PHX for MIL or POR)",
+        "second": "Most favorable of MIL, GOS and OKC to BOS then others to PHL (via MIL to BRK to HOU to OKC to PHL; via GOS to POR to WAS to PHL; via OKC to PHL)"
+      },
+      {
+        "year": 2029,
+        "first": "Most and least favorable of MIL, BOS and POR to POR; second most favorable to WAS (via BOS to POR; via MIL to POR; via POR to WAS)",
+        "second": "Two most favorable of MIL, DET and NYK to DET then other to CHI (via MIL to BRK to DET; via NYK to DET; via DET to MEM; via MEM to DET; via SAC to CHI)"
+      },
+      {
+        "year": 2030,
+        "first": "More favorable of (i) less favorable MIL and POR and (ii) MIA then least favorable of all to MIA; more favorable of MIL and POR to POR (via POR swap for MIL; via MIL swap of MIL or POR for MIA)",
+        "second": "To ORL"
+      }
+    ],
+    "Minnesota Timberwolves": [
+      {
+        "year": 2027,
+        "first": "Most favorable of MIN, CLE and UTH (cannot be 1-5) to MEM; second most favorable to UTH and least favorable to PHX (via UTH)",
+        "second": "To POR (via HOU to OKC to NYK)"
+      },
+      {
+        "year": 2028,
+        "first": "Own or CHA (via CHA swap for MIN)",
+        "second": "To DEN (via SAN)"
+      },
+      {
+        "year": 2029,
+        "first": "1-5 Own; most / two most favorable of MIN 6-30, CLE and UTH to UTH then other to CHA (via CLE and MIN to UTH; via UTH to PHX to CHA; via CHA swap of CHA, CLE or UTH for MIN)* *CHA will also have a complex swap right with MIN and PHX will receive a least favorable pick",
+        "second": "To CHA if MIN conveys 1st round pick to UTH in 2029 or to UTH if MIN does not convey 1st round pick to UTH in 2029"
+      },
+      {
+        "year": 2030,
+        "first": "1 Own; less favorable of (i) MIN 2-30 and (ii) more favorable of SAN and DAL then most / more favorable of all to SAN [MIN may convey to CHA]~~ ~~ (via SAN swap for DAL; via SAN swap of SAN or DAL for MIN)* *CHA will have a complex swap right with MIN, receiving MIN, SAN or DAL",
+        "second": "To OKC (via DET); MEM 51-60"
+      }
+    ],
+    "New Orleans Pelicans": [
+      {
+        "year": 2027,
+        "first": "More favorable of NOP and MIL then other to ATL if 5-30 or NOP and MIL if both 1-4 (via NOP)",
+        "second": "More favorable of NOP and POR to CHA then other to POR [POR may convey to HOU] (via NOP); Second most favorable of OKC, HOU, IND and MIA (via HOU to DET to OKC to NYK)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "To SAN"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "To SAN"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "Own or ORL (via ORL swap for NOP)"
+      }
+    ],
+    "New York Knicks": [
+      {
+        "year": 2027,
+        "first": "To BRK",
+        "second": "Own; Third most favorable of OKC, HOU, IND and MIA (via HOU to DET to OKC); WAS (via HOU to OKC)"
+      },
+      {
+        "year": 2028,
+        "first": "Least favorable of NYK, BRK and PHX if NYK and / or if PHL 9-30 is less favorable than BRK and PHX; or second most favorable of NYK, BRK and PHX in all other scenarios; if (i) PHL 9-30 is third most favorable and (ii) NYK is most or second most favorable of NYK, BRK, PHL 9-30 and PHX, then most and third most favorable to BRK; or most / two most favorable to BRK in all other scenarios (via BRK swap of BRK or PHL for PHX; via BRK swap of BRK or PHX for NYK; via WAS swap for PHX, BRK or PHL)",
+        "second": "To DET [DET may convey to UTH]; BOS 46-60 (via ORL to PHX); Less favorable of IND and PHX (via IND)"
+      },
+      {
+        "year": 2029,
+        "first": "To BRK",
+        "second": "Two most favorable of NYK, DET and MIL to DET then other to CHI (via MIL to BRK to DET; via NYK to DET; via DET to MEM; via MEM to DET; via SAC to CHI); PHX; SAC (via WAS to HOU)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To ATL (via POR); PHL (via DAL)"
+      }
+    ],
+    "Oklahoma City Thunder": [
+      {
+        "year": 2027,
+        "first": "Two most / more favorable of OKC, DEN 6-30 and LAC; more favorable of (i) least / less favorable of OKC, DEN 6-30 and LAC and (ii) TOR to LAC then least favorable of all to TOR (via OKC swap of OKC or DEN for LAC; via LAC swap of DEN, OKC or LAC for TOR); SAN 17-30 (via SAC)",
+        "second": "Most favorable of OKC, HOU, IND and MIA to PHL; second most favorable to NOP and third most favorable to NYK; more favorable of (i) SAN and (ii) least favorable of OKC, HOU, IND and MIA to SAN then least favorable of all to MIA [PHL may convey to WAS] (via HOU to DET to OKC to NYK to NOP; via IND and MIA to OKC to UTH to SAN to MIA; via OKC to PHL); CHA if SAN 1-16 in 2027 (via SAC); CHI (via WAS to NOP to WAS to DAL); SAC if SAN 1-16 in 2027"
+      },
+      {
+        "year": 2028,
+        "first": "Own or swap for DAL; DEN 6-30 if not already settled",
+        "second": "Most favorable of OKC, GOS and MIL to BOS then others to PHL (via OKC to PHL; GOS to POR to WAS to PHL; via MIL to BRK to HOU to OKC to PHL); UTH"
+      },
+      {
+        "year": 2029,
+        "first": "Own; DEN 6-30 if not already settled; or DEN 6-30 if DEN conveys a first potential 1st round pick to OKC in 2027",
+        "second": "Own; Less favorable of ATL and MIA; BOS; DEN if DEN has not conveyed a first potential 1st round pick to OKC by 2029"
+      },
+      {
+        "year": 2030,
+        "first": "Own; DEN 6-30 if not already settled and if DEN has conveyed a first potential 1st round pick to OKC by 2028",
+        "second": "Own; ATL; Two least favorable of DEN, HOU and MIA (via DEN to CHA or DEN to OKC); MIN (via DET)"
+      }
+    ],
+    "Orlando Magic": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "More favorable of ORL and BOS to UTH then other to PHX (via BOS to ORL to BOS to UTH; via ORL to CHA to PHX)"
+      },
+      {
+        "year": 2028,
+        "first": "To POR (via MEM)",
+        "second": "To CHA; More favorable of LAL and WAS (via LAL)"
+      },
+      {
+        "year": 2029,
+        "first": "1-2 Own; 3-30 Own or MEM (via MEM swap for ORL)",
+        "second": "To MEM if ORL 1-2 in 2029"
+      },
+      {
+        "year": 2030,
+        "first": "To MEM",
+        "second": "Own or swap for NOP; MIL"
+      }
+    ],
+    "Philadelphia Sixers": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "Own*; More favorable of GOS and PHX (via WAS)*; Most favorable of OKC, HOU, IND and MIA (via HOU to DET to OKC; via IND and MIA to OKC; via OKC to PHL)* *Second most favorable of these to WAS"
+      },
+      {
+        "year": 2028,
+        "first": "1-8 Own if LAC 17-30; or [via swap from BOS] least favorable of (i) PHL 1-8, LAC 1-16, BOS and SAN or (ii) LAC 1-16, BOS and SAN; more favorable of (i) more favorable of PHL 1-8 and LAC 1-16 [or (i) LAC 1-16 if PHL 9-30] and (ii) less favorable of BOS and SAN to BOS; if (i) PHL 9-30 is third most favorable and (ii) NYK is most or second most favorable of PHL 9-30, PHX, BRK and NYK, then most and third most favorable to BRK; or most / two most favorable to BRK in all other scenarios; least favorable of PHX, BRK and NYK to NYK if NYK and / or if PHL 9-30 is less favorable than PHX and BRK; or second most favorable of PHX, BRK and NYK to NYK in all other scenarios; more favorable of (i) WAS and (ii) least / less favorable of PHL 9-30, PHX and BRK to WAS then least favorable of all to PHX [WAS can then swap with MIL] (via SAN swap for BOS; via BOS swap of BOS or SAN for PHL or LAC; via BRK swap of BRK or PHL for PHX; via BRK swap of BRK or PHX for NYK; via WAS swap for PHX, BRK or PHL)",
+        "second": "To BRK if PHL 1-8 in 2028; DET 56-60; Two least favorable of GOS, MIL and OKC (via GOS to POR to WAS; via MIL to BRK to HOU to OKC)"
+      },
+      {
+        "year": 2029,
+        "first": "Own or swap for LAC 4-30",
+        "second": "Own"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To NYK (via DAL); Less favorable of (i) more favorable of PHX and POR and (ii) WAS (via PHX and POR to WAS)"
+      }
+    ],
+    "Phoenix Suns": [
+      {
+        "year": 2027,
+        "first": "To HOU (via BRK); Least favorable of UTH (cannot be 1-5), CLE and MIN (via UTH)",
+        "second": "More favorable of PHX and GOS to PHL then other to WAS [PHL may convey to WAS] (via WAS); Less favorable of BOS and ORL (via BOS to ORL to CHA)"
+      },
+      {
+        "year": 2028,
+        "first": "Least favorable of PHX, PHL 9-30, WAS and BRK; more favorable of (i) WAS and (ii) least / less favorable of PHX, PHL 9-30 and BRK to WAS [WAS can then swap with MIL]; if (i) PHL 9-30 is third most favorable and (ii) NYK is most or second most favorable of PHX, PHL 9-30, BRK and NYK, then most and third most favorable to BRK; or most / two most favorable to BRK in all other scenarios; least favorable of PHX, BRK and NYK to NYK if NYK and / or if PHL 9-30 is less favorable than PHX and BRK; or second most favorable of PHX, BRK and NYK to NYK in all other scenarios (via BRK swap of BRK or PHL for PHX; via BRK swap of BRK or PHX for NYK; via WAS swap for PHX, BRK or PHL)",
+        "second": "Less favorable of (i) more favorable of PHX and IND and (ii) CHI to IND then most favorable of all to CHI; less favorable of PHX and IND to NYK (via PHX to IND; via CHI swap for IND or PHX)"
+      },
+      {
+        "year": 2029,
+        "first": "Two most favorable of PHX, DAL and HOU to HOU then other to BRK (via DAL and PHX to BRK; via DAL or PHX to HOU; via HOU swap for DAL or PHX) --- PHX will receive a least favorable pick from a complex CHA-MIN conveyance, including CHA's swap right",
+        "second": "To NYK"
+      },
+      {
+        "year": 2030,
+        "first": "Least favorable of PHX, WAS and MEM; more favorable of (i) MEM and (ii) less favorable of PHX and WAS to MEM; more favorable of PHX and WAS to WAS (via WAS swap for PHX; via MEM swap for PHX or WAS)",
+        "second": "Less favorable of (i) more favorable of PHX and POR and (ii) WAS to PHL then most favorable of all to BOS; less favorable of PHX and POR to WAS (via PHX and POR to WAS to PHL)"
+      }
+    ],
+    "Portland Trail Blazers": [
+      {
+        "year": 2027,
+        "first": "Own",
+        "second": "Less favorable of POR and NOP then other to CHA [POR may convey to HOU; see following]; then less favorable of POR and NOP to HOU if 56-60 (via POR to NOP to CHA; via POR to BOS to HOU); MIN (via HOU to OKC to NYK)"
+      },
+      {
+        "year": 2028,
+        "first": "Own or swap for MIL [WAS then has a complex swap right with MIL]; ORL (via MEM)",
+        "second": "Own; SAC (via CHI to SAC to MEM)"
+      },
+      {
+        "year": 2029,
+        "first": "Most and least favorable of POR, BOS and MIL; second most favorable to WAS (via BOS to POR; via MIL to POR; via POR to WAS)",
+        "second": "To MEM (via PHL to IND); Less favorable of IND and WAS (via IND to NYK)"
+      },
+      {
+        "year": 2030,
+        "first": "Own or swap for MIL; more favorable of (i) less favorable MIL and POR and (ii) MIA to MIL then least favorable of all to MIA (via POR swap for MIL; via MIL swap of MIL or POR for MIA)",
+        "second": "Less favorable of (i) more favorable of POR and PHX and (ii) WAS to PHL then most favorable of all to BOS; less favorable of POR and PHX to WAS (via PHX and POR to WAS to PHL)"
+      }
+    ],
+    "Sacramento Kings": [
+      {
+        "year": 2027,
+        "first": "Own; SAN 1-16",
+        "second": "To OKC if SAN 1-16 in 2027; CHA if SAN 17-30 in 2027 (via NYK to ATL to SAN)"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "To POR (via CHI to SAC to MEM)"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "To NYK (via WAS to HOU)"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To SAN (via IND)"
+      }
+    ],
+    "San Antonio Spurs": [
+      {
+        "year": 2027,
+        "first": "1-16 to SAC; 17-30 to OKC (via SAC); ATL",
+        "second": "More favorable of (i) SAN and (ii) least favorable of OKC, HOU, IND and MIA then least favorable of all to MIA (via HOU to DET to OKC; via MIA to OKC to UTH to SAN to MIA)"
+      },
+      {
+        "year": 2028,
+        "first": "Own or swap for BOS 2-30 [BOS then has a complex swap right with PHL]",
+        "second": "Own; BOS 31-45 if BOS 1 in 2028; NOP"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "Own; LAC (via PHL); NOP"
+      },
+      {
+        "year": 2030,
+        "first": "Most / more favorable of SAN, DAL and MIN 2-30; less favorable of (i) more favorable of SAN and DAL and (ii) MIN 2-30 [or MIN if MIN not conveyable] to MIN [MIN may convey to CHA]; less favorable of SAN and DAL to DAL (via SAN swap for DAL; via SAN swap of SAN or DAL for MIN)",
+        "second": "Own; CLE; SAC (via IND)"
+      }
+    ],
+    "Toronto Raptors": [
+      {
+        "year": 2027,
+        "first": "Least / less favorable of TOR, LAC, DEN 6-30 and OKC; more favorable of (i) TOR and (i) least / less favorable of LAC, DEN 6-30 and OKC to LAC (via OKC swap of OKC or DEN for LAC; via LAC swap of LAC, DEN or OKC for TOR)",
+        "second": "Own"
+      },
+      {
+        "year": 2028,
+        "first": "Own",
+        "second": "Own"
+      },
+      {
+        "year": 2029,
+        "first": "Own",
+        "second": "Own"
+      },
+      {
+        "year": 2030,
+        "first": "Own",
+        "second": "To LAC"
+      }
+    ],
+    "Utah Jazz": [
+      {
+        "year": 2027,
+        "first": "Second most favorable of UTH (cannot be 1-5), CLE and MIN; most favorable to MEM and least favorable to PHX (via UTH)",
+        "second": "To IND (via CLE); More favorable of BOS and ORL (via BOS to ORL to BOS); DEN (via CLE to CHI to BOS); LAC (via ATL to LAC)"
+      },
+      {
+        "year": 2028,
+        "first": "Most favorable of UTH, CLE and LAL; less favorable of (i) more favorable of UTH and CLE and (ii) LAL to LAL; less favorable of UTH and CLE to CLE [CLE may convey UTH to ATL] (via UTH swap for CLE; via UTH swap of UTH or CLE for LAL)",
+        "second": "To OKC; CLE; Least / less favorable of (i) DET 31-55, (ii) less favorable of CHA and LAC (via CHA to DAL), (iii) MIA if DAL conveys 1st round pick to CHA in 2027 (via SAN to DAL) and (iv) NYK"
+      },
+      {
+        "year": 2029,
+        "first": "Most / two most favorable of UTH, CLE and MIN 6-30 to UTH; least / less favorable to CHA (via CLE and MIN to UTH; via UTH to PHX to CHA; via CHA swap of CHA, CLE or UTH for MIN)* *CHA will also have a complex swap right with MIN and PHX will receive a least favorable pick",
+        "second": "Own; MIN if MIN does not convey 1st round pick to UTH in 2029"
+      },
+      {
+        "year": 2030,
+        "first": "Own or swap for LAL",
+        "second": "Less favorable of UTH and LAC then other to CHA (via LAC to UTH)"
+      }
+    ],
+    "Washington Wizards": [
+      {
+        "year": 2027,
+        "first": "Own (cannot be 1)",
+        "second": "To NYK (via HOU to OKC); More favorable of BRK and DAL (via DAL to BRK to DET to WAS); Less favorable of GOS and PHX; Second most favorable of (i) PHL (via LAC), (ii) more favorable of GOS and PHX (via WAS to LAC) and (iii) most favorable of OKC, HOU, IND and MIA (via HOU to DET to OKC to LAC; via IND and MIA to OKC to LAC)"
+      },
+      {
+        "year": 2028,
+        "first": "More favorable of (i) more favorable of (a) WAS and (b) least / less favorable of BRK, PHL 9-30 and PHX and (ii) less favorable of MIL and POR then less favorable of (i) and (ii) to MIL; least favorable of WAS, PHL 9-30, BRK and PHX to PHX (via POR swap for MIL; via BRK swap of BRK or PHL for PHX; via WAS swap for PHX, BRK or PHL; via WAS swap of WAS, BRK, PHL or PHX for MIL or POR)",
+        "second": "Less favorable of WAS and LAL then other to ORL (via WAS to LAL to ORL; via LAL to WAS); DEN 34-60 (via SAN to SAC)"
+      },
+      {
+        "year": 2029,
+        "first": "Own; Second most favorable of POR, BOS and MIL (via BOS to POR; via MIL to POR; via POR to WAS)",
+        "second": "More favorable of WAS and IND to IND then other to POR (via IND to NYK)"
+      },
+      {
+        "year": 2030,
+        "first": "More favorable of WAS and PHX; more favorable of (i) MEM and (ii) less favorable of WAS and PHX to MEM then least favorable of all to PHX (via WAS swap for PHX; via MEM swap for WAS or PHX)",
+        "second": "Less favorable of (i) WAS and (ii) more favorable of PHX and POR to PHL then most favorable of all to BOS (via PHX and POR to WAS to PHL); Less favorable of PHX and POR"
+      }
+    ]
+  }
+}

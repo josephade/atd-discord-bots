@@ -20,6 +20,7 @@ from adp import ADP_MAP
 from champions import CHAMPIONS, MICKEY_RINGS
 from champion_teams import CHAMPION_TEAMS
 from aliases import DRAFTER_ALIASES
+from player_aliases import PLAYER_ALIASES
 
 # Raw Unicode emoji (flags, symbols) typed directly rather than as a Discord
 # custom emoji or :shortcode: — e.g. a country flag in a World Cup-themed
@@ -225,17 +226,82 @@ def _fold(s: str) -> str:
     lotto data entry."""
     return ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
 
-def _get_drafter_players(sheet_name: str, lottos: dict) -> dict:
-    counts  = {}  # folded name -> count
-    display = {}  # folded name -> first-seen display spelling
-    for teams in lottos.values():
-        for entry in teams.values():
-            if _drafter_match(sheet_name, entry.get('drafters', [])):
-                for p in entry.get('players', []):
-                    key = _fold(p['name'].lower())
-                    counts[key] = counts.get(key, 0) + 1
-                    display.setdefault(key, p['name'])
-    return {display[k]: v for k, v in counts.items()}
+def _canonical_player_name(name: str) -> str:
+    folded = re.sub(r'\bsr\.?\s*$', '', _fold(name).casefold().strip())
+    raw_key = re.sub(r'[^a-z0-9]', '', folded)
+    return PLAYER_ALIASES.get(raw_key, name.strip())
+
+
+def _player_key(name: str) -> str:
+    """Unify punctuation, accents, spacing and optional Sr; retain Jr/II/III."""
+    name = re.sub(r'\bsr\.?\s*$', '', _fold(_canonical_player_name(name)).casefold().strip())
+    return re.sub(r'[^a-z0-9]', '', name)
+
+
+def _roster_player_names(entry: dict):
+    """Count a player once per roster even if two spelling variants occur."""
+    seen = set()
+    for player in entry.get('players', []):
+        name = _canonical_player_name(player.get('name', ''))
+        key = _player_key(name)
+        heading = re.fullmatch(
+            r'(?:group|division)\s+\S+|(?:eastern|western|east|west)\s+conference|'
+            r'(?:atlantic|central|southeast|northwest|pacific|southwest)\s+division|'
+            r'players?|roster|year|position|totals?|conference|division', name, re.IGNORECASE)
+        if key and key not in seen and not heading:
+            seen.add(key)
+            yield key, name
+
+
+def _make_drafter_resolver(drafters: list):
+    """Resolve exact names, configured aliases and unique name variants.
+
+    Do not let a reverse alias overwrite another GM's actual Win Sheet name.
+    Preserve unresolved owners instead of inventing an identity for them.
+    """
+    exact = {d['name'].strip().casefold(): d['name'] for d in drafters}
+    variants = {}
+    for d in drafters:
+        for variant in _all_name_variants(d['name']):
+            variants.setdefault(variant.strip().casefold(), set()).add(d['name'])
+    cache = {}
+    unknown = {}
+
+    def resolve(raw):
+        raw = raw.strip()
+        if not raw or raw.casefold() == 'deleted user':
+            return None
+        if raw in cache:
+            return cache[raw]
+        target = _CASE_SENSITIVE_NAME_OVERRIDES.get(raw, raw)
+        visited = set()
+        while target.casefold() not in visited:
+            visited.add(target.casefold())
+            alias = DRAFTER_ALIASES.get(target.lower())
+            if not alias:
+                break
+            target = alias.strip()
+        match = exact.get(target.casefold())
+        if not match:
+            candidates = variants.get(target.casefold(), set())
+            if len(candidates) == 1:
+                match = next(iter(candidates))
+        if not match:
+            match = exact.get(raw.casefold())
+        if not match:
+            match = unknown.setdefault(target.casefold(), target)
+        cache[raw] = match
+        return match
+
+    return resolve
+
+
+def _get_drafter_players(sheet_name: str, lottos: dict, drafters: list = None) -> dict:
+    drafters = drafters if drafters is not None else [{'name': sheet_name}]
+    canonical = _make_drafter_resolver(drafters)(sheet_name)
+    index = _build_player_drafter_index(drafters, lottos)
+    return {bucket['display']: bucket['counts'][canonical] for bucket in index.values()
+            if canonical in bucket['counts']}
 
 # ── Roster sheet helpers ──────────────────────────────────────────────────────
 
@@ -381,19 +447,19 @@ def _get_export_token() -> str:
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, _EXPORT_SCOPE)
     return creds.get_access_token().access_token
 
-def _autocrop_whitespace(img: "Image.Image", threshold: int = 60) -> "Image.Image":
-    """Crop away white margin, including the faint anti-aliased near-white
-    fringe PDF rasterization leaves right at the true edge of a filled cell.
-    Cropping on ANY nonzero diff from pure white keeps that fringe (it reads
-    as "content"), which shows up as a thin white outline around the block.
-    Ignoring near-white pixels below `threshold` trims past the fringe
-    instead of hugging it."""
+def _autocrop_whitespace(img: "Image.Image", threshold: int = 8) -> "Image.Image":
+    """Trim PDF margins to the sheet's cells without adding outer padding.
+
+    Use the strongest channel difference: luminance alone can mistake pale
+    team colours for white and crop all the way into the lettering.
+    """
     rgb = img.convert("RGB")
     bg = Image.new("RGB", rgb.size, (255, 255, 255))
-    diff = ImageChops.difference(rgb, bg).convert("L")
+    red, green, blue = ImageChops.difference(rgb, bg).split()
+    diff = ImageChops.lighter(ImageChops.lighter(red, green), blue)
     mask = diff.point(lambda p: 255 if p > threshold else 0)
     bbox = mask.getbbox()
-    return img.crop(bbox) if bbox else img
+    return rgb.crop(bbox) if bbox else img
 
 def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: str) -> "Image.Image":
     """Export a specific cell range from the LIVE Google Sheet as an actual
@@ -403,7 +469,7 @@ def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: 
         f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export",
         params={
             "format": "pdf", "gid": gid, "range": a1_range,
-            "size": "A4", "portrait": "true", "fitw": "true",
+            "size": "A4", "portrait": "true", "scale": "4",
             "gridlines": "false", "printtitle": "false", "sheetnames": "false",
             "pagenum": "false", "fzr": "false",
         },
@@ -411,11 +477,24 @@ def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: 
         timeout=30,
     )
     resp.raise_for_status()
-    doc = fitz.open(stream=resp.content, filetype="pdf")
-    pix = doc[0].get_pixmap(dpi=200)
-    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-    doc.close()
-    return _autocrop_whitespace(img)
+    with fitz.open(stream=resp.content, filetype="pdf") as doc:
+        pages = []
+        for page in doc:
+            pix = page.get_pixmap(dpi=200, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            pages.append(_autocrop_whitespace(img))
+    if not pages:
+        raise ValueError("Sheet export returned no pages")
+    if len(pages) == 1:
+        return pages[0]
+    # Retain every row if Sheets still paginates an unusually tall range.
+    result = Image.new("RGB", (max(p.width for p in pages),
+                               sum(p.height for p in pages)), "white")
+    top = 0
+    for page in pages:
+        result.paste(page, (0, top))
+        top += page.height
+    return result
 
 def _hidden_columns_for_ws(ws) -> set:
     """1-indexed column numbers hidden by the user on this tab. Many tabs
@@ -439,7 +518,7 @@ def _hidden_columns_for_ws(ws) -> set:
     return hidden
 
 def _team_export_range(ws, tab_data: list, team_row: int, col_idx_1based: int) -> str:
-    """Return the A1 range covering a team's header row + 10 roster rows
+    """Return the A1 range covering a team's header and actual roster rows
     across its name/year (+price, if visible) columns, for exporting a real
     screenshot of just that team's block. See get_matchup_range in ATD Team
     Sheet Bot's bot.py for the original version of this same logic."""
@@ -461,7 +540,14 @@ def _team_export_range(ws, tab_data: list, team_row: int, col_idx_1based: int) -
             last_col = c
 
     start_a1 = gspread.utils.rowcol_to_a1(team_row, col_idx_1based)
-    end_a1   = gspread.utils.rowcol_to_a1(team_row + 10, last_col)
+    last_row = team_row
+    for data_row in tab_data[team_row:]:
+        player = data_row[col_idx_1based - 1].strip() if len(data_row) >= col_idx_1based else ''
+        year = data_row[col_idx_1based].strip() if len(data_row) > col_idx_1based else ''
+        if not player or year.lower() == 'year':
+            break
+        last_row += 1
+    end_a1   = gspread.utils.rowcol_to_a1(last_row, last_col)
     return f"{start_a1}:{end_a1}"
 
 async def _try_send_team_screenshot(ctx, draft_num: str, team_query: str, caption: str) -> bool:
@@ -685,9 +771,9 @@ def _lookup_adp_player(raw: str):
     key = raw.strip().lower()
     if key in ADP_MAP:
         return key, _title_player(key)
-    norm = re.sub(r"['.]+", '', key).strip()
+    norm = _player_key(key)
     for k in ADP_MAP:
-        if re.sub(r"['.]+", '', k).strip() == norm:
+        if _player_key(k) == norm:
             return k, _title_player(k)
     return None, None
 
@@ -695,19 +781,20 @@ def _get_adp(player_name: str) -> float:
     key = player_name.strip().lower()
     if key in ADP_MAP:
         return ADP_MAP[key]
-    norm = re.sub(r"['.]+", '', key).strip()
+    norm = _player_key(key)
     for k, v in ADP_MAP.items():
-        if re.sub(r"['.]+", '', k).strip() == norm:
+        if _player_key(k) == norm:
             return v
     return 9999.0
 
 class PlayerListView(discord.ui.View):
-    def __init__(self, title: str, lines: list, subtitle: str = '', per_page: int = 10):
+    def __init__(self, title: str, lines: list, subtitle: str = '', per_page: int = 10, item_label: str = 'players'):
         super().__init__(timeout=120)
         self.title       = title
         self.subtitle    = subtitle
         self.lines       = lines
         self.per_page    = per_page
+        self.item_label  = item_label
         self.page        = 0
         self.total_pages = max(1, (len(lines) + per_page - 1) // per_page)
         self._update_buttons()
@@ -721,7 +808,7 @@ class PlayerListView(discord.ui.View):
         block = '\n'.join(self.lines[start:start + self.per_page])
         desc  = (f"{self.subtitle}\n" if self.subtitle else '') + f"```\n{block}\n```"
         embed = discord.Embed(title=self.title, description=desc, color=C_PROFILE)
-        embed.set_footer(text=f"Page {self.page + 1} of {self.total_pages}  ·  {len(self.lines)} players total")
+        embed.set_footer(text=f"Page {self.page + 1} of {self.total_pages}  ·  {len(self.lines)} {self.item_label} total")
         return embed
 
     @discord.ui.button(emoji='◀', style=discord.ButtonStyle.secondary)
@@ -784,7 +871,7 @@ class ProfileView(discord.ui.View):
         ('keycommands',   '🔑 Key Commands'),
     ]
 
-    def __init__(self, guild, d: dict, profile: dict, lottos: dict, seeds: dict = None):
+    def __init__(self, guild, d: dict, profile: dict, lottos: dict, seeds: dict = None, player_counts: dict = None):
         super().__init__(timeout=180)
         self.guild   = guild
         self.d       = d
@@ -794,7 +881,7 @@ class ProfileView(discord.ui.View):
         self.dw = d['draft_wins']
         self.seeds = seeds or {}
         self.wins, self.runner_ups = _get_champ_record(d['name'])
-        self.player_counts = _get_drafter_players(d['name'], lottos)
+        self.player_counts = player_counts if player_counts is not None else _get_drafter_players(d['name'], lottos)
 
         found = []
         for dk, draft_data in sorted(lottos.items(), key=lambda x: int(re.search(r'\d+', x[0]).group())):
@@ -1022,6 +1109,7 @@ class ProfileView(discord.ui.View):
             ("!rings",          "Every ATD champion all time"),
             ("!findplayer <player>", "League-wide ranking of who's drafted a player the most"),
             ("!findbest <player>",   "Teams that got the most wins with that player"),
+            ("!playerwins",          "Players ranked by cumulative team wins, 15/page"),
         ],
         "👤  Profile": [
             ("!gmplayers <name>",             "Most drafted players across all lottos"),
@@ -1139,14 +1227,14 @@ async def cmd_winrate(ctx, mode: str = '', count: str = ''):
 
     if mode.lower() == 'last':
         if not count:
-            await ctx.send(embed=_err("❌ Usage: `!winrate last <number of drafts>`"))
+            await ctx.send(embed=_err("❌ Provide the number of drafts to include.\nUsage: `!winrate last <number of drafts>`\nExample: `!winrate last 10`"))
             return
         try:
             n = int(count)
             if n <= 0:
                 raise ValueError
         except ValueError:
-            await ctx.send(embed=_err(f"❌ `{count}` is not a valid number of drafts."))
+            await ctx.send(embed=_err("❌ Enter a positive whole number of drafts.\nUsage: `!winrate last <number of drafts>`\nExample: `!winrate last 10`"))
             return
 
         window = draft_numbers[-n:] if draft_numbers else []
@@ -1520,6 +1608,132 @@ async def cmd_rank(ctx, *, name: str = ''):
     embed.add_field(name="Win %",          value=f"{rank_label(rank_pct, len(by_pct))}\n{_pct_str(d['pct'])}", inline=False)
     embed.add_field(name="Wins over .500", value=f"{rank_label(rank_over, len(by_over))}\n{_over_str(d['over'])}", inline=False)
     await ctx.send(embed=embed)
+
+# ── !wins ─────────────────────────────────────────────────────────────────────
+
+def _shared_draft_wins(first: dict, second: dict, lottos: dict) -> list:
+    """Find co-owned teams; equal win totals alone don't establish a partnership."""
+    results = []
+    for draft_key, teams in lottos.items():
+        match = re.search(r'\d+', draft_key)
+        if not match:
+            continue
+        if not any(
+            _drafter_match(first['name'], team.get('drafters', []))
+            and _drafter_match(second['name'], team.get('drafters', []))
+            for team in teams.values()
+        ):
+            continue
+        num = int(match.group())
+        wins_a = first['draft_wins'].get(num)
+        wins_b = second['draft_wins'].get(num)
+        conflict = wins_a is not None and wins_b is not None and wins_a != wins_b
+        if conflict:
+            label = f'{wins_a} / {wins_b} wins*'
+        else:
+            wins = wins_a if wins_a is not None else wins_b
+            label = f'{wins} wins' if wins is not None else 'Wins not recorded'
+        results.append({'draft': draft_key, 'number': num, 'label': label, 'conflict': conflict})
+    return sorted(results, key=lambda r: (r['number'], r['draft']), reverse=True)
+
+
+@bot.command(name='wins')
+async def cmd_wins(ctx, *, args: str = ''):
+    """Show recent wins for one user or a two-user partnership (default: 10)."""
+    if not _in_channel(ctx):
+        return
+    usage = 'Usage: `!wins @user [number]` or `!wins @user1 @user2 [number]` — defaults to 10 drafts.'
+    match = re.fullmatch(r'<@!?(\d+)>(?:\s+<@!?(\d+)>)?(?:\s+([0-9]{1,9}))?', args.strip())
+    if not match:
+        await ctx.send(embed=_err(usage + ' Use a positive whole number.'))
+        return
+    count = int(match.group(3)) if match.group(3) else 10
+    if count < 1:
+        await ctx.send(embed=_err(usage + ' Use a positive whole number.'))
+        return
+
+    uid = match.group(1)
+    second_uid = match.group(2)
+    if second_uid == uid:
+        await ctx.send(embed=_err('Tag two different users to look up shared drafts.'))
+        return
+    profiles = _load_profiles()
+    sheet_name = profiles.get(uid, {}).get('sheet_name')
+    if not sheet_name:
+        await ctx.send(embed=_err(
+            'That user has no linked Win Sheet profile. '
+            'They can link it with `!linkprofile <name>`.'
+        ))
+        return
+    second_name = profiles.get(second_uid, {}).get('sheet_name') if second_uid else None
+    if second_uid and not second_name:
+        await ctx.send(embed=_err(
+            'The second user has no linked Win Sheet profile. '
+            'They can link it with `!linkprofile <name>`.'
+        ))
+        return
+
+    async with ctx.typing():
+        raw = await _get_raw()
+    if not raw:
+        await ctx.send(embed=_err('⚠️ Could not load Win Sheet data.'))
+        return
+    drafters, _, _ = _parse(raw)
+    drafter = _find(drafters, sheet_name)
+    if not drafter:
+        await ctx.send(embed=_err(f'No Win Sheet drafter found for the linked profile **{sheet_name}**.'))
+        return
+    if second_uid:
+        second = _find(drafters, second_name)
+        if not second:
+            await ctx.send(embed=_err(f'No Win Sheet drafter found for the linked profile **{second_name}**.'))
+            return
+        if drafter['name'] == second['name']:
+            await ctx.send(embed=_err('Both accounts are linked to the same Win Sheet drafter. Shared drafts need two different drafters.'))
+            return
+        shared = _shared_draft_wins(drafter, second, _load_lottos())
+        if not shared:
+            await ctx.send(embed=_err(
+                f'No shared teams found for **{drafter["name"]}** and **{second["name"]}** '
+                'in the stored draft ownership records.'
+            ))
+            return
+        results = shared[:count]
+        subtitle = f'Latest **{len(results)}** of **{len(shared)}** shared drafts · newest first'
+        if any(result['conflict'] for result in results):
+            subtitle += '\n*Win Sheet values differ; split wins follow the name order above.'
+        view = PlayerListView(
+            title=f'{drafter["name"]} + {second["name"]} — Shared Wins',
+            lines=[f'{r["draft"]:<12} {r["label"]}' for r in results],
+            subtitle=subtitle,
+            per_page=10,
+            item_label='drafts',
+        )
+        if view.total_pages == 1:
+            await ctx.send(embed=view.get_embed())
+        else:
+            await ctx.send(embed=view.get_embed(), view=view)
+        return
+    results = sorted(drafter['draft_wins'].items(), reverse=True)[:count]
+    if not results:
+        await ctx.send(embed=_err(f'**{drafter["name"]}** has no recorded draft results.'))
+        return
+
+    lines = [f'ATD {num:<4} {wins:>3} wins' for num, wins in results]
+    total_wins = sum(wins for _, wins in results)
+    view = PlayerListView(
+        title=f'{drafter["name"]} — Recent Wins',
+        lines=lines,
+        subtitle=(f'Latest **{len(results)}** of **{len(drafter["draft_wins"])}** recorded drafts'
+                  f' · **{total_wins}** wins · newest first'),
+        per_page=10,
+        item_label='drafts',
+    )
+    if view.total_pages == 1:
+        await ctx.send(embed=view.get_embed())
+    else:
+        await ctx.send(embed=view.get_embed(), view=view)
+
 
 # ── !historys ─────────────────────────────────────────────────────────────────
 
@@ -2155,7 +2369,10 @@ async def cmd_gmplayers(ctx, *, name: str = ''):
         name = self_p['sheet_name']
 
     lottos = _load_lottos()
-    counts = _get_drafter_players(name, lottos)
+    async with ctx.typing():
+        raw = await _get_raw()
+    drafters, _, _ = _parse(raw)
+    counts = _get_drafter_players(name, lottos, drafters)
 
     if not counts:
         await ctx.send(embed=_err(f"❌ No lotto data found for **{name}**. Make sure lottos have been added with `!setlotto`."))
@@ -2194,32 +2411,45 @@ async def cmd_gmplayers(ctx, *, name: str = ''):
 # ── !merchant ─────────────────────────────────────────────────────────────────
 
 def _build_player_drafter_index(drafters: list, lottos: dict) -> dict:
-    """folded player name -> {'display': str, 'counts': {canonical_drafter_name: count}}
+    """Normalised player -> {'display': str, 'counts': {canonical_drafter_name: count}}
     across every ATD on record. Co-drafters on a team each get full credit for
     every player on that team, same convention as _get_drafter_players."""
-    lookup = {}
-    for d in drafters:
-        for v in _all_name_variants(d['name']):
-            lookup[v.strip().lower()] = d['name']
-
-    def _resolve_name(raw_name: str) -> str:
-        for v in _all_name_variants(raw_name):
-            match = lookup.get(v.strip().lower())
-            if match:
-                return match
-        return raw_name.strip()
+    resolve = _make_drafter_resolver(drafters)
 
     index: dict = {}
     for teams in lottos.values():
         for entry in teams.values():
-            raw_names = [n for n in entry.get('drafters', []) if n.strip().lower() != 'deleted user']
-            canonical_names = {_resolve_name(n) for n in raw_names}
-            for p in entry.get('players', []):
-                key    = _fold(p['name'].lower())
-                bucket = index.setdefault(key, {'display': p['name'], 'counts': {}})
+            raw_names = [n for n in entry.get('drafters', []) if n.strip() and n.strip().lower() != 'deleted user']
+            canonical_names = {resolve(n) for n in raw_names}
+            for key, name in _roster_player_names(entry):
+                bucket = index.setdefault(key, {'display': name, 'counts': {}})
                 for name in canonical_names:
                     bucket['counts'][name] = bucket['counts'].get(name, 0) + 1
     return index
+
+
+def _player_drafter_win_results(player_key: str, drafters: list, lottos: dict) -> dict:
+    """Recorded team wins per GM for this player's actual roster appearances."""
+    resolve = _make_drafter_resolver(drafters)
+    results = {}
+    for draft, teams in lottos.items():
+        match = re.fullmatch(r'ATD\s*(\d+)(?:\s*-?\s*D(\d+))?', draft.strip(), re.IGNORECASE)
+        for entry in teams.values():
+            if not any(key == player_key for key, _ in _roster_player_names(entry)):
+                continue
+            owners = entry.get('drafters', [])
+            names = {resolve(name) for name in owners if name.strip() and name.strip().casefold() != 'deleted user'}
+            wins = _team_wins_value(match[1], owners, drafters, f'ATD {match[1]}-D{match[2] or 1}') if match else None
+            if wins is not None and not 0 <= wins <= GAMES_PER_DRAFT:
+                wins = None
+            for name in names:
+                record = results.setdefault(name, {'wins': 0, 'known': 0, 'missing': set()})
+                if wins is None:
+                    record['missing'].add(draft)
+                else:
+                    record['wins'] += wins
+                    record['known'] += 1
+    return results
 
 
 @bot.command(name='merchant')
@@ -2254,14 +2484,7 @@ async def cmd_merchant(ctx, *, args: str = ''):
             ))
             return
 
-        lookup = {}
-        for d in drafters:
-            for v in _all_name_variants(d['name']):
-                lookup[v.strip().lower()] = d['name']
-        canonical = next(
-            (lookup[v.strip().lower()] for v in _all_name_variants(sheet_name) if v.strip().lower() in lookup),
-            sheet_name,
-        )
+        canonical = _make_drafter_resolver(drafters)(sheet_name)
 
         top_for_gm = []
         for bucket in index.values():
@@ -2290,13 +2513,19 @@ async def cmd_merchant(ctx, *, args: str = ''):
     # ── !merchant (no args) — browse every ADP player ───────────────────────
     if not args:
         lines = []
+        seen = set()
         for name, _adp in sorted(ADP_MAP.items(), key=lambda x: x[1]):
-            bucket = index.get(_fold(name))
+            key = _player_key(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            bucket = index.get(key)
             if bucket and bucket['counts']:
                 top_drafter, top_count = max(bucket['counts'].items(), key=lambda x: x[1])
                 lines.append(f"{bucket['display']:<24} {top_drafter} (×{top_count})")
             else:
-                lines.append(f"{name.title():<24} — never drafted")
+                status = 'GM not recorded' if bucket else 'no recorded drafts'
+                lines.append(f"{name.title():<24} — {status}")
 
         view = PlayerListView(
             title="🛒  Merchant — Top Drafter Per Player",
@@ -2308,9 +2537,9 @@ async def cmd_merchant(ctx, *, args: str = ''):
         return
 
     # ── !merchant <player name> ──────────────────────────────────────────────
-    key    = _fold(args.lower())
+    key    = _player_key(args)
     bucket = index.get(key)
-    if not bucket and key in ADP_MAP:
+    if not bucket and any(_player_key(name) == key for name in ADP_MAP):
         bucket = {'display': args.title(), 'counts': {}}
 
     if not bucket:
@@ -2329,21 +2558,158 @@ async def cmd_merchant(ctx, *, args: str = ''):
     if not counts:
         await ctx.send(embed=discord.Embed(
             title=f"🛒  {bucket['display']}",
-            description="Never drafted.",
+            description="No named GMs recorded for this player in the available draft history.",
             color=C_PROFILE,
         ))
         return
 
     top5  = sorted(counts.items(), key=lambda x: -x[1])[:5]
-    lines = [f"{MEDALS[i] if i < 3 else f'{i+1}.'} {name} — ×{count}" for i, (name, count) in enumerate(top5)]
+    win_results = _player_drafter_win_results(key, drafters, lottos)
+    lines, missing_lines = [], []
+    for i, (name, count) in enumerate(top5):
+        record = win_results.get(name, {'wins': 0, 'known': 0, 'missing': set()})
+        win_label = f"{record['wins']:,}W" if record['known'] else 'wins unavailable'
+        lines.append(f"{MEDALS[i] if i < 3 else f'{i+1}.'} {name} — ×{count} · {win_label}")
+        missing = sorted(record['missing'], key=lambda draft: (int(re.search(r'\d+', draft).group()) if re.search(r'\d+', draft) else 0, draft))
+        # Split large histories without truncating any missing draft labels.
+        part = []
+        for draft in missing:
+            if part and len(name) + len(', '.join(part + [draft])) > 800:
+                missing_lines.append(f"**{name}:** " + ', '.join(part))
+                part = []
+            part.append(draft)
+        if part:
+            missing_lines.append(f"**{name}:** " + ', '.join(part))
     embed = discord.Embed(
         title=f"🛒  {bucket['display']} — Top Drafters",
         description="\n".join(lines),
         color=C_PROFILE,
     )
+    if missing_lines:
+        _add_chunked_field(embed, 'Wins unavailable — excluded from totals', missing_lines, code_block=False)
+    embed.set_footer(text='Recorded team wins only · Missing/conflicting results and unsupported divisions excluded · Ranked by times drafted')
     await ctx.send(embed=embed)
 
 # ── !team ─────────────────────────────────────────────────────────────────────
+
+def _team_wins_value(draft_num: str, owners: list, drafters: list, tab_title: str = ''):
+    """Use a matching owner's recorded result, without summing co-GM wins.
+
+    The Win Sheet has one column per draft number, so it cannot reliably
+    identify a second division's result. Conflicting owner results are
+    likewise insufficient evidence for a single team win total.
+    """
+    division = re.search(r'\bD(\d+)\b', tab_title, re.IGNORECASE)
+    if division and int(division.group(1)) > 1:
+        return None
+    wins = set()
+    for owner in owners:
+        owner = owner.strip()
+        if not owner or owner.lower() == 'deleted user':
+            continue
+        canonical = (_CASE_SENSITIVE_NAME_OVERRIDES.get(owner)
+                     or DRAFTER_ALIASES.get(owner.lower(), owner))
+        matches = [d for d in drafters if d['name'].strip().casefold() == canonical.casefold()]
+        if not matches:
+            matches = [d for d in drafters if _drafter_match(d['name'], _all_name_variants(canonical))]
+        if len(matches) != 1:
+            continue
+        value = matches[0]['draft_wins'].get(int(draft_num))
+        if value is not None:
+            wins.add(value)
+    return next(iter(wins)) if len(wins) == 1 else None
+
+
+def _team_wins_line(draft_num: str, owners: list, drafters: list, tab_title: str = '') -> str:
+    wins = _team_wins_value(draft_num, owners, drafters, tab_title)
+    return f'\nWins: **{wins}**' if wins is not None else ''
+
+
+def _build_player_win_totals(lottos: dict, drafters: list):
+    """Sum known team results once per roster player, never once per owner."""
+    teams = {}
+    for draft, entries in lottos.items():
+        match = re.fullmatch(r'ATD\s*(\d+)(?:\s*-?\s*D(\d+))?', draft.strip(), re.IGNORECASE)
+        if not match:
+            continue
+        num, division = int(match[1]), int(match[2] or 1)
+        for name, entry in entries.items():
+            identity = (num, division, ' '.join(name.casefold().split()))
+            team = teams.setdefault(identity, {'owners': set(), 'players': {}})
+            team['owners'].update(entry.get('drafters', []))
+            for key, display in _roster_player_names(entry):
+                team['players'].setdefault(key, display)
+
+    gaps = {'empty_rosters': 0, 'missing_results': 0, 'unsupported_divisions': 0,
+            'counted_teams': 0, 'drafts': set()}
+    players = {}
+    for (num, division, _), team in teams.items():
+        if not team['players']:
+            gaps['empty_rosters'] += 1
+        wins = _team_wins_value(str(num), sorted(team['owners']), drafters, f'ATD {num}-D{division}')
+        if division > 1:
+            gaps['unsupported_divisions'] += 1
+        elif wins is None or not 0 <= wins <= GAMES_PER_DRAFT:
+            gaps['missing_results'] += 1
+            wins = None
+        if wins is not None and team['players']:
+            gaps['counted_teams'] += 1
+            gaps['drafts'].add(num)
+        for key, display in team['players'].items():
+            player = players.setdefault(key, {'name': display, 'wins': 0, 'counted': 0, 'appearances': 0})
+            player['appearances'] += 1
+            if wins is not None:
+                player['wins'] += wins
+                player['counted'] += 1
+    ranking = sorted((p for p in players.values() if p['counted']), key=lambda p: (-p['wins'], _player_key(p['name'])))
+    gaps['unranked_players'] = sum(not p['counted'] for p in players.values())
+    gaps['drafts'] = len(gaps['drafts'])
+    return ranking, gaps
+
+
+@bot.command(name='playerwins')
+async def cmd_playerwins(ctx):
+    """Rank NBA/ABA players by cumulative ATD team wins, 15 per page."""
+    if not _in_channel(ctx):
+        return
+    async with ctx.typing():
+        raw = await _get_raw()
+        drafters, _, _ = _parse(raw)
+        if not drafters:
+            await ctx.send(embed=_err('Could not load Win Sheet results. Please try again shortly.'))
+            return
+        ranking, _gaps = await asyncio.to_thread(_build_player_win_totals, _load_lottos(), drafters)
+    if not ranking:
+        await ctx.send(embed=_err('No player rosters could be matched to recorded team wins yet. Missing results are not counted as zero wins.'))
+        return
+    lines = [f"{i}. {p['name']} | {p['wins']:,}W | {p['wins'] / p['counted']:.1f}"
+             for i, p in enumerate(ranking, 1)]
+    view = PlayerListView(title='🏀 Player Wins — All-Time ATD', lines=lines, per_page=15,
+        subtitle="**Player | Total wins | AVG/draft**\nRecorded results only.")
+    await ctx.send(embed=view.get_embed(), view=view)
+
+
+def _team_gms(draft_num: str, team_name: str, tab_title: str, lottos: dict, profiles: dict) -> list:
+    """Resolve the exact team's owners in the matching draft/division."""
+    division = re.search(r'\bD(\d+)\b', tab_title, re.IGNORECASE)
+    base = f'ATD {int(draft_num)}'
+    keys = [f'{base}-D{division.group(1)}'] if division and int(division.group(1)) > 1 else [base, f'{base}-D1']
+    target = ' '.join(team_name.casefold().split())
+    names = []
+    seen = set()
+    for key in keys:
+        for stored_team, entry in lottos.get(key, {}).items():
+            if ' '.join(stored_team.casefold().split()) != target:
+                continue
+            for raw_name in entry.get('drafters', []):
+                if not raw_name.strip() or raw_name.strip().lower() == 'deleted user':
+                    continue
+                name = _CASE_SENSITIVE_NAME_OVERRIDES.get(raw_name.strip()) or _resolve_drafter_name(raw_name, profiles)
+                if name.casefold() not in seen:
+                    seen.add(name.casefold())
+                    names.append(name)
+    return names
+
 
 @bot.command(name='team')
 async def cmd_team(ctx, *, args: str = ''):
@@ -2382,10 +2748,23 @@ async def cmd_team(ctx, *, args: str = ''):
         return ''
 
     emoji_str = _emoji_display_local(actual_name)
+    gms = _team_gms(draft_num, actual_name, tab_title, _load_lottos(), _load_profiles())
+    gm_label = 'GMs' if len(gms) > 1 else 'GM'
+    gm_names = ', '.join(f'**{discord.utils.escape_markdown(name)}**' for name in gms) if gms else 'Not recorded'
+    gm_line = f'{gm_label}: {gm_names}'
+    wins_line = ''
 
     async with ctx.typing():
+        if gms:
+            try:
+                raw = await _get_raw()
+                drafters, _, _ = _parse(raw)
+                wins_line = _team_wins_line(draft_num, gms, drafters, tab_title)
+            except Exception as exc:
+                print(f"[team wins] Could not load results for ATD {draft_num}: {exc}")
         sent = await _try_send_team_screenshot(
-            ctx, draft_num, actual_name, caption=f"{emoji_str}  **{actual_name}** — ATD {draft_num}".strip())
+            ctx, draft_num, actual_name,
+            caption=f"{emoji_str}  **{actual_name}** — ATD {draft_num}\n{gm_line}{wins_line}".strip())
     if sent:
         return
 
@@ -2393,7 +2772,7 @@ async def cmd_team(ctx, *, args: str = ''):
 
     embed = discord.Embed(
         title=f"{emoji_str}  {actual_name}",
-        description=f"**ATD {draft_num}**" + (f"\n```\n{roster}\n```" if roster else ''),
+        description=f"**ATD {draft_num}**\n{gm_line}{wins_line}" + (f"\n```\n{roster}\n```" if roster else ''),
         color=C_PROFILE,
     )
     embed.set_footer(text=f"Tab: {tab_title}")
@@ -2421,7 +2800,7 @@ async def cmd_gmfind(ctx, *, args: str = ''):
         if self_p.get('sheet_name'):
             drafter_name = self_p['sheet_name']
 
-    pq     = _fold(player_query.lower())
+    pq     = _player_key(player_query)
     lottos = _load_lottos()
 
     def _emoji_display_local(team_name):
@@ -2439,7 +2818,7 @@ async def cmd_gmfind(ctx, *, args: str = ''):
             if drafter_name and not _drafter_match(drafter_name, entry.get('drafters', [])):
                 continue
             for p in entry.get('players', []):
-                if pq in _fold(p['name'].lower()):
+                if pq in _player_key(p['name']):
                     found.append((dk, team_name, p['name'], p.get('year', '')))
                     break
 
@@ -2472,7 +2851,7 @@ async def cmd_findplayer(ctx, *, player_name: str = ''):
         await ctx.send(embed=_err("Usage: `!findplayer <player name>`"))
         return
 
-    pq       = _fold(player_name.strip().lower())
+    pq       = _player_key(player_name)
     lottos   = _load_lottos()
     profiles = _load_profiles()
 
@@ -2480,7 +2859,7 @@ async def cmd_findplayer(ctx, *, player_name: str = ''):
     for dk, teams in sorted(lottos.items(), key=lambda x: int(re.search(r'\d+', x[0]).group())):
         for team_name, entry in teams.items():
             for p in entry.get('players', []):
-                if pq in _fold(p['name'].lower()):
+                if pq in _player_key(p['name']):
                     matches.append((dk, entry.get('drafters', []), p['name']))
                     break
 
@@ -2525,7 +2904,7 @@ async def cmd_findbest(ctx, *, player_name: str = ''):
         await ctx.send(embed=_err("Usage: `!findbest <player name>`"))
         return
 
-    pq     = _fold(player_name.strip().lower())
+    pq     = _player_key(player_name)
     lottos = _load_lottos()
 
     async with ctx.typing():
@@ -2554,7 +2933,7 @@ async def cmd_findbest(ctx, *, player_name: str = ''):
         for entry in teams.values():
             player_display = None
             for p in entry.get('players', []):
-                if pq in _fold(p['name'].lower()):
+                if pq in _player_key(p['name']):
                     player_display = p['name']
                     break
             if not player_display:
@@ -2656,11 +3035,12 @@ async def cmd_gmteam(ctx, *, args: str = ''):
                       if q not in d.lower() and d.lower() not in q and d.strip().lower() != 'deleted user']
         co_str     = f"\nCo-owners: {', '.join(co_owners)}" if co_owners else ''
         players    = found_entry.get('players', [])
+        wins_line  = _team_wins_line(draft_num, found_entry.get('drafters', []), drafters)
 
         async with ctx.typing():
             sent = await _try_send_team_screenshot(
                 ctx, draft_num, found_team,
-                caption=f"{emoji_str}  **{found_team}** — {draft_key}  ·  {name}{co_str}".strip())
+                caption=f"{emoji_str}  **{found_team}** — {draft_key}  ·  {name}{co_str}{wins_line}".strip())
         if sent:
             return
 
@@ -2668,7 +3048,7 @@ async def cmd_gmteam(ctx, *, args: str = ''):
 
         embed = discord.Embed(
             title=f"{emoji_str}  {found_team}",
-            description=f"**{draft_key}  ·  {name}**{co_str}" + (f"\n```\n{roster}\n```" if roster else ''),
+            description=f"**{draft_key}  ·  {name}**{co_str}{wins_line}" + (f"\n```\n{roster}\n```" if roster else ''),
             color=C_PROFILE
         )
         await ctx.send(embed=embed)
@@ -2702,30 +3082,55 @@ async def cmd_gmteam(ctx, *, args: str = ''):
 async def cmd_profile(ctx, *, name: str = ''):
     if not _in_channel(ctx):
         return
+    name = name.strip()
+    profiles = _load_profiles()
+    queries = [name]
+    mention = re.fullmatch(r'<@!?(\d+)>', name)
+    if mention:
+        uid = mention.group(1)
+        linked_name = profiles.get(uid, {}).get('sheet_name')
+        if linked_name:
+            queries = [linked_name]
+        else:
+            member = next((m for m in ctx.message.mentions if str(m.id) == uid), None)
+            if member is None and ctx.guild:
+                member = ctx.guild.get_member(int(uid))
+            if member is None:
+                try:
+                    member = await bot.fetch_user(int(uid))
+                except discord.HTTPException:
+                    pass
+            queries = list(dict.fromkeys(
+                candidate for candidate in (
+                    getattr(member, 'display_name', None),
+                    getattr(member, 'global_name', None),
+                    getattr(member, 'name', None),
+                ) if candidate
+            ))
     if not name:
         uid      = str(ctx.author.id)
-        profiles = _load_profiles()
         self_p   = profiles.get(uid, {})
         if not self_p.get('sheet_name'):
-            await ctx.send(embed=_err("Usage: `!profile <drafter name>` — or link yourself first with `!linkprofile <name>`"))
+            await ctx.send(embed=_err("Usage: `!profile @user` or `!profile <drafter name>` — or link yourself first with `!linkprofile <name>`"))
             return
-        name = self_p['sheet_name']
+        queries = [self_p['sheet_name']]
 
     async with ctx.typing():
         raw = await _get_raw()
     drafters, _, _ = _parse(raw)
 
-    d = _find(drafters, name)
+    d = next((found for query in queries if (found := _find(drafters, query))), None)
     if not d:
-        await ctx.send(embed=_err(f"❌ No drafter found matching **{name}**."))
+        hint = " Try their Win Sheet name, or have them use `!linkprofile <name>`." if mention else ''
+        await ctx.send(embed=_err(f"❌ No drafter found matching **{name}**.{hint}"))
         return
 
-    profiles = _load_profiles()
     _, profile = _profile_by_name(profiles, d['name'])
     lottos = _load_lottos()
     seeds = _compute_seeds(drafters, lottos).get(d['name'], {})
 
-    view = ProfileView(ctx.guild, d, profile, lottos, seeds)
+    counts = _get_drafter_players(d['name'], lottos, drafters)
+    view = ProfileView(ctx.guild, d, profile, lottos, seeds, player_counts=counts)
     await ctx.send(embed=view.get_embed(), view=view)
 
 # ── !seed ─────────────────────────────────────────────────────────────────────
@@ -3798,6 +4203,8 @@ async def cmd_winhelp(ctx):
         "`!season <num>` — Results for a specific draft\n"
         "`!findwin ATD <num>` — Your wins in a specific draft\n"
         "`!findwin ATD <num> <name>` — Someone else's wins in a specific draft\n"
+        "`!wins @user [num]` — Their latest draft results (default 10)\n"
+        "`!wins @user1 @user2 [num]` — Latest drafts as teammates and team wins\n"
         "`!compare <n1> vs <n2>` — Head-to-head\n"
         "`!winstats` — League-wide highlights"
     ))
@@ -3816,7 +4223,7 @@ async def cmd_winhelp(ctx):
     embed.add_field(name="👤 Profile", inline=False, value=(
         "`!linkprofile <name>` — Link your Discord to your Win Sheet name\n"
         "`!profile` — Your profile card\n"
-        "`!profile <name>` — Anyone's profile card\n"
+        "`!profile @user` or `!profile <name>` — Anyone's profile card\n"
         "`!favplayer <player>` — Add a favourite player (stacks)\n"
         "`!clearfavplayers` — Reset favourite players\n"
         "`!favemoji <emoji>` — Add an emoji to your profile (stacks)\n"
@@ -3827,6 +4234,7 @@ async def cmd_winhelp(ctx):
         "`!gmfind <player> | <drafter>` — Same but for someone else\n"
         "`!findplayer <player>` — Who has drafted a player the most, league-wide\n"
         "`!findbest <player>` — Teams that got the most wins with that player\n"
+        "`!playerwins` — Player team-win totals, 15/page\n"
         "`!team ATD <num> <team name>` — Look up a team by name in a draft\n"
         "`!gmteam <name>` — All teams a GM has drafted\n"
         "`!gmteam ATD <num> <name>` — Specific team a GM drafted in one draft\n"
@@ -3850,12 +4258,106 @@ async def cmd_winhelp(ctx):
 
 # ── Error handler ─────────────────────────────────────────────────────────────
 
+def _command_usage_error(ctx, *, parameter=None, invalid=False):
+    """Render public command syntax instead of exposing Python parameter names."""
+    import inspect
+
+    command = ctx.command
+    prefix = ctx.clean_prefix or "!"
+    invoked = ctx.invoked_with or command.qualified_name
+    call = prefix + invoked
+    labels = {
+        "member": ("@GM", "a GM mention", "@GM"),
+        "pick_number": ("pick number", "a pick number", "74"),
+        "slot": ("slot number", "a lotto slot number", "2"),
+        "money": ("dollars", "a dollar amount", "20"),
+        "amount": ("amount", "an amount", "5"),
+        "count": ("count", "a count", "2"),
+        "picks": ("picks", "a pick count", "3"),
+        "last_pick": ("last pick number", "the last pick number", "74"),
+        "minutes": ("minutes", "a duration in minutes", "60"),
+        "pick_text": ("player and year", "a player name and season", "Devin Booker 2022-23"),
+        "player_name": ("player name", "a player name", "Devin Booker"),
+        "name": ("drafter name", "a drafter name", "Mondon"),
+        "teams_per_gm": ("teams per GM", "the number of teams per GM", "2"),
+    }
+    usage, example = [], []
+    for name, param in command.clean_params.items():
+        label, _, sample = labels.get(name, (name.replace("_", " "), "the required input", "text"))
+        annotation = getattr(param.annotation, "__name__", str(param.annotation))
+        if annotation in ("Member", "User", "discord.Member", "discord.User"):
+            label, sample = "@GM", "@GM"
+        elif annotation == "int" and sample == "text":
+            sample = "2"
+        optional = param.default is not inspect.Parameter.empty
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            usage.append(f"[{label} ...]")
+        else:
+            usage.append(f"[{label}]" if optional else (label if label == "@GM" else f"<{label}>"))
+        example.append(sample)
+
+    overrides = _COMMAND_INPUT_EXAMPLES.get(command.qualified_name)
+    syntax, sample = overrides if overrides else (" ".join(usage), " ".join(example))
+    if parameter is None:
+        reason = "Invalid command input." if invalid else "This command needs more information."
+    else:
+        annotation = getattr(parameter.annotation, "__name__", str(parameter.annotation))
+        if annotation in ("Member", "User", "discord.Member", "discord.User"):
+            reason = ("I couldn't find that GM. Mention them using @."
+                      if invalid else "Mention the GM you want to use this command for.")
+        elif invalid and annotation == "int":
+            label = labels.get(parameter.name, (parameter.name.replace("_", " "),))[0]
+            reason = f"Enter a whole number for {label}."
+        else:
+            label = labels.get(parameter.name, (None, "the required input"))[1]
+            reason = f"Invalid {label}." if invalid else f"Please provide {label}."
+    return f"❌ {reason}\nUsage: `{call}{' ' + syntax if syntax else ''}`\nExample: `{call}{' ' + sample if sample else ''}`"
+
+
+_COMMAND_INPUT_EXAMPLES = {
+    "standings": ("[pct|recent [draft count]]", "recent 10"),
+    "winrate": ("[last <draft count>]", "last 10"),
+    "record": ("<drafter name>", "Mondon"),
+    "season": ("<draft number>", "104"),
+    "findwin": ("ATD <draft number> [drafter name]", "ATD 104 Mondon"),
+    "compare": ("<drafter name> vs <drafter name>", "Mondon vs Easy"),
+    "ranks": ("[drafter name]", "Mondon"),
+    "wins": ("@GM [@co-GM] [draft count]", "@GM 10"),
+    "historys": ("[drafter name]", "Mondon"),
+    "linkprofile": ("<your name on the Win Sheet>", "Mondon"),
+    "sigteam": ("ATD <draft number> <team emoji>", "ATD 104 :Mavericks:"),
+    "favplayer": ("<player name>", "LeBron James"),
+    "favemoji": ("<emoji>", "🏀"),
+    "setlotto": ("ATD <draft number> followed by lotto lines on new lines", "ATD 104"),
+    "deletelotto": ("ATD <draft number>", "ATD 104"),
+    "deletelottoteam": ("ATD <draft number> <team emoji or name>", "ATD 104 :Mavericks:"),
+    "gmplayers": ("[drafter name]", "Mondon"),
+    "merchant": ("[player name]", "Michael Porter Jr."),
+    "team": ("ATD <draft number> <team name>", "ATD 104 Atlanta Hawks"),
+    "gmfind": ("<player name> [| drafter name]", "Michael Porter Jr. | Mondon"),
+    "findplayer": ("<player name>", "Michael Porter Jr."),
+    "findbest": ("<player name>", "Michael Porter Jr."),
+    "gmteam": ("[ATD <draft number>] <drafter name>", "ATD 104 Mondon"),
+    "profile": ("[@GM or drafter name]", "Mondon"),
+    "seed": ("[drafter name]", "Mondon"),
+    "rings": ("[ranked or ATD <draft number>]", "ATD 104"),
+    "winner": ("[ATD <draft number> or player name]", "ATD 104"),
+    "adminset": ("<drafter name> <field> <value>", "Mondon favplayer LeBron James"),
+    "adminlink": ("<Discord user ID> <Win Sheet name>", "123456789012345678 Mondon"),
+    "addteam": ("ATD <draft number> <team name> | <GM1>, <GM2>", "ATD 104 Atlanta Hawks | Mondon"),
+    "edit": ("ATD <draft number>", "ATD 104"),
+}
+
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(embed=_err("⚠️ Missing argument. Try `!winhelp` for usage."))
+        return
+    if isinstance(error, commands.UserInputError):
+        await ctx.send(embed=_err(_command_usage_error(ctx, parameter=getattr(ctx, "current_parameter", None), invalid=True)))
         return
     if isinstance(error, commands.CommandInvokeError):
         print(f"[error] {ctx.command}: {error.original}")

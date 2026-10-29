@@ -8,6 +8,8 @@ import time
 import json
 import os
 import io
+import threading
+from functools import wraps
 from datetime import datetime
 import requests
 import requests.exceptions
@@ -15,7 +17,19 @@ import fitz  # PyMuPDF — rasterizes the sheet's own PDF export for !matchup
 from PIL import Image, ImageChops
 from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_ACCOUNT_FILE, WORKSHEET_NAME, PRICE_REQUIRED, DRAFT_LIST_BOT_ID, TEAM_BUDGET, TIMER_BOT_ID, FLUX_BOT_ID, TRUSTED_BOT_IDS
 from player_positions import PLAYER_POSITIONS
+from draft_history import load_history, player_key
+import budget_rules
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
+
+# Shared reference spreadsheet (same one ATD Draft List Bot and ATD Win Bot
+# read) — its "ADP" tab colors a player's name cell near-black once ATD
+# Sheet Bot has recognized them as drafted. Used as a second "already taken"
+# source for !available, alongside this channel's own team sheet — catches
+# a pick the team-sheet scan might miss (wrong column, name typo, etc.),
+# same dual-source pattern Draft List Bot already relies on for its own
+# auto-pick availability check.
+_ADP_SPREADSHEET_ID = "1CQyO93HKc5VlXsqS48dnPlkac153TDDoUsiqyhJwwOI"
+_ADP_TAB_NAME        = "ADP"
 
 
 def _friendly_sheet_error(exc: Exception) -> str:
@@ -175,6 +189,9 @@ _channel_budgets: dict[int, int] = {int(k): v for k, v in _config.get("channel_b
 # specific drafts run this rule.
 RISING_BUDGET_BUMP = 6
 _channel_budget_bumps: dict[int, int] = {int(k): v for k, v in _config.get("channel_budget_bumps", {}).items()}
+# Legacy per-channel bumps are retained only for explicit cleanup. They must
+# never carry into a new draft when a channel is reused.
+_rising_budget_rules: dict = _config.get('rising_budget_rules', {})
 
 # Channels where !roster shouldn't show a Budget field at all — e.g. a plain
 # snake draft with no pricing. Set via !setnobudget; !setbudget/!setchannelbudget
@@ -219,7 +236,7 @@ def _get_budget(channel_id: int = None) -> int:
     base = _budget_override if _budget_override is not None else TEAM_BUDGET
     if channel_id is not None:
         base = _channel_budgets.get(channel_id, base)
-        base += _channel_budget_bumps.get(channel_id, 0)
+        base += budget_rules.budget_bump(_rising_budget_rules, _channel_sheet_map.get(channel_id))
     return base
 
 
@@ -241,16 +258,27 @@ def _set_channel_budget(channel_id: int, amount: int):
     _save_config(cfg)
 
 
-def _bump_channel_budget(channel_id: int, amount: int) -> int:
-    """Add `amount` to this channel's running budget bump and persist it.
-    Returns the channel's new total bump."""
-    new_total = _channel_budget_bumps.get(channel_id, 0) + amount
-    _channel_budget_bumps[channel_id] = new_total
+def _persist_rising_budget_rules():
     cfg = _load_config()
-    channel_bumps = cfg.setdefault("channel_budget_bumps", {})
-    channel_bumps[str(channel_id)] = new_total
+    cfg['rising_budget_rules'] = _rising_budget_rules
     _save_config(cfg)
-    return new_total
+
+
+async def _handle_flux_budget_update(message):
+    if not FLUX_BOT_ID or message.author.id != FLUX_BOT_ID or not message.author.bot:
+        return
+    text = message.content.replace('*', '').strip()
+    if not re.fullmatch(r'✅\s*Round\s+\d+\s+Flux is done', text, re.I):
+        return
+    entry = _channel_sheet_map.get(message.channel.id)
+    if budget_rules.apply_flux(_rising_budget_rules, entry, message.id, RISING_BUDGET_BUMP) is None:
+        return
+    _persist_rising_budget_rules()
+    count = sum(budget_rules.draft_key(e) == budget_rules.draft_key(entry) for e in _channel_sheet_map.values())
+    await message.channel.send(
+        f'💰 **Rising Budget Flux** — per-team budget bumped by **${RISING_BUDGET_BUMP}**, '
+        f'now **${_get_budget(message.channel.id)}** '
+        f'(applied across {count} channel{"s" if count != 1 else ""} on this sheet).')
 
 
 def _get_manager(channel_id: int) -> "SheetManager | None":
@@ -360,11 +388,28 @@ POSITION_OFFSETS = {
 # SHEET MANAGER
 # =============================================================================
 
+_sheet_write_locks = {}
+_sheet_write_locks_guard = threading.Lock()
+
+
+def _serialized_sheet_write(method):
+    """Keep each tab's read/check/write together, including across channels."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class SheetManager:
     def __init__(self, ws, spreadsheet_id: str = None, channel_id: int = None):
         self.ws = ws
         self._spreadsheet_id = spreadsheet_id or SPREADSHEET_ID
         self._channel_id = channel_id
+        with _sheet_write_locks_guard:
+            self._write_lock = _sheet_write_locks.setdefault(
+                (self._spreadsheet_id, ws.id), threading.RLock()
+            )
         undo_data = _load_undo()
         self._undo_stack = undo_data.get(str(channel_id), []) if channel_id else []
 
@@ -464,11 +509,11 @@ class SheetManager:
         hit a cell whose value matches a known team name from EMOJI_TEAM_MAP.
         """
         known_teams_lower = {v.lower(): v for v in EMOJI_TEAM_MAP.values()}
-        name_lower = player_name.lower().strip()
+        name_lower = player_key(player_name)
 
         for row_idx, row in enumerate(all_data):
             for col_idx, cell in enumerate(row):
-                if cell.strip().lower() == name_lower:
+                if name_lower and player_key(cell) == name_lower:
                     # Walk upward in this column to find the team header
                     for r in range(row_idx - 1, -1, -1):
                         candidate = (
@@ -515,6 +560,7 @@ class SheetManager:
         # Return all positions in order, filtering to valid ones only
         return [p.strip().upper() for p in pos_str.split('/') if p.strip().upper() in POSITION_OFFSETS]
 
+    @_serialized_sheet_write
     def add_player(self, team_name, player_name, year=None, price=None, position_override=None, bench_only=False):
         """
         Find the team in the sheet, determine the correct row for the player's
@@ -543,7 +589,17 @@ class SheetManager:
                 f"Make sure the name in `emoji_map.py` matches exactly what's in the sheet."
             )
 
-        # 2. Get all positions for the player (in priority order)
+        # 2. Reject duplicates before selecting a slot or writing any cells.
+        # Seasons do not change player identity: each player belongs to one team.
+        existing_team = self._find_existing_player(player_name, all_data)
+        if existing_team:
+            print(f"[Pick] ❌ Duplicate — '{player_name}' already on '{existing_team}'")
+            return False, (
+                f"**{player_name}** is already on **{existing_team}**. "
+                f"Pick someone else; nothing was written to the sheet."
+            )
+
+        # 3. Get all positions for the player (in priority order)
         positions = self._get_positions(player_name, position_override)
         print(f"[Pick] Positions to try: {positions}")
         if not positions:
@@ -553,18 +609,6 @@ class SheetManager:
                 f"Add their position at the end of your message (e.g. `PG`, `SG`, `SF`, `PF`, `C`), "
                 f"or add them to `player_positions.py`."
             )
-
-        # 3. Duplicate check — player must not already exist anywhere in the sheet
-        # TEMPORARILY DISABLED: this ATD allows the same player on multiple teams
-        # To re-enable, uncomment the block below
-        # print(f"[Pick] Checking for duplicates…")
-        # existing_team = self._find_existing_player(player_name, all_data)
-        # if existing_team:
-        #     print(f"[Pick] ❌ Duplicate — '{player_name}' already on '{existing_team}'")
-        #     return False, (
-        #         f"**{player_name}** is already on **{existing_team}**. "
-        #         f"Each player can only be on one team."
-        #     )
 
         # 4. Try slots in this order: all starters first, then all bench.
         #    e.g. for PF/SF: PF Starter → SF Starter → PF Bench → SF Bench
@@ -679,6 +723,7 @@ class SheetManager:
                     return row_idx + 1, col_idx + 1
         return None, None
 
+    @_serialized_sheet_write
     def remove_player(self, player_name):
         """SBL block: clear a player's name/year/price cells wherever they currently sit."""
         all_data = self._call('get_all_values')
@@ -699,6 +744,7 @@ class SheetManager:
         print(f"[SBL] Removed {player_name} (row {row})")
         return True, None
 
+    @_serialized_sheet_write
     def steal_player(self, player_name, new_team_name):
         """SBL steal: move a player's row to an open slot on new_team_name, keeping year/price."""
         all_data = self._call('get_all_values')
@@ -855,6 +901,7 @@ class SheetManager:
         end_a1   = gspread.utils.rowcol_to_a1(team_row + 10, last_col)
         return self._spreadsheet_id, self.ws.id, f"{start_a1}:{end_a1}"
 
+    @_serialized_sheet_write
     def undo_last(self):
         """
         Clear the cells written by the most recent successful add_player call.
@@ -1093,6 +1140,45 @@ async def require_commissioner(ctx):
     raise commands.CheckFailure("not_commissioner")
 
 
+_COMMAND_INPUT_HELP = {
+    "addyear": ("a player name and season", "<player name> <year>", "Jimmy Butler 2016-17"),
+    "swap": ("two players or a player and slot number, separated by /", "<player name> / <player name or slot 1-10>", "Jimmy Butler / 9"),
+    "find": ("a player name", "<player name>", "Jimmy Butler"),
+    "available": ("a position: PG, SG, SF, PF, or C", "<position>", "PG"),
+    "roster": ("a team name or emoji", "[team name or emoji]", ":OSU:"),
+    "setsheet": ("a worksheet tab name", "[spreadsheet ID or URL] <tab name>", "ATD 113 - Standard Draft"),
+    "setsheetall": ("a worksheet tab name", "[spreadsheet ID or URL] <tab name>", "ATD 113 - Standard Draft"),
+    "setatdroster": ("a draft number", "<draft number> [tab keyword]", "113"),
+    "addchannel": ("a channel mention and worksheet tab name", "#channel [spreadsheet ID or URL] <tab name>", "#draft-picks ATD 113 - Standard Draft"),
+    "removechannel": ("a channel mention", "#channel", "#draft-picks"),
+    "silencepicks": ("a channel mention", "[#channel]", "#draft-picks"),
+    "unsilencepicks": ("a channel mention", "[#channel]", "#draft-picks"),
+    "setbudget": ("a whole number of dollars", "<amount>", "100"),
+    "setchannelbudget": ("a whole number of dollars", "<amount>", "100"),
+    "risingbudget": ("on, off, or status", "[on|off|status]", "off"),
+    "devswap": ("a team and two players or a slot, separated by /", "<team> / <player> / <player or slot>", "Houston Rockets / Michael Porter Jr. / 8"),
+    "setactivedraft": ("a draft number or worksheet tab name", "ATD <draft number>", "ATD 113"),
+    "claimteam": ("your team emoji", "<team emoji>", ":OSU:"),
+    "assignteam": ("a team emoji and GM mention", "<team emoji> @GM [@co-GM]", ":OSU: @theflightmike"),
+    "removeteam": ("a GM mention", "@GM", "@theflightmike"),
+    "draftmatrix": ("a spreadsheet ID or URL", "[spreadsheet ID or URL]", ""),
+    "matchup": ("two team emojis", "[ATD <draft number>] <team emoji> <team emoji>", ":OSU: :Pacers:"),
+    "teamshot": ("a team emoji", "[ATD <draft number>] <team emoji>", ":OSU:"),
+}
+
+
+def _command_input_error(ctx, *, invalid=False):
+    """Explain public inputs rather than exposing internal names such as args."""
+    command = ctx.command
+    description, syntax, example = _COMMAND_INPUT_HELP.get(
+        command.name, ("valid command options; see !sheethelp", "", "")
+    )
+    call = (ctx.clean_prefix or "!") + (ctx.invoked_with or command.qualified_name)
+    reason = f"Invalid input. Expected {description}." if invalid else f"Please provide {description}."
+    return (f"❌ {reason}\nUsage: `{call}{' ' + syntax if syntax else ''}`"
+            f"\nExample: `{call}{' ' + example if example else ''}`")
+
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
@@ -1101,14 +1187,9 @@ async def on_command_error(ctx, error):
             f"Contact **Soapz** to apply for **LeCommish**."
         )
     elif isinstance(error, commands.MissingRequiredArgument):
-        if ctx.command and ctx.command.name == 'roster':
-            await ctx.send("❌ Please specify a team. Usage: `!roster <team name or emoji>`")
-        elif ctx.command and ctx.command.name == 'find':
-            await ctx.send("❌ Please specify a player. Usage: `!find <player name>`")
-        elif ctx.command and ctx.command.name == 'available':
-            await ctx.send("❌ Please specify a position. Usage: `!available PG` (PG/SG/SF/PF/C)")
-        else:
-            await ctx.send(f"❌ Missing required argument: `{error.param.name}`")
+        await ctx.send(_command_input_error(ctx))
+    elif isinstance(error, commands.UserInputError):
+        await ctx.send(_command_input_error(ctx, invalid=True))
     elif isinstance(error, commands.CommandNotFound):
         pass  # ignore unknown commands silently
     elif isinstance(error, commands.CommandInvokeError):
@@ -1232,27 +1313,10 @@ async def on_message(message):
             await _handle_sbl_confirmation(message)
         return
 
-    # Rising Budget Flux: ATD Flux Bot's !flux command posts a plain-text
-    # "Flux is done" confirmation when a round's flux finishes — bump the
-    # budget for this channel AND every other channel mapped to the same
-    # sheet/tab. Flux Bot only ever runs in one specific channel per draft,
-    # but a draft can have several Discord channels fronting the same
-    # underlying sheet, and they all need to show the same budget.
+    # Only explicitly enabled Rising Budget drafts gain money after Flux.
+    # Fixed-budget drafts still receive price updates without a budget bump.
     if FLUX_BOT_ID and message.author.id == FLUX_BOT_ID:
-        if "Flux is done" in message.content:
-            entry = _channel_sheet_map.get(message.channel.id)
-            if entry:
-                sibling_ids = [
-                    ch_id for ch_id, e in _channel_sheet_map.items()
-                    if e.get("tab") == entry.get("tab") and e.get("sheet_id") == entry.get("sheet_id")
-                ]
-                for ch_id in sibling_ids:
-                    _bump_channel_budget(ch_id, RISING_BUDGET_BUMP)
-                await message.channel.send(
-                    f"💰 **Rising Budget Flux** — per-team budget bumped by **${RISING_BUDGET_BUMP}**, "
-                    f"now **${_get_budget(message.channel.id)}** "
-                    f"(applied across {len(sibling_ids)} channel{'s' if len(sibling_ids) != 1 else ''} on this sheet)."
-                )
+        await _handle_flux_budget_update(message)
         return
 
     # Let trusted bots' picks through (Draft List Bot, and any others in
@@ -1596,18 +1660,44 @@ async def cmd_resetbudgetbump(ctx):
     Run this for a fresh draft reusing a channel that ran Rising Budget Flux
     before — otherwise the old bump silently carries over on top of the new
     base budget."""
-    old = _channel_budget_bumps.pop(ctx.channel.id, 0)
+    key = budget_rules.draft_key(_channel_sheet_map.get(ctx.channel.id))
+    rule = _rising_budget_rules.get(key, {})
+    old = max(_channel_budget_bumps.pop(ctx.channel.id, 0), rule.get('bump', 0))
     if not old:
         await ctx.send(f"**#{ctx.channel.name}** has no budget bump to clear.")
         return
     cfg = _load_config()
     channel_bumps = cfg.setdefault("channel_budget_bumps", {})
     channel_bumps.pop(str(ctx.channel.id), None)
+    if key in _rising_budget_rules:
+        _rising_budget_rules[key]['bump'] = 0
+    cfg['rising_budget_rules'] = _rising_budget_rules
     _save_config(cfg)
     await ctx.send(
         f"✅ Cleared **#{ctx.channel.name}**'s **+${old}** budget bump. "
         f"Effective budget is now **${_get_budget(ctx.channel.id)}**."
     )
+
+
+@bot.command(name='risingbudget')
+async def cmd_risingbudget(ctx, mode: str = 'status'):
+    """!risingbudget on|off|status — opt this sheet/tab into Rising Budget Flux."""
+    entry = _channel_sheet_map.get(ctx.channel.id)
+    key = budget_rules.draft_key(entry)
+    if key is None:
+        await ctx.send('Link this channel to a sheet first with `!setsheet`.')
+        return
+    mode = mode.lower()
+    if mode not in ('on', 'off', 'status'):
+        await ctx.send('Usage: `!risingbudget on|off|status`. Enable only for Rising Budget Flux drafts.')
+        return
+    if mode != 'status':
+        budget_rules.configure(_rising_budget_rules, entry, mode == 'on')
+        _persist_rising_budget_rules()
+    enabled = _rising_budget_rules.get(key, {}).get('enabled') is True
+    state = 'ON (+$6 per completed Flux)' if enabled else 'OFF (fixed budget)'
+    await ctx.send(f'Rising Budget Flux: **{state}** for **{entry["tab"]}**. '
+                   f'Current channel budget: **${_get_budget(ctx.channel.id)}**. Applies to channels on this same sheet/tab.')
 
 
 @bot.command(name='setnobudget')
@@ -1977,19 +2067,21 @@ async def cmd_resetteams(ctx):
 
 
 def _find_roster_slot(query: str, slots: dict):
-    """Find a player in roster slots by exact match, then partial/substring.
+    """Find a player by normalized name, then unambiguous partial name.
     Returns (slot_dict, error_str). One will be None."""
-    query_lower = query.lower().strip()
+    query_lower = player_key(query)
+    if not query_lower:
+        return None, "Please provide a player name."
     # Exact match
     for s in slots.values():
-        if s["name"].lower() == query_lower:
+        if player_key(s["name"]) == query_lower:
             return s, None
     # First or last name match
     matches = []
     for s in slots.values():
         if not s["name"]:
             continue
-        name_lower = s["name"].lower()
+        name_lower = player_key(s["name"])
         name_parts = name_lower.split()
         if query_lower in name_parts or query_lower == name_lower:
             matches.append(s)
@@ -1998,7 +2090,7 @@ def _find_roster_slot(query: str, slots: dict):
     # Substring match
     if not matches:
         for s in slots.values():
-            if s["name"] and query_lower in s["name"].lower():
+            if s["name"] and query_lower in player_key(s["name"]):
                 matches.append(s)
     if len(matches) == 1:
         return matches[0], None
@@ -2008,15 +2100,35 @@ def _find_roster_slot(query: str, slots: dict):
     return None, f"**{query}** is not on the roster."
 
 
+# Verified Discord application owner; server roles do not grant this override.
+_DEV_SWAP_USER_ID = 681833601830354944
+
+
 @bot.command(name='swap')
 async def cmd_swap(ctx, *, args: str):
-    """!swap Player A / Player B  OR  !swap Player A / 9  (slot number 1-10)"""
-    uid = str(ctx.author.id)
-    team_name = _team_owners.get(uid)
+    """Swap players/slots on the caller's claimed team."""
+    team_name = _team_owners.get(str(ctx.author.id))
     if not team_name:
-        await ctx.send("❌ You haven't claimed a team. Use `!claimteam <:YourEmoji:>` first.")
+        await ctx.send("? You haven't claimed a team. Use `!claimteam <:YourEmoji:>` first.")
         return
+    await _swap_roster(ctx, args, team_name)
 
+
+@bot.command(name='devswap')
+async def cmd_devswap(ctx, *, args: str = ''):
+    """Developer only: !devswap Team / Player A / Player B (or slot 1-10)."""
+    if ctx.author.id != _DEV_SWAP_USER_ID:
+        await ctx.send("? Only the bot developer can use `!devswap`.")
+        return
+    parts = [part.strip() for part in args.split('/', 2)]
+    if len(parts) != 3 or not all(parts):
+        await ctx.send("Usage: `!devswap Houston Rockets / Michael Porter Jr. / Gus Johnson` or `!devswap Houston Rockets / Michael Porter Jr. / 8`.")
+        return
+    team_name = _resolve_team_from_emoji(parts[0]) or parts[0]
+    await _swap_roster(ctx, f"{parts[1]} / {parts[2]}", team_name, current_sheet_only=True)
+
+
+async def _swap_roster(ctx, args: str, team_name: str, current_sheet_only: bool = False):
     if '/' not in args:
         await ctx.send(
             "❌ Usage:\n"
@@ -2047,7 +2159,7 @@ async def cmd_swap(ctx, *, args: str):
     managers_to_try = []
     if manager:
         managers_to_try.append(manager)
-    for ch_id in _channel_sheet_map:
+    for ch_id in (() if current_sheet_only else _channel_sheet_map):
         if ch_id != ctx.channel.id:
             m = _get_manager(ch_id)
             if m:
@@ -2151,11 +2263,14 @@ async def cmd_addyear(ctx, *, args: str):
     # Split: everything except the last token is the player name, last token is the year
     parts = args.rsplit(None, 1)
     if len(parts) < 2:
-        await ctx.send("❌ Usage: `!addyear Player Name '06` or `!addyear Player Name 2005-06`")
+        await ctx.send(_command_input_error(ctx))
         return
 
     player_name = parts[0].strip().title()
     year = _normalize_year(parts[1].strip())
+    if not re.fullmatch(r"\d{4}-\d{2}", year):
+        await ctx.send(_command_input_error(ctx, invalid=True))
+        return
 
     manager = _get_manager(ctx.channel.id)
     managers_to_try = []
@@ -2649,6 +2764,116 @@ async def cmd_find(ctx, *, player_name: str):
         await ctx.send(f"**{player_name}** was not found on any team.")
 
 
+def _fetch_adp_taken_names() -> set:
+    """Names marked drafted (near-black cell background) on the shared ADP
+    reference sheet. Same convention ATD Draft List Bot's _is_taken() uses —
+    only a strong black/near-black fill counts, not colored highlight rows."""
+    ws = connect_sheets(_ADP_TAB_NAME, _ADP_SPREADSHEET_ID)
+    # MUST scope `ranges` to just this tab's narrow A:D block — omitting it
+    # pulls full cell-by-cell formatting for every tab in the whole 30-tab
+    # spreadsheet (confirmed: 24.5MB of JSON vs ~200KB scoped), which OOM-
+    # killed the bot in production on the very first real request.
+    meta = ws.spreadsheet.fetch_sheet_metadata(params={
+        'ranges': [f"'{_ADP_TAB_NAME}'!A:D"],
+        'fields': 'sheets(properties(sheetId),data(rowData(values(formattedValue,effectiveFormat.backgroundColor))))'
+    })
+    taken = set()
+    for s in meta.get('sheets', []):
+        if s['properties']['sheetId'] != ws.id:
+            continue
+        for row in s.get('data', [{}])[0].get('rowData', []):
+            for cell in row.get('values', []):
+                text = cell.get('formattedValue')
+                if not text:
+                    continue
+                bg = cell.get('effectiveFormat', {}).get('backgroundColor', {})
+                r, g, b = bg.get('red', 1.0), bg.get('green', 1.0), bg.get('blue', 1.0)
+                if r < 0.2 and g < 0.2 and b < 0.2:
+                    taken.add(text.strip().lower())
+    return taken
+
+
+_AVAILABLE_POSITION_LABELS = {
+    'PG': 'Point guards',
+    'SG': 'Shooting guards',
+    'SF': 'Small forwards',
+    'PF': 'Power forwards',
+    'C': 'Centers',
+}
+_PLAYER_DRAFT_HISTORY = load_history()
+
+
+def _available_embeds(pos: str, players: list[str], tab_name: str) -> list:
+    """Build a compact draft board with a consistent hierarchy on every page."""
+    per_page = 5
+    embeds = []
+    for start in range(0, len(players), per_page):
+        chunk = players[start:start + per_page]
+        rows = []
+        for rank, name in enumerate(chunk, start=start + 1):
+            adp = _PLAYER_ADP.get(name)
+            adp_label = f'{adp:.1f}' if adp is not None else '—'
+            rows.append(
+                f'`{rank:02d}` **{discord.utils.escape_markdown(name)}** · ADP `{adp_label}`\n'
+                f'Drafted **{_PLAYER_DRAFT_HISTORY["player_counts"].get(player_key(name), 0)}** '
+                f'times in **{_PLAYER_DRAFT_HISTORY["total_drafts"]}** Drafts'
+            )
+        embed = discord.Embed(
+            title=f'{_AVAILABLE_POSITION_LABELS[pos]} · {len(players)} available',
+            description=(
+                '\n\n'.join(rows)
+            ),
+            color=0x2DD4BF,
+        )
+        context = f' • {tab_name}' if tab_name else ''
+        embed.set_footer(text=f'{start + 1}–{start + len(chunk)} of {len(players)} • ADP ↑{context}')
+        embeds.append(embed)
+    return embeds
+
+
+class AvailablePlayersView(discord.ui.View):
+    """Keep draft-board context intact while paging through available players."""
+
+    def __init__(self, embeds: list):
+        super().__init__(timeout=180)
+        self.embeds = embeds
+        self.page = 0
+        self.message = None
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page == len(self.embeds) - 1
+        self.page_btn.label = f'{self.page + 1} / {len(self.embeds)}'
+
+    async def _turn_page(self, interaction: discord.Interaction, step: int):
+        # Clamp stale clicks at either boundary.
+        self.page = max(0, min(self.page + step, len(self.embeds) - 1))
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    @discord.ui.button(label='Previous', emoji='◀', style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._turn_page(interaction, -1)
+
+    @discord.ui.button(label='1 / 1', style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label='Next', emoji='▶', style=discord.ButtonStyle.primary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._turn_page(interaction, 1)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 @bot.command(name='available')
 async def cmd_available(ctx, *, position: str):
     """Show undrafted players at a position. Usage: !available PG"""
@@ -2706,8 +2931,18 @@ async def cmd_available(ctx, *, position: str):
         await ctx.send(_friendly_sheet_error(exc))
         return
 
-    # Match candidates against drafted names (case-insensitive)
-    drafted_lower = {n.lower() for n in drafted}
+    # Second source: the shared ADP sheet's own taken-marking. Best-effort —
+    # a failure here shouldn't block the command, just fall back to the team
+    # sheet alone (same resilience Draft List Bot's dual-source check has).
+    try:
+        adp_taken = await loop.run_in_executor(None, _fetch_adp_taken_names)
+    except Exception as exc:
+        print(f"[available] ADP sheet check failed, continuing with team sheet only: {exc}")
+        adp_taken = set()
+
+    # Match candidates against drafted names (case-insensitive) — taken if
+    # EITHER source says so.
+    drafted_lower = {n.lower() for n in drafted} | adp_taken
     candidates_lower = {name: name.lower() for name in candidates}
 
     undrafted = [name for name in candidates if candidates_lower[name] not in drafted_lower]
@@ -2719,30 +2954,12 @@ async def cmd_available(ctx, *, position: str):
     # Sort by ADP (lower = better)
     undrafted.sort(key=lambda n: _PLAYER_ADP.get(n, 9999))
 
-    # Paginate: 10 players per page
-    per_page = 10
-    embeds = []
-    total_pages = (len(undrafted) + per_page - 1) // per_page
-    for page in range(total_pages):
-        start = page * per_page
-        chunk = undrafted[start:start + per_page]
-        lines = []
-        for i, name in enumerate(chunk, start=start + 1):
-            adp = _PLAYER_ADP.get(name)
-            adp_str = f" — ADP {adp}" if adp else ""
-            lines.append(f"**{i}.** {name}{adp_str}")
-        embed = discord.Embed(
-            title=f"Available {pos}s ({len(undrafted)})",
-            description="\n".join(lines),
-            color=discord.Color.blue(),
-        )
-        embed.set_footer(text=f"Page {page + 1}/{total_pages} • {len(drafted)} drafted, {len(undrafted)} available")
-        embeds.append(embed)
+    embeds = _available_embeds(pos, undrafted, tab_name)
 
     if len(embeds) == 1:
         await ctx.send(embed=embeds[0])
     else:
-        view = HelpView(embeds)
+        view = AvailablePlayersView(embeds)
         view.message = await ctx.send(embed=embeds[0], view=view)
 
 
@@ -2904,20 +3121,77 @@ def _get_export_token() -> str:
     return creds.get_access_token().access_token
 
 
-def _autocrop_whitespace(img: "Image.Image", threshold: int = 60) -> "Image.Image":
-    """Crop away white margin, including the faint anti-aliased near-white
-    fringe PDF rasterization leaves right at the true edge of a filled cell.
-    Cropping on ANY nonzero diff from pure white keeps that fringe (it reads
-    as "content"), which shows up as a thin white outline around each team
-    block — doubled into a visible seam where two blocks get pasted
-    edge-to-edge. Ignoring near-white pixels below `threshold` trims past
-    the fringe instead of hugging it."""
+def _trim_export_fringe(img: "Image.Image") -> "Image.Image":
+    """Remove the thin white-blended raster edge of a solid cell fill.
+
+    A black cell edge can rasterize as grey (171, 171, 171), which is dark
+    enough to survive whitespace cropping. Compare each almost-uniform
+    outer line with the next one, rather than raising the crop threshold
+    and losing pale team backgrounds or lettering.
+    """
+    def solid_colour(line):
+        colours = line.getcolors(maxcolors=16)
+        if not colours:
+            return None
+        count, colour = max(colours)
+        return colour if count >= line.width * line.height * 0.98 else None
+
+    for edge in ('top', 'bottom', 'left', 'right'):
+        for _ in range(3):
+            w, h = img.size
+            if min(w, h) < 3:
+                break
+            boxes = {
+                'top': ((0, 0, w, 1), (0, 1, w, 2), (0, 1, w, h)),
+                'bottom': ((0, h - 1, w, h), (0, h - 2, w, h - 1), (0, 0, w, h - 1)),
+                'left': ((0, 0, 1, h), (1, 0, 2, h), (1, 0, w, h)),
+                'right': ((w - 1, 0, w, h), (w - 2, 0, w - 1, h), (0, 0, w - 1, h)),
+            }
+            outer_box, inner_box, crop_box = boxes[edge]
+            outer = solid_colour(img.crop(outer_box))
+            inner = solid_colour(img.crop(inner_box))
+            if outer is None or inner is None:
+                break
+            # White blended with a solid fill is lighter in every channel.
+            if not (all(a >= b for a, b in zip(outer, inner))
+                    and max(a - b for a, b in zip(outer, inner)) > 4):
+                break
+            img = img.crop(crop_box)
+
+    # Sheets can also include 1-4 pixels from the adjacent team's cells.
+    # Those vary with the neighbour's text, so the uniform-line test above
+    # cannot identify them. Only trim to two consecutive columns matching
+    # the opposite solid edge; never crop into the target team's lettering.
+    for edge in ('right', 'left'):
+        w, h = img.size
+        if w < 12:
+            continue
+        opposite_x = 0 if edge == 'right' else w - 1
+        fill = solid_colour(img.crop((opposite_x, 0, opposite_x + 1, h)))
+        if fill is None or min(fill) > 245:
+            continue
+        outer_x = w - 1 if edge == 'right' else 0
+        if solid_colour(img.crop((outer_x, 0, outer_x + 1, h))) == fill:
+            continue
+        for trim in range(1, 5):
+            x = w - trim - 1 if edge == 'right' else trim
+            inner_x = x - 1 if edge == 'right' else x + 1
+            if (solid_colour(img.crop((x, 0, x + 1, h))) == fill
+                    and solid_colour(img.crop((inner_x, 0, inner_x + 1, h))) == fill):
+                img = img.crop((0, 0, w - trim, h) if edge == 'right' else (trim, 0, w, h))
+                break
+    return img
+
+
+def _autocrop_whitespace(img: "Image.Image", threshold: int = 8) -> "Image.Image":
+    """Trim white PDF margins and raster fringe without adding a border."""
     rgb = img.convert("RGB")
     bg = Image.new("RGB", rgb.size, (255, 255, 255))
-    diff = ImageChops.difference(rgb, bg).convert("L")
+    red, green, blue = ImageChops.difference(rgb, bg).split()
+    diff = ImageChops.lighter(ImageChops.lighter(red, green), blue)
     mask = diff.point(lambda p: 255 if p > threshold else 0)
     bbox = mask.getbbox()
-    return img.crop(bbox) if bbox else img
+    return _trim_export_fringe(rgb.crop(bbox)) if bbox else img
 
 
 def _export_team_range_png(spreadsheet_id: str, gid: int, a1_range: str, token: str) -> "Image.Image":
@@ -3404,6 +3678,7 @@ async def cmd_sheethelp(ctx):
             "`!addchannel #channel <Tab Name>` — Map another channel to a worksheet tab\n"
             "`!removechannel #channel` — Remove a channel's sheet mapping\n"
             "`!setbudget <amount>` — Set the per-team budget shown on !roster, across all channels\n"
+            "`!risingbudget on|off|status` — Enable/disable Rising Budget Flux for this sheet/tab (default off)\n"
             "`!channels` — List all channel → sheet mappings"
         ),
         inline=False,

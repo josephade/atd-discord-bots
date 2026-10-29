@@ -15,6 +15,7 @@ primary_region = "ewr"
 
 [env]
   STATE_DIR = "/data"
+  OWNER_REPORT_CHANNEL_ID = "1533242104304631969"
 
 [[mounts]]
   source      = "atd_draft_theme_data"

@@ -1,0 +1,5 @@
+Generated with built-in image_gen using nfl-live-bot-logo.png as the edit reference.
+
+Edit the supplied logo. Change the lettering from NFL BOT LIVE to exactly NFL LIVE BOT, with NFL on the large upper text line and LIVE BOT on the second text line. Preserve the football, helmeted player shield, blue and cyan circular neon border, black backdrop, green live dot, heartbeat motif and metallic italic white lettering. Produce a clean square Discord avatar composition with the entire badge and all lettering safely inside a circular crop, generous outer black margins. Crisp readable text at small sizes. No additional text. Final wording must read NFL LIVE BOT in that order.
+
+Discord export: 512 x 512 PNG, Lanczos resampling from the generated original.

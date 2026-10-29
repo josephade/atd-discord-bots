@@ -168,6 +168,7 @@ class DraftState:
         self.timer_override:     int | None = None  # override all round timers (seconds); None = use config
         self.next_team_override: int | None = None  # force a specific team idx to be current for one pick
         self.budget_max:         int | None = None  # per-team total spending cap; None = no cap enforced
+        self.theme_draft_id: int | None = None
 
         # ── Steal / Block / Lock (SBL) state ────────────────────────────────
         self.total_picks_made:   int = 0            # monotonic counter; drives overall_pick when sbl_enabled
@@ -184,7 +185,7 @@ class DraftState:
     @property
     def order_mode(self) -> str:
         """Underlying pick-order algorithm, independent of the SBL ruleset: 'snake' | 'roundless'."""
-        return self.mode.split("+")[0]
+        return 'snake' if self.mode in ('anon', 'partner') else self.mode.split("+")[0]
 
     @property
     def sbl_enabled(self) -> bool:
@@ -312,19 +313,22 @@ class DraftState:
             self.penalty_teams.append(team_idx)
         self.pick_order = build_snake_order(self.num_teams, self.penalty_teams, flips=(self.mode != "snake+budget"))
 
-    def _uses_stepped_skip_schedule(self, round_num: int) -> bool:
+    def _uses_stepped_skip_schedule(self, round_num: int, team_idx: int | None = None) -> bool:
         """R3-8 and roundless mode (both 45 min base) use a fixed step-down
         schedule per skip instead of a flat -5 min/skip deduction. A
         timer_override (fixed custom timer) always uses the flat formula."""
-        if self.timer_override is not None:
+        if team_idx is None:
+            team_idx = self.current_team_idx
+        if (self.timer_override is not None or
+                (team_idx is not None and self.teams[team_idx].get("timer_override") is not None)):
             return False
         return self.order_mode == "roundless" or 3 <= round_num <= 8
 
-    def active_skip_threshold(self, round_num: int | None = None) -> int:
+    def active_skip_threshold(self, round_num: int | None = None, team_idx: int | None = None) -> int:
         """Skip count at which a team is skipped instantly with no timer.
         Higher for the stepped schedule (35/20/10 min steps before AS)."""
         from config import AS_THRESHOLD, STEPPED_AS_THRESHOLD
-        if self._uses_stepped_skip_schedule(round_num if round_num is not None else self.round_number):
+        if self._uses_stepped_skip_schedule(round_num if round_num is not None else self.round_number, team_idx):
             return STEPPED_AS_THRESHOLD
         return AS_THRESHOLD
 
@@ -336,7 +340,9 @@ class DraftState:
         from config import SKIP_PENALTY, STEPPED_SKIP_SCHEDULE
         skip_count = self.teams[team_idx].get("skip_count", 0)
 
-        if self.timer_override is not None:
+        if self.teams[team_idx].get("timer_override") is not None:
+            base = self.teams[team_idx]["timer_override"]
+        elif self.timer_override is not None:
             base = self.timer_override
         elif self.order_mode == "roundless":
             from config import ROUNDLESS_TIMER
@@ -345,13 +351,13 @@ class DraftState:
             from config import ROUND_TIMERS
             base = ROUND_TIMERS.get(round_num, 1800)
 
-        if skip_count > 0 and self._uses_stepped_skip_schedule(round_num):
+        if skip_count > 0 and self._uses_stepped_skip_schedule(round_num, team_idx):
             return STEPPED_SKIP_SCHEDULE.get(skip_count, 0)
         return max(base - skip_count * SKIP_PENALTY, 0)
 
     def is_active_skip(self, team_idx: int) -> bool:
         """Returns True if this team has hit the AS threshold and should be skipped instantly."""
-        return self.teams[team_idx].get("skip_count", 0) >= self.active_skip_threshold()
+        return self.teams[team_idx].get("skip_count", 0) >= self.active_skip_threshold(team_idx=team_idx)
 
     # ── Steal / Block / Lock ──────────────────────────────────────────────────
     #
@@ -425,6 +431,7 @@ class DraftState:
                 "timer_override":     self.timer_override,
                 "next_team_override": self.next_team_override,
                 "budget_max":         self.budget_max,
+                "theme_draft_id": self.theme_draft_id,
                 "total_picks_made":  self.total_picks_made,
                 "pick_records":      self.pick_records,
                 "repick_queue":      self.repick_queue,
@@ -454,6 +461,7 @@ class DraftState:
         ds.timer_override     = d.get("timer_override")
         ds.next_team_override = d.get("next_team_override")
         ds.budget_max         = d.get("budget_max")
+        ds.theme_draft_id     = d.get("theme_draft_id")
         ds.total_picks_made   = d.get("total_picks_made", 0)
         ds.pick_records       = d.get("pick_records", {})
         ds.repick_queue       = [tuple(x) for x in d.get("repick_queue", [])]
