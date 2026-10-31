@@ -1,9 +1,10 @@
 """A single lossless team report, sized to include every voter."""
 import io
+import re
 from functools import lru_cache
 from urllib.request import Request, urlopen
 
-from PIL import Image, ImageDraw, ImageColor
+from PIL import Image, ImageDraw, ImageColor, ImageFilter
 from render import font
 from team_report import ALIASES
 
@@ -66,13 +67,29 @@ def blend(a, b, weight):
     return tuple(round(x*(1-weight)+y*weight) for x, y in zip(a, b))
 
 
-def render_team_report(draft, report, logo_bytes=None):
+def render_team_report(draft, report, logo_bytes=None, anonymous=False):
     logo = logo_image(logo_bytes)
     primary, accent = palette(report['team'], logo)
     bg, panel = blend('#0B1019', primary, .12), blend('#121B29', primary, .12)
     ink, muted = '#F4F6FA', '#AFBDCF'
     width, margin, gap, column = 1500, 44, 24, 694
     measure = ImageDraw.Draw(Image.new('RGB', (1, 1)))
+
+    def voter_label(vote):
+        name = 'Hidden voter' if anonymous else vote['name']
+        if 'calculated_value' in vote:
+            return f"{name}({vote['calculated_value'] if vote['calculated_value'] is not None else '—'})"
+        return name
+
+    def draw_voter_text(xy, text, size=23):
+        d.text(xy, text, font=font(size), fill=ink)
+        if anonymous:
+            # Blur a neutral placeholder, never recoverable real names.
+            for match in re.finditer('Hidden voter', text):
+                x = xy[0]+measure.textlength(text[:match.start()], font=font(size))
+                right = x+measure.textlength('Hidden voter', font=font(size))
+                box = (int(x)-2, int(xy[1]), int(right)+2, int(xy[1])+size+7)
+                image.paste(image.crop(box).filter(ImageFilter.GaussianBlur(6)), box)
 
     def wrap(text, max_width, size=23):
         # Character wrapping also handles long unbroken names without clipping.
@@ -85,15 +102,16 @@ def render_team_report(draft, report, logo_bytes=None):
 
     groups = []
     for tier in range(1, report['tiers']+1):
-        entries = [(v, wrap(v['name'], column-108)) for v in report['votes'] if v['tier'] == tier]
+        entries = [(v, wrap(voter_label(v), column-108)) for v in report['votes'] if v['tier'] == tier]
         height = 68+sum(max(38, 29*len(lines)+10) for _, lines in entries)+16
         groups.append((tier, entries, max(118, height)))
     standouts = [v for v in report['votes'] if v['standout']]
-    standout_lines = wrap('  /  '.join(f"{v['name']} · Tier {v['tier']}" for v in standouts) or 'No unusually high or low votes in this report.', width-2*margin-48)
+    standout_lines = wrap('  /  '.join(f"{'Hidden voter' if anonymous else v['name']} · Tier {v['tier']}" for v in standouts) or 'No unusually high or low votes in this report.', width-2*margin-48)
     callout_height = 74+29*len(standout_lines)
     top = 428+callout_height
     body_height = sum(max(g[2] for g in groups[i:i+2])+gap for i in range(0, len(groups), 2))
-    height = top+body_height+106
+    has_values = any('calculated_value' in v for v in report['votes'])
+    height = top+body_height+106+(44 if has_values else 0)
     image = Image.new('RGB', (width, height), bg)
     d = ImageDraw.Draw(image)
     d.rectangle((0, 0, width, 9), fill=accent)
@@ -124,7 +142,7 @@ def render_team_report(draft, report, logo_bytes=None):
     d.rounded_rectangle((margin, 424, width-margin, 424+callout_height), radius=18, fill=blend('#192231', primary, .3), outline=accent, width=2)
     d.text((margin+24, 438), f'STANDOUT VOTES  ·  {len(standouts)}', font=font(18, True), fill=ink)
     for i, line in enumerate(standout_lines):
-        d.text((margin+24, 475+i*29), line, font=font(23), fill=ink)
+        draw_voter_text((margin+24, 475+i*29), line)
     y = top+24
     for pair_start in range(0, len(groups), 2):
         pair = groups[pair_start:pair_start+2]
@@ -146,11 +164,13 @@ def render_team_report(draft, report, logo_bytes=None):
                 else:
                     d.text((x+24, vy), '·', font=font(23), fill=muted)
                 for li, line in enumerate(lines):
-                    d.text((x+58, vy+li*29), line, font=font(23), fill=ink)
+                    draw_voter_text((x+58, vy+li*29), line)
                 vy += row_h
         y += row_height+gap
     d.text((margin, y+6), 'Tier 1 = best  ·  Latest valid selection per voter  ·  Highlighted rows = standouts', font=font(19), fill=muted)
     d.text((margin, y+37), 'Standout: beyond Q1–Q3 by more than max(2 tiers, 1.5 × IQR); minimum 5 voters.', font=font(18), fill=muted)
     d.text((margin, y+65), 'Source: current Google Form response sheet  /  Deleted responses excluded', font=font(17), fill=muted)
+    if has_values:
+        d.text((margin, y+93), 'Name(value) = second-table calculated value  /  — = value unavailable', font=font(17), fill=muted)
     output = io.BytesIO(); image.save(output, format='PNG')
     return output.getvalue()

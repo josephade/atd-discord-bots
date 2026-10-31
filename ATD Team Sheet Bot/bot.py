@@ -479,11 +479,9 @@ class SheetManager:
         team's name — meaning no price column. Decided once per tab (not
         per team) and cached, since a tab is consistently one layout or the
         other; a team with nothing after it (last in its row) can't settle
-        the question either way and is skipped.
+        the question either way and is skipped. Explicit price headers take
+        priority; the result is recalculated because demo layouts can change.
         """
-        if hasattr(self, '_price_col_cache'):
-            return self._price_col_cache
-
         known_teams_lower = {v.strip().lower() for v in EMOJI_TEAM_MAP.values()}
         votes = []
         for row in all_data:
@@ -492,12 +490,14 @@ class SheetManager:
                     continue
                 peek = row[col_idx + 2].strip() if (col_idx + 2) < len(row) else ""
                 after_peek = row[col_idx + 3].strip() if (col_idx + 3) < len(row) else ""
+                year = row[col_idx + 1].strip().lower() if col_idx + 1 < len(row) else ''
+                if year == 'year' and (peek.lower() in ('price', 'cost', 'salary') or re.fullmatch(r'\$\s*[\d,.]+', peek)):
+                    return True
                 if not peek and not after_peek:
                     continue  # last team in its row — nothing to compare against
                 votes.append(after_peek.lower() != "year")
 
         result = (sum(votes) > len(votes) / 2) if votes else True
-        self._price_col_cache = result
         return result
 
     def _find_existing_player(self, player_name, all_data):
@@ -675,7 +675,9 @@ class SheetManager:
         if price and price_col:
             # Strip "$" and write as a number so SUM formulas work in Sheets
             try:
-                price_num = int(float(re.sub(r'[^\d.-]', '', price)))
+                price_num = float(re.sub(r'[^\d.-]', '', price))
+                if price_num.is_integer():
+                    price_num = int(price_num)
             except (ValueError, TypeError):
                 price_num = price
             updates.append({
@@ -1203,6 +1205,8 @@ async def on_command_error(ctx, error):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    import private_roster
+    await private_roster.start(bot, _resolve_team_from_emoji, _swap_roster, _addyear_roster, _read_private_roster)
     if not _channel_sheet_map:
         print("⚠️  No channel→sheet mappings configured. Use !addchannel or !setsheet.")
         return
@@ -1323,6 +1327,8 @@ async def on_message(message):
     # TRUSTED_BOT_IDS — e.g. ATD Draft Theme Bot); ignore all other bot messages.
     _from_trusted_bot = message.author.id in TRUSTED_BOT_IDS
     if message.author.bot and not _from_trusted_bot:
+        return
+    if _from_trusted_bot and re.fullmatch(r'\s*\d+\.\s+.+?\s+skipped\s*', message.content, re.I):
         return
 
     # Always process commands regardless of channel
@@ -2259,6 +2265,23 @@ async def cmd_addyear(ctx, *, args: str):
     if not team_name:
         await ctx.send("❌ You haven't claimed a team. Use `!claimteam <:YourEmoji:>` first.")
         return
+    await _addyear_roster(ctx, args, team_name)
+
+
+async def _read_private_roster(channel_id, team_name):
+    manager = await _get_manager_async(channel_id)
+    if manager is None:
+        return {'error': 'No team sheet is configured for this draft\u2019s selection channel.'}
+    try:
+        name, roster = await asyncio.to_thread(manager.get_roster, team_name)
+    except Exception as exc:
+        return {'error': _friendly_sheet_error(exc)}
+    if name is None:
+        return {'error': roster}
+    return {'team': name, 'roster': roster}
+
+
+async def _addyear_roster(ctx, args, team_name, current_sheet_only=False):
 
     # Split: everything except the last token is the player name, last token is the year
     parts = args.rsplit(None, 1)
@@ -2276,7 +2299,7 @@ async def cmd_addyear(ctx, *, args: str):
     managers_to_try = []
     if manager:
         managers_to_try.append(manager)
-    for ch_id in _channel_sheet_map:
+    for ch_id in (() if current_sheet_only else _channel_sheet_map):
         if ch_id != ctx.channel.id:
             m = _get_manager(ch_id)
             if m:

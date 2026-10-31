@@ -43,6 +43,9 @@ class PartnerTests(unittest.IsolatedAsyncioTestCase):
         self.theme = partner.PartnerDraftTheme()
         self.highlight = patch.object(partner, 'highlight_taken', new_callable=AsyncMock)
         self.mock_highlight = self.highlight.start()
+        price_validation = patch.object(AnonBudgetDraftTheme, 'validate_round_price', new_callable=AsyncMock, return_value=None)
+        price_validation.start()
+        self.addCleanup(price_validation.stop)
         fake_sheets.load_player_pool.side_effect = None
         fake_sheets.load_prices.side_effect = None
         fake_sheets.load_player_pool.return_value = (NAMES, {})
@@ -267,6 +270,7 @@ class PartnerTests(unittest.IsolatedAsyncioTestCase):
         exported_teams = fake_sheets.write_draft_results.call_args.args[2]
         self.assertEqual(list(exported_teams.values()), [[NAMES[0]]])
         self.assertEqual(ctx.draft['status'], 'complete')
+        self.assertTrue(ctx.state['identities_revealed'])
         # A skipped round still blocks reveal and never exports partial teams.
         other = await self.start(members=2, roster_size=1)
         await self.force(other)
@@ -575,6 +579,52 @@ class PartnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['current']['token'], 'p:1:1')
         self.assertEqual(ctx.state['turns'], order)
 
+    async def test_private_turn_dm_shows_shared_remaining_budget_and_optional_year(self):
+        ctx, theme, members = await self.budget_demo()
+        for spent, expected in ((44, '$56'), (100, '$0')):
+            state = ctx.state
+            state['teams'][0]['budget_spent'] = spent
+            ctx.save_state(state)
+            ctx.dm.reset_mock()
+            await theme._open_pick_for_team(ctx, 0, 1, force=True)
+            message = ctx.dm.call_args.args[1]
+            self.assertIn('Budget remaining:', message)
+            self.assertIn(expected, message)
+            self.assertIn('$100', message)
+            self.assertIn('!pick <player> [year] <price>', message)
+        ctx.bot.get_channel.return_value.send.assert_not_awaited()
+
+    async def test_optional_year_finalizes_without_dangling_apostrophe(self):
+        ctx, theme, members = await self.budget_demo(rounds=1)
+        await theme.on_pick(ctx, members[0], 'Michael Jordan $44')
+        await theme.on_pick(ctx, members[1], 'LeBron James 2013 $43')
+        messages = [call.args[0] for call in ctx.bot.get_channel.return_value.send.call_args_list]
+        self.assertEqual(messages, ["1. Team 1 Michael Jordan '91 $44", "2. Team 2 LeBron James '13 $43"])
+        self.assertEqual(ctx.state['teams'][0]['budget_spent'], 44)
+
+    async def test_optional_year_proposal_and_agreement(self):
+        ctx, theme, members = await self.budget_demo(rounds=1)
+        state = ctx.state
+        state['teams'] = [state['teams'][0]]
+        state['teams'][0]['member_ids'].append(members[1]['id'])
+        ctx.save_state(state)
+        db.update_drafter_state(members[1]['id'], {'team_index': 0})
+        proposal = await theme.on_pick(ctx, members[0], 'Michael Jordan $44')
+        self.assertIn("**Michael Jordan '91**", proposal)
+        self.assertIn("Michael Jordan '91", proposal)
+        await theme.on_pick(ctx, db.get_drafter(members[1]['id']), '1')
+        self.assertEqual(ctx.state['teams'][0]['budget_spent'], 44)
+        self.assertEqual(db.get_picks(ctx.draft_id, members[0]['id']), ['Michael Jordan'])
+        self.assertEqual(db.get_picks(ctx.draft_id, members[1]['id']), ['Michael Jordan'])
+
+    async def test_optional_year_queued_pick_is_consumed(self):
+        ctx, theme, members = await self.budget_demo()
+        result = await theme.on_pick(ctx, members[1], 'Larry Bird $20')
+        self.assertIn("**Larry Bird '86**", result)
+        self.assertEqual(db.get_drafter(members[1]['id'])['state']['queued_pick']['year'], '1985-86')
+        await theme.on_pick(ctx, members[0], 'Michael Jordan $44')
+        self.assertEqual(db.get_picks(ctx.draft_id, members[1]['id']), ['Larry Bird'])
+
 
 class BudgetTests(unittest.TestCase):
     def setUp(self):
@@ -585,6 +635,18 @@ class BudgetTests(unittest.TestCase):
         for price in ('NaN', 'inf', '-inf', '-1'):
             self.assertIsNone(self.theme._parse_submission(self.ctx, 'LeBron James 2013 ' + price))
         self.assertEqual(self.theme._parse_submission(self.ctx, 'LeBron James 2013 $40')[2], 40)
+
+    def test_year_is_optional_but_budget_price_is_required(self):
+        for text, expected in (
+                ('LeBron James $43', ('LeBron James', '2012-13', 43)),
+                ('LeBron James 43', ('LeBron James', '2012-13', 43)),
+                ('LeBron James 2013 $43', ('LeBron James', '2013', 43)),
+                ("LeBron James '13 $43", ('LeBron James', '13', 43)),
+                ('LeBron James 2012-13 $43', ('LeBron James', '2012-13', 43)),
+                ('Nene $0', ('Nene', '', 0))):
+            self.assertEqual(self.theme._parse_submission(self.ctx, text), expected)
+        for text in ('LeBron James', 'LeBron James $NaN', 'LeBron James $inf', 'LeBron James $-1', '$43', '2013 $43'):
+            self.assertIsNone(self.theme._parse_submission(self.ctx, text))
 
     def test_budget_remaining_and_invalid_values(self):
         for value in (float('nan'), float('inf'), -1, 'invalid', None):

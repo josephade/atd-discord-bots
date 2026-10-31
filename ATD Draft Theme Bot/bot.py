@@ -410,6 +410,18 @@ def _resolve_makeup_drafter(user_id: int) -> tuple[dict, dict] | None:
     return db.get_draft(drafter['draft_id']), drafter
 
 
+def _resolve_roster_drafter(user_id: int, *, read_only: bool = False) -> tuple[dict, dict] | None:
+    """Never let an excluded latest draft silently select another draft's roster."""
+    candidates = db.get_drafters_for_user(user_id, ('setup', 'active', 'paused', 'complete', 'cancelled'))
+    if not candidates:
+        return None
+    drafter = max(candidates, key=lambda d: d['draft_id'])
+    draft = db.get_draft(drafter['draft_id'])
+    if draft['status'] == 'cancelled' and not read_only:
+        return None
+    return draft, drafter
+
+
 def _resolve_draft_for_channel(channel_id: int) -> dict | None:
     """Most recent draft whose admin channel is this one — lets the
     zero-argument moderator commands (!startpackdraft, !generatepacks, ...)
@@ -1027,6 +1039,7 @@ async def _reveal_draft(ctx, arg: str):
         return
 
     db.set_draft_status(draft['id'], 'complete')
+    db.update_draft_state(draft['id'], {'identities_revealed': True, 'revealed_at': db._now()})
     await ctx.send(f"🎉 **Draft revealed!** Results written to tab **{tab_name}**.")
     for d in db.list_drafters(draft['id']):
         roster_list = (theme.final_roster_rows(draft_ctx, d) if not theme.requires_roster_submission
@@ -1663,6 +1676,75 @@ async def cmd_teamlist(ctx):
 
 
 # ── DM commands (drafters) ──────────────────────────────────────────────────────
+@bot.command(name='suspect')
+async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
+    """!suspect @GM :emoji: — three identity guesses per GM per anonymous draft."""
+    import suspects
+    if not ctx.guild:
+        await ctx.reply('Use `!suspect @GM :emoji:` in the draft’s server.', mention_author=False)
+        return
+    if ctx.channel.id not in suspects.ALLOWED_CHANNEL_IDS:
+        await ctx.reply('`!suspect` is only available in <#934052158532378634> or the owner’s private channel.',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
+    if member is None or not emoji.strip():
+        await ctx.reply('Usage: `!suspect @GM :emoji:`. Example: `!suspect @theflightmike :Nets:`.', mention_author=False)
+        return
+    draft, error = suspects.resolve_draft(ctx.guild.id, ctx.channel.id, ctx.author.id)
+    if error:
+        await ctx.reply(error, mention_author=False)
+        return
+    result = await suspects.guess(bot, draft['id'], ctx.message.id, ctx.author.id, member.id, emoji)
+    status = result['status']
+    if status == 'replay':
+        return
+    if status == 'correct':
+        penalty = ('5 wins' if result['penalty_kind'] == 'wins' else '10% odds in your next matchup')
+        # An embed keeps this announcement out of Team Sheet Bot's pick parser.
+        embed = discord.Embed(description=f'{member.mention} You have been caught out being the GM of {result["logo"]}, you lose {penalty}',
+                              color=discord.Color.orange())
+        embed.set_footer(text=f'Suspect attempts remaining for the accuser: {result["remaining"]}/3')
+        await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
+    messages = {
+        'wrong': f'Incorrect suspicion. {result.get("remaining", 0)}/3 attempts remaining for this draft.',
+        'limit': 'You have used all 3 suspect attempts for this draft.',
+        'caught': 'That GM has already been caught in this draft. No additional penalty or attempt was charged.',
+        'revealed': 'Team identities have already been revealed. Suspect attempts are closed for this draft.',
+        'closed': 'No running or unrevealed completed anonymous draft is available.',
+        'changed': 'The draft changed while checking. Try again; no attempt was used.',
+        'invalid': result.get('message', 'Use a GM and team emoji from this draft.'),
+    }
+    await ctx.reply(messages[status], mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name='suspects')
+async def cmd_suspects(ctx, *, draft_ref: str = ''):
+    """Owner-only private penalty ledger: !suspects <draft ID>."""
+    if ctx.author.id != OWNER_ID:
+        return
+    if not ctx.guild or not OWNER_REPORT_CHANNEL_ID or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        await ctx.send('Use your configured private owner channel for the suspect penalty ledger.')
+        return
+    if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        await ctx.send('Hide this channel from @everyone before viewing the penalty ledger.')
+        return
+    draft = _resolve_draft(draft_ref)
+    if not draft or draft['guild_id'] != ctx.guild.id:
+        await ctx.send('Usage: `!suspects <draft ID>` for a draft in this server.')
+        return
+    rows = db.suspect_attempts(draft['id'])
+    catches = [row for row in rows if row['correct']]
+    lines = [f'**Suspect penalties — {draft["name"]}**',
+             'Recorded for commissioner application to this draft’s results or next matchup.']
+    for row in catches:
+        penalty = '−5 wins' if row['penalty_kind'] == 'wins' else '−10% odds in next matchup'
+        lines.append(f'<@{row["target_id"]}> · {row["logo"]} · {penalty} · caught by <@{row["guesser_id"]}>')
+    if not catches:
+        lines.append('No correct catches recorded.')
+    await _send_chunked(ctx, '\n'.join(lines))
+
+
 @bot.command(name='pick')
 async def cmd_pick(ctx, *, text: str = ''):
     """!pick <player> — make your pick (Pack Draft, Anonymous Draft)."""
@@ -1845,16 +1927,24 @@ async def cmd_mypicks(ctx):
     await ctx.send(text)
 
 
-@bot.command(name='myteam')
+@bot.command(name='myteam', aliases=['team', 'roster'])
 async def cmd_myteam(ctx):
     """!myteam — your current roster/lineup view."""
     if not _dm_only(ctx):
         return
-    resolved = _resolve_active_drafter(ctx.author.id)
+    resolved = _resolve_roster_drafter(ctx.author.id, read_only=True)
     if not resolved:
         await ctx.send("You're not in an active draft right now.")
         return
     draft, drafter = resolved
+    if draft['theme'] in ('anon_draft', 'anon_budget_draft', 'partner_draft'):
+        import roster_bridge
+        result = await roster_bridge.show(DraftContext(bot, draft['id'], ctx.message), drafter)
+        if isinstance(result, discord.Embed):
+            await ctx.send(embed=result)
+        else:
+            await ctx.send(result)
+        return
     theme = themes.get_theme(draft['theme'])
     picks = db.get_picks(draft['id'], drafter['id'])
     text = await theme.format_team(DraftContext(bot, draft['id']), drafter, picks)
@@ -1935,9 +2025,9 @@ async def cmd_swap(ctx, *, text: str = ''):
     !swap <Player> / <slot number> — move a player to a specific slot (see `!mypicks` for numbers)."""
     if not _dm_only(ctx):
         return
-    resolved = _resolve_active_drafter(ctx.author.id)
+    resolved = _resolve_roster_drafter(ctx.author.id)
     if not resolved:
-        await ctx.send("You're not in an active draft right now.")
+        await ctx.send("Your latest draft is cancelled or no draft is assigned. Start your next draft before editing its roster.")
         return
     draft, drafter = resolved
     if '/' not in text:
@@ -1948,6 +2038,10 @@ async def cmd_swap(ctx, *, text: str = ''):
         await ctx.send('Usage: `!swap <Player A> / <Player B>` or `!swap <Player> / <slot number>`')
         return
     theme = themes.get_theme(draft['theme'])
+    if draft['theme'] in ('anon_draft', 'anon_budget_draft', 'partner_draft'):
+        import roster_bridge
+        await ctx.send(await roster_bridge.edit(DraftContext(bot, draft['id'], ctx.message), drafter, 'swap', text))
+        return
     reply = await theme.swap_slots(DraftContext(bot, draft['id']), drafter, arg_a, arg_b)
     await ctx.send(reply)
 
@@ -1957,9 +2051,9 @@ async def cmd_addyear(ctx, *, text: str = ''):
     """!addyear <Player> <Year> — set or update a drafted player's year."""
     if not _dm_only(ctx):
         return
-    resolved = _resolve_active_drafter(ctx.author.id)
+    resolved = _resolve_roster_drafter(ctx.author.id)
     if not resolved:
-        await ctx.send("You're not in an active draft right now.")
+        await ctx.send("Your latest draft is cancelled or no draft is assigned. Start your next draft before editing its roster.")
         return
     draft, drafter = resolved
     parts = text.rsplit(maxsplit=1)
@@ -1968,6 +2062,10 @@ async def cmd_addyear(ctx, *, text: str = ''):
         return
     player, year = parts
     theme = themes.get_theme(draft['theme'])
+    if draft['theme'] in ('anon_draft', 'anon_budget_draft', 'partner_draft'):
+        import roster_bridge
+        await ctx.send(await roster_bridge.edit(DraftContext(bot, draft['id'], ctx.message), drafter, 'addyear', text))
+        return
     reply = await theme.set_player_year(DraftContext(bot, draft['id']), drafter, player, year)
     await ctx.send(reply)
 
@@ -2059,6 +2157,11 @@ async def cmd_help(ctx):
         description='DM me these commands during a draft. Which ones apply depends on the draft format.',
         color=discord.Color.blue(),
     )
+    embed.add_field(name='Anonymous identity guesses',
+                    value='`!suspect @GM :emoji:` — only in #atd-chat or the owner’s private channel; three attempts per GM per anonymous draft. '
+                          'Correct catch: −5 wins during picking; −10% next-matchup odds after the final round. '
+                          'Guesses close at official reveal. `!suspects <draft ID>` — owner-only private penalty ledger.',
+                    inline=False)
     embed.add_field(
         name='Drafting',
         value=(
@@ -2222,6 +2325,8 @@ async def on_ready():
     import flux_gate
     try:
         await flux_gate.recover(bot)
+        import anon_lists
+        await anon_lists.recover_flux(bot)
     except Exception:
         log.exception('Could not recover Flux completion messages; round holds remain in place')
     resumed_total = 0
@@ -2303,7 +2408,10 @@ async def _handle_dm_shortcut(message: discord.Message):
 @bot.event
 async def on_message(message: discord.Message):
     import flux_gate
+    import anon_lists
+    await anon_lists.observe_flux(bot, message)
     await flux_gate.observe(bot, message)
+    await anon_lists.observe_flux(bot, message, run=True)
     await bot.process_commands(message)
 
     if not message.author.bot:
@@ -2313,6 +2421,9 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_command_error(ctx, error):
+    if ctx.command and ctx.command.name == 'suspect' and isinstance(error, commands.UserInputError):
+        await ctx.reply('Usage: `!suspect @GM :emoji:`. Mention a server member and include one team emoji.', mention_author=False)
+        return
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.CheckFailure):

@@ -40,7 +40,7 @@ def namespace():
     nodes = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in (
-                "_command_input_error", "on_command_error", "_normalize_year", "cmd_addyear"):
+                "_command_input_error", "on_command_error", "_normalize_year", "cmd_addyear", "_addyear_roster"):
             node.decorator_list = []
             nodes.append(node)
         elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name)

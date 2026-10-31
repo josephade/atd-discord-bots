@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 import unittest
 
 from draft_history import player_key
@@ -59,7 +60,37 @@ class Worksheet:
             self.rows[int(row) - 1][ord(col) - 65] = update["values"][0][0]
 
 
+class SkipNoticeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_numbered_skip_from_trusted_theme_bot_never_reaches_sheet_writer(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1]/'bot.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'on_message')
+        node.decorator_list = []
+        manager = AsyncMock()
+        ns = dict(re=re, TIMER_BOT_ID=0, FLUX_BOT_ID=0, TRUSTED_BOT_IDS={99}, _get_manager_async=manager)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
+        message = SimpleNamespace(author=SimpleNamespace(id=99, bot=True), content='1. <:Cavs:123> skipped')
+        await ns['on_message'](message)
+        manager.assert_not_awaited()
+
+
 class DuplicatePicks(unittest.TestCase):
+    def test_changed_budget_layout_overrides_old_plain_sheet_cache_and_writes_price(self):
+        self.manager._price_col_cache = False
+        self.ws.rows = [['Oklahoma State Cowboys', 'Year', '$0', 'Original Team', 'Year', '$0']]+[['']*6 for _ in range(10)]
+        ok, _ = self.manager.add_player('Oklahoma State Cowboys', 'New Player', year='2022-23', price='$44')
+        self.assertTrue(ok)
+        self.assertEqual(self.ws.rows[1][2], 44)
+
+    def test_plain_layout_does_not_reuse_old_budget_cache(self):
+        self.manager._price_col_cache = True
+        self.assertFalse(self.manager._tab_has_price_column([['Oklahoma State Cowboys', 'Year', 'Original Team', 'Year']]))
+
+    def test_fractional_price_is_written_without_truncation(self):
+        self.ws.rows = [['Oklahoma State Cowboys', 'Year', 'Price', 'Original Team', 'Year', 'Price']]+[['']*6 for _ in range(10)]
+        ok, _ = self.manager.add_player('Oklahoma State Cowboys', 'New Player', price='$27.50')
+        self.assertTrue(ok)
+        self.assertEqual(self.ws.rows[1][2], 27.5)
+
     def setUp(self):
         self.output = redirect_stdout(io.StringIO())
         self.output.__enter__()

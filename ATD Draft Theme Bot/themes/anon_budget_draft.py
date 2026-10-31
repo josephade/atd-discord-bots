@@ -12,12 +12,64 @@ from .base import DraftContext
 import math
 import time
 import db
+import asyncio
+import sheets
+import logging
+from flux_rules import parse_prices, find_player, amount
+
+log = logging.getLogger(__name__)
 
 
 class AnonBudgetDraftTheme(AnonDraftTheme):
     requires_roster_submission = False
     key = 'anon_budget_draft'
     display_name = 'Anonymous Budget Draft'
+
+    async def validate_round_price(self, ctx, player, price, entry=None):
+        from config import POOL_SPREADSHEET_ID, POOL_TAB_NAME
+        state = ctx.state
+        source = state.get('flux_price_source') or {'sheet': POOL_SPREADSHEET_ID, 'tab': POOL_TAB_NAME}
+        count = max(1, len(state.get('teams', [])))
+        live = state.get('live_pick_number')
+        round_number = (live-1)//count+1 if live else self._settings(ctx)['rounds']
+        if state.get('flux_wait'):
+            round_number = max(1, state['flux_wait']['round']-1)
+        if state.get('flux_in_progress'):
+            return 'Flux is currently running. Wait for its completion before submitting your pick; no pick was accepted.'
+        first_round = (entry['pick_number']-1)//count+1 if entry and entry.get('skipped') else round_number
+        description = (f'Round {round_number}' if first_round == round_number else
+                       f'Rounds {first_round}\u2013{round_number} (highest price for your makeup pick)')
+        try:
+            rows = await asyncio.to_thread(sheets.load_flux_rule_rows, source)
+            records = [find_player(parse_prices(rows, number), player)
+                       for number in range(first_round, round_number+1)]
+            if not records or any(r['current'] is None for r in records):
+                raise ValueError(f'{player} has a blank or invalid price in the required round history.')
+            record = max(records, key=lambda r: r['current'])
+        except ValueError as exc:
+            log.warning('Price validation failed for draft %s, %s: %s', getattr(ctx, 'draft_id', '?'), source['tab'], exc)
+            return f'I could not verify {player} against {description} prices: {exc} No pick was accepted.'
+        except Exception:
+            log.exception('Could not read Flux source for draft %s, tab %s', getattr(ctx, 'draft_id', '?'), source.get('tab'))
+            return f'I could not read the price sheet ({source.get("tab", "unknown tab")}) to verify {player}. No pick was accepted. Check sheet access and !fluxsource, then try again.'
+        if amount(price) != record['current']:
+            entered = f'${price:g}' if isinstance(price, (int, float)) else 'no valid price'
+            return f"{record['player']} costs ${record['current']:g} in {description}; you entered {entered}. Submit your pick again with ${record['current']:g}."
+        return None
+
+    async def on_pick(self, ctx, drafter, text):
+        parsed = self._parse_submission(ctx, text)
+        if parsed is not None:
+            player, year, price = parsed
+            index = drafter['state'].get('team_index')
+            team = ctx.state['teams'][index] if index is not None else {}
+            entry = next(iter(team.get('open_picks', [])), None)
+            if ctx.state.get('flux_wait') and not (entry and entry.get('skipped')):
+                return await super().on_pick(ctx, drafter, text)
+            error = await self.validate_round_price(ctx, player, price, entry=entry)
+            if error:
+                return error
+        return await super().on_pick(ctx, drafter, text)
 
     def default_settings(self) -> dict:
         return {
@@ -46,8 +98,8 @@ class AnonBudgetDraftTheme(AnonDraftTheme):
         if spent + price > budget:
             remaining = budget - spent
             return (
-                f"❌ That's ${price:.0f}, but your team only has ${remaining:.0f} left "
-                f"of your ${budget:.0f} pooled budget."
+                f"❌ That's ${price:g}, but your team only has ${remaining:g} left "
+                f"of your ${budget:g} pooled budget."
             )
         return None
 
@@ -58,7 +110,9 @@ class AnonBudgetDraftTheme(AnonDraftTheme):
         current = next((p for p in team['open_picks'] if p['pick_number'] == entry['pick_number']), None)
         if current is None:
             return
-        error = self._check_budget(ctx, team, price)
+        error = await self.validate_round_price(ctx, player, price, entry=current)
+        if not error:
+            error = self._check_budget(ctx, team, price)
         taken_by = self._already_taken(ctx, player)
         if taken_by:
             error = f'{player} has already been drafted by {taken_by}. Pick someone else.'
@@ -69,7 +123,8 @@ class AnonBudgetDraftTheme(AnonDraftTheme):
             if not current.get('skipped') and state.get('live_pick_number') == current['pick_number']:
                 # Keep the original deadline. An invalid proposal at expiry
                 # gets skipped by the next callback instead of a fresh clock.
-                seconds = max(0, (team.get('timer_deadline') or time.time()) - time.time())
+                deadline = team.get('timer_deadline')
+                seconds = max(0, deadline-time.time()) if deadline is not None else self._settings(ctx)['base_timer_minutes']*60
                 team['timer_pick_number'] = current['pick_number']
                 self._start_team_timer(ctx, state, team_idx, seconds / 60)
             for member_id in team['member_ids']:

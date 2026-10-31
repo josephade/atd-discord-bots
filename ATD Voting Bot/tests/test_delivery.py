@@ -80,6 +80,128 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         await self.poll()
         self.person.send.assert_awaited_once()
 
+    async def prepare_reveal(self):
+        ballot_rows = rows()
+        ballot_rows[0][2] = '[Los Angeles Lakers]'
+        self.read_mock.return_value = ballot_rows+[[], ['Team', 'Wins', 'Losses', 'GM'],
+            ['Los Angeles Lakers', '50', '32', 'Soapz']]
+        ctx = SimpleNamespace(guild=self.guild, author=self.person, channel=SimpleNamespace(id=789), send=AsyncMock())
+        await self.bot.get_command('reveal').callback(ctx, query='112 1')
+        return ctx, self.person.send.call_args.kwargs['view']
+
+    async def test_reveal_private_choice_before_posting_anonymous_and_save_once(self):
+        ctx, view = await self.prepare_reveal()
+        self.assertNotIn('file', ctx.send.call_args.kwargs)
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 0)
+        interaction = SimpleNamespace(user=self.person, response=SimpleNamespace(edit_message=AsyncMock()), edit_original_response=AsyncMock())
+        await view.children[1].callback(interaction)
+        ctx.send.return_value.delete.assert_awaited_once()
+        text = ctx.send.call_args.args[0]
+        self.assertIn('50-32', text)
+        self.assertNotIn('Soapz', text)
+        self.assertNotIn('<@456>', text)
+        self.assertIn('1st Seed', text)
+        self.assertIn('Elite territory', text)
+        self.assertEqual(ctx.send.call_args.kwargs['allowed_mentions'].users, False)
+        self.assertIn('file', ctx.send.call_args.kwargs)
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 1)
+        calls = ctx.send.await_count
+        await view.children[0].callback(interaction)
+        self.assertEqual(ctx.send.await_count, calls)
+
+    async def test_reveal_with_gm_includes_previous_record_comparison(self):
+        self.bot.vote_store.save_reveal_results('111', [dict(team='Los Angeles Lakers', wins='20', losses='62', gm_ids=[456])], 'test', 10)
+        ctx, view = await self.prepare_reveal()
+        interaction = SimpleNamespace(user=self.person, response=SimpleNamespace(edit_message=AsyncMock()), edit_original_response=AsyncMock())
+        await view.children[0].callback(interaction)
+        self.assertIn('<@456>', ctx.send.call_args.args[0])
+        self.assertIn('Elite territory', ctx.send.call_args.args[0])
+        self.assertIn('improved by 30 wins compared with ATD 111', ctx.send.call_args.args[0])
+        self.assertEqual([u.id for u in ctx.send.call_args.kwargs['allowed_mentions'].users], [456])
+        self.assertNotIn('verified Discord mapping', ctx.send.call_args.args[0])
+
+    async def test_reveal_invalid_seed_does_not_dm_or_write(self):
+        from test_reveal import rows as standing_rows
+        self.read_mock.return_value = standing_rows()
+        ctx = SimpleNamespace(guild=self.guild, author=self.person, send=AsyncMock())
+        await self.bot.get_command('reveal').callback(ctx, query='112 30')
+        self.person.send.assert_not_awaited()
+        self.assertIn('has 2 teams', ctx.send.call_args.args[0])
+
+    async def test_reveal_cancel_does_not_post_or_save(self):
+        ctx, view = await self.prepare_reveal()
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
+        calls = ctx.send.await_count
+        await view.children[2].callback(interaction)
+        self.assertEqual(ctx.send.await_count, calls)
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 0)
+
+    async def test_reveal_dm_blocked_does_not_post_result_or_save(self):
+        self.person.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'DMs closed')
+        self.read_mock.return_value = [['Timestamp', 'Enter Discord Name', '[Lakers]'],
+            ['10/28/2026 12:00:00', 'Soapz', 'Tier 1'], [],
+            ['Team', 'Wins', 'Losses', 'GM'], ['Lakers', '50', '32', 'Soapz']]
+        ctx = SimpleNamespace(guild=self.guild, author=self.person, channel=SimpleNamespace(id=789), send=AsyncMock())
+        await self.bot.get_command('reveal').callback(ctx, query='112 1')
+        self.assertIn('Enable DMs', ctx.send.call_args.args[0])
+        self.assertNotIn('file', ctx.send.call_args.kwargs)
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 0)
+
+    async def test_failed_public_reveal_does_not_save_history(self):
+        ctx, view = await self.prepare_reveal()
+        ctx.send.side_effect = OSError('offline')
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()), edit_original_response=AsyncMock())
+        await view.children[0].callback(interaction)
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 0)
+
+    async def test_reveal_requires_commissioner(self):
+        ctx = SimpleNamespace(guild=self.guild, author=SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False), roles=[]))
+        self.assertFalse(await self.bot.get_command('reveal').checks[0](ctx))
+
+    async def prepare_revealall(self, draft=''):
+        self.read_mock.return_value = rows()+[[], ['Team', 'Wins', 'Losses', 'GM'],
+            ['Lakers', '50', '32', 'Soapz'], ['Bulls', '22', '60', 'Soapz']]
+        ctx = SimpleNamespace(guild=self.guild, author=self.person, channel=SimpleNamespace(id=789), send=AsyncMock())
+        await self.bot.get_command('revealall').callback(ctx, draft)
+        return ctx, self.person.send.call_args.kwargs['view']
+
+    async def test_revealall_one_private_choice_posts_descending_with_full_reports(self):
+        ctx, view = await self.prepare_revealall()
+        self.person.send.assert_awaited_once()
+        self.assertIn('from 2 to 1', self.person.send.call_args.args[0])
+        self.assertNotIn('file', ctx.send.call_args.kwargs)
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()), edit_original_response=AsyncMock())
+        with patch('bot.asyncio.sleep', new_callable=AsyncMock):
+            await view.children[0].callback(interaction)
+        posts = [c for c in ctx.send.call_args_list if 'file' in c.kwargs]
+        self.assertEqual([c.kwargs['file'].filename for c in posts], ['ATD-112-seed-2-votes.png', 'ATD-112-seed-1-votes.png'])
+        self.assertTrue(all('<@456>' in c.args[0] for c in posts))
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 2)
+        self.assertIn('all 2 seeds', interaction.edit_original_response.call_args.kwargs['content'])
+
+    async def test_revealall_anonymous_applies_to_every_image(self):
+        from report_image import render_team_report
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()), edit_original_response=AsyncMock())
+        with patch('bot.asyncio.sleep', new_callable=AsyncMock), patch('report_image.render_team_report', wraps=render_team_report) as renderer:
+            ctx, view = await self.prepare_revealall('112')
+            await view.children[1].callback(interaction)
+        self.assertEqual(renderer.call_count, 2)
+        self.assertTrue(all(c.kwargs['anonymous'] for c in renderer.call_args_list))
+        self.assertTrue(all('<@456>' not in c.args[0] for c in ctx.send.call_args_list if 'file' in c.kwargs))
+
+    async def test_revealall_stops_on_failed_send_without_posting_higher_seeds(self):
+        ctx, view = await self.prepare_revealall()
+        ctx.send.side_effect = OSError('offline')
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()), edit_original_response=AsyncMock())
+        await view.children[0].callback(interaction)
+        self.assertEqual(self.bot.vote_store.db.execute('SELECT COUNT(*) FROM reveal_results').fetchone()[0], 0)
+        self.assertIn('stopped after 0', interaction.edit_original_response.call_args.kwargs['content'])
+        self.assertEqual(ctx.send.call_args.kwargs['file'].filename, 'ATD-112-seed-2-votes.png')
+
+    async def test_revealall_requires_commissioner(self):
+        ctx = SimpleNamespace(guild=self.guild, author=SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False), roles=[]))
+        self.assertFalse(await self.bot.get_command('revealall').checks[0](ctx))
+
     async def test_team_report_read_only_and_explicit_historical_draft(self):
         before = [dict(r) for r in self.bot.vote_store.receipt_candidates('112')]
         ctx = SimpleNamespace(guild=self.guild, author=self.person, send=AsyncMock())

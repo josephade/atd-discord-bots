@@ -76,7 +76,78 @@ async def expire(bot, draft_id, token):
         await theme._resolve_on_timeout(ctx, int(team), int(slot))
 
 
+async def skip_turn(bot, draft_id, payload):
+    from config import OWNER_ID
+    actor = int(payload.get('actor_id', 0))
+    request_id = int(payload.get('request_id', 0))
+    async with draft_lock(draft_id):
+        draft = db.get_draft(draft_id)
+        if not draft or draft['status'] != 'active':
+            raise ValueError('The draft must be active before skipping a turn.')
+        if draft['theme'] != 'anon_budget_draft':
+            raise ValueError('Manual !timerskip is currently available for Anonymous Budget drafts.')
+        state = draft['state']
+        if request_id and request_id in state.get('skip_request_ids', []):
+            return
+        current = snapshot(draft).get('current')
+        if not current or current['token'] != payload.get('token'):
+            raise ValueError('The turn changed or no team is on the clock. Check the latest timer prompt.')
+        _, index, pick_number = current['token'].split(':')
+        index, pick_number = int(index), int(pick_number)
+        members = [db.get_drafter(mid)['user_id'] for mid in state['teams'][index]['member_ids']]
+        permitted = actor in members or actor == OWNER_ID
+        if not permitted:
+            guild = bot.get_guild(draft['guild_id'])
+            member = guild.get_member(actor) if guild else None
+            if member is not None:
+                roles = getattr(member, 'roles', [])
+                permitted = (getattr(getattr(member, 'guild_permissions', None), 'administrator', False) is True
+                             or isinstance(roles, (list, tuple)) and any(r.name == 'LeComissioner' for r in roles))
+        if not permitted:
+            raise ValueError('Only a GM on the current team, a commissioner, or the owner can skip this turn.')
+        if request_id:
+            state['skip_request_ids'] = (state.get('skip_request_ids', [])+[request_id])[-500:]
+            db.set_draft_state(draft_id, state)
+        entry = next(p for p in state['teams'][index]['open_picks'] if p['pick_number'] == pick_number)
+        await themes.get_theme(draft['theme'])._skip_locked(DraftContext(bot, draft_id), index, entry, 'Your team passed its turn with !timerskip.')
+
+
 def create_app(bot, key):
+    async def picklist_members(request):
+        if not hmac.compare_digest(request.headers.get('Authorization', ''), 'Bearer ' + key):
+            raise web.HTTPUnauthorized()
+        import anon_lists
+        try:
+            draft_id, user_id, guild_id = (int(request.query[k]) for k in ('draft', 'user', 'guild'))
+            action = None
+            if request.method == 'POST':
+                payload = await request.json()
+                action = payload.get('action') if isinstance(payload, dict) else ''
+                if action not in ('enable', 'disable', 'prices'):
+                    raise ValueError('Use enable or disable for the owner draft mode.')
+            source = payload.get('price_source') if request.method == 'POST' else None
+            result = await anon_lists.roster(draft_id, user_id, guild_id, action=action, price_source=source)
+            return web.json_response(result)
+        except (ValueError, KeyError, TypeError) as exc:
+            return web.json_response({'error': str(exc)}, status=400)
+
+    async def picklist(request):
+        if not hmac.compare_digest(request.headers.get('Authorization', ''), 'Bearer ' + key):
+            raise web.HTTPUnauthorized()
+        import anon_lists
+        try:
+            draft_id, user_id, guild_id = (int(request.query[k]) for k in ('draft', 'user', 'guild'))
+            if request.method == 'POST':
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError('Expected a list update object.')
+                result = await anon_lists.update(bot, draft_id, user_id, guild_id, payload)
+            else:
+                result = anon_lists.view(*anon_lists.participant(draft_id, user_id, guild_id))
+            return web.json_response(result)
+        except (ValueError, KeyError, TypeError) as exc:
+            return web.json_response({'error': str(exc)}, status=400)
+
     async def handle(request):
         if not hmac.compare_digest(request.headers.get('Authorization', ''), 'Bearer ' + key):
             raise web.HTTPUnauthorized()
@@ -92,10 +163,20 @@ def create_app(bot, key):
             raise web.HTTPNotFound()
         if request.method == 'POST':
             payload = await request.json()
-            await expire(bot, draft_id, str(payload.get('token', '')))
+            if payload.get('action') == 'skip':
+                try:
+                    await skip_turn(bot, draft_id, payload)
+                except (ValueError, TypeError) as exc:
+                    return web.json_response({'error': str(exc)}, status=400)
+            else:
+                await expire(bot, draft_id, str(payload.get('token', '')))
         return web.json_response(snapshot(db.get_draft(draft_id)))
 
-    app = web.Application(client_max_size=4096)
+    app = web.Application(client_max_size=32768)
+    app.router.add_get('/picklist-members', picklist_members)
+    app.router.add_post('/picklist-members', picklist_members)
+    app.router.add_get('/picklist', picklist)
+    app.router.add_post('/picklist', picklist)
     app.router.add_get('/clock/{draft}', handle)
     app.router.add_post('/clock/{draft}', handle)
     return app

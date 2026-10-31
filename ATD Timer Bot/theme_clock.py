@@ -15,7 +15,7 @@ class ThemeClocks:
         self.signatures = {}
         self.errors = set()
 
-    async def fetch(self, session, token=None):
+    async def fetch(self, session, token=None, action=None, actor_id=None, request_id=None):
         key = os.getenv('THEME_BRIDGE_KEY', '')
         if not key:
             raise ValueError('The Theme Bot connection is not configured.')
@@ -26,15 +26,27 @@ class ThemeClocks:
         params = {'channel': str(session.channel_id), 'guild': str(channel.guild.id)}
         headers = {'Authorization': 'Bearer ' + key}
         path = f'{url}/clock/{session.draft.theme_draft_id}'
+        payload = {'token': token} if token else None
+        if action:
+            payload = dict(token=token, action=action, actor_id=actor_id, request_id=request_id)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), trust_env=False) as client:
-            async with client.request('POST' if token else 'GET', path, params=params,
-                                      headers=headers, json={'token': token} if token else None) as response:
+            async with client.request('POST' if token or action else 'GET', path, params=params,
+                                      headers=headers, json=payload) as response:
                 if response.status != 200:
+                    if response.status == 400:
+                        error = await response.json()
+                        raise ValueError(error.get('error', 'The turn could not be skipped.'))
                     raise ValueError('Theme Bot has not authorized this draft/channel link, or is unavailable.')
                 data = await response.json()
         if data['mode'] != session.draft.mode:
             raise ValueError('Timer mode does not match the linked Theme draft. Use anon or partner as appropriate.')
         return data
+
+    async def skip(self, session, actor_id, request_id):
+        data = await self.fetch(session)
+        if data.get('status') != 'active' or not data.get('current'):
+            raise ValueError('No team is currently on the clock. Resume the draft or complete Flux first.')
+        return await self.fetch(session, token=data['current']['token'], action='skip', actor_id=actor_id, request_id=request_id)
 
     def embed(self, data):
         current = data.get('current')

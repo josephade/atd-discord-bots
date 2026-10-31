@@ -14,15 +14,62 @@ class Store:
                 draft TEXT PRIMARY KEY, sheet TEXT NOT NULL, gid INTEGER NOT NULL,
                 tiers INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS aliases (name TEXT PRIMARY KEY, user_id INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS gm_aliases (name TEXT PRIMARY KEY, user_id INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS deliveries (
                 draft TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL,
                 status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
                 next_try REAL NOT NULL DEFAULT 0, message_id INTEGER,
                 PRIMARY KEY (draft, key));
+            CREATE TABLE IF NOT EXISTS reveal_gms (
+                draft TEXT NOT NULL, team TEXT NOT NULL, user_ids TEXT NOT NULL,
+                PRIMARY KEY (draft, team));
+            CREATE TABLE IF NOT EXISTS reveal_results (
+                draft TEXT NOT NULL, team TEXT NOT NULL, payload TEXT NOT NULL,
+                PRIMARY KEY (draft, team));
         ''')
 
     def tracks(self):
         return [dict(r) for r in self.db.execute('SELECT * FROM tracks WHERE active=1')]
+
+    def reveal_mapping(self, draft, team):
+        from votes import normalize
+        row = self.db.execute('SELECT user_ids FROM reveal_gms WHERE draft=? AND team=?', (draft, normalize(team))).fetchone()
+        return json.loads(row[0]) if row else []
+
+    def gm_aliases(self):
+        return self.aliases() | dict(self.db.execute('SELECT name,user_id FROM gm_aliases'))
+
+    def set_gm_alias(self, name, user_id):
+        from votes import normalize
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO gm_aliases VALUES (?,?)', (normalize(name), user_id))
+
+    def set_reveal_mapping(self, draft, team, ids):
+        from votes import normalize
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO reveal_gms VALUES (?,?,?)', (draft, normalize(team), json.dumps(ids)))
+            row = self.db.execute('SELECT payload FROM reveal_results WHERE draft=? AND team=?', (draft, normalize(team))).fetchone()
+            if row:
+                payload = json.loads(row[0]); payload['gm_ids'] = ids
+                self.db.execute('UPDATE reveal_results SET payload=? WHERE draft=? AND team=?', (json.dumps(payload), draft, normalize(team)))
+
+    def save_reveal_results(self, draft, rows, sheet, gid, replace=False):
+        from votes import normalize
+        with self.db:
+            if replace:
+                self.db.execute('DELETE FROM reveal_results WHERE draft=?', (str(draft),))
+            for row in rows:
+                payload = dict(row, draft=str(draft), sheet=sheet, gid=gid, saved_at=time.time())
+                self.db.execute('INSERT OR REPLACE INTO reveal_results VALUES (?,?,?)', (str(draft), normalize(row['team']), json.dumps(payload)))
+
+    def previous_reveal(self, draft, user_id):
+        candidates = [json.loads(r[0]) for r in self.db.execute('SELECT payload FROM reveal_results')]
+        candidates = [r for r in candidates if r['draft'].isdigit() and int(r['draft']) < int(draft) and user_id in r.get('gm_ids', [])]
+        if not candidates:
+            return None
+        latest = max(int(r['draft']) for r in candidates)
+        matches = [r for r in candidates if int(r['draft']) == latest]
+        return matches[0] if len(matches) == 1 else None
 
     def register(self, draft, sheet, gid, tiers, ballots, active=True):
         with self.db:

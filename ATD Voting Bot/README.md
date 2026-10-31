@@ -135,13 +135,70 @@ delivery; its record is marked `invalid`. Correcting a submitted ballot creates
 a new revision and image. Exact repeated submissions with identical timestamps,
 names, and tiers are deduplicated. Different timestamps are separate submissions.
 Keep the original response table first. A repeated Timestamp header marks the
-start of a copied/formula table; everything after it is ignored. Do not rearrange
-the original responses into ranking tables.
+start of a copied/formula table; everything after it is excluded from ballots
+and receipts. For `!tierlist`, the second table supplies the calculated value
+beside each voter, for example `Soapz(6.5)`. Values match the original form name
+and team header, so reordered rows/columns and older copied timestamps work.
+Duplicate names require an unambiguous timestamp match. Blank, invalid, or
+unmatched values show as `(—)` rather than zero. Only voters retained in the
+current original response table appear; tiers, averages, and standout detection
+still use their original tier selections. Do not rearrange the original responses
+into ranking tables.
 
 SQLite stores tracked drafts, ballots, aliases, and delivery status under
 `STATE_DIR`. Keep it on persistent storage and run only **one bot process** per
 database. Transient Google failures are retried on the next poll. Unmatched names
 are checked again every five minutes. Closed DMs require an explicit retry.
+
+### Standings reveals (commissioners only)
+
+- `!reveal 30`: prepare the 30th seed in the latest active registered ATD.
+- `!reveal 113 29`: choose an ATD explicitly. The seed must exist in its final table.
+- `!revealall` or `!revealall 113`: reveal every seed in descending order,
+  using the actual team count (30 to 1, 32 to 1, or 29 to 1 for ATD 113).
+  One private GM/anonymous choice applies to the entire run. Each team gets its
+  own complete reveal and voting report, spaced at least 1.5 seconds apart.
+  The run uses one live sheet snapshot, saves each successful result, and stops
+  on a posting failure without automatic retries. Concurrent runs in the same
+  channel are blocked. If interrupted, check the last posted seed and use
+  `!reveal` for remaining individual seeds; restarting `!revealall` starts over.
+- The bot DMs the commissioner **Reveal with GM**, **Keep GM anonymous**, and
+  **Cancel** buttons. Nothing is publicly revealed until a choice is made;
+  the prompt expires in three minutes. DMs must be enabled.
+- The public post includes the team logo/name, rounded win-loss record, and the
+  same complete team voting PNG as `!tierlist`. Anonymous reveals omit GM names,
+  mentions, and personal comparisons, and blur the voter names in the attached
+  report (including standouts). The blur uses neutral placeholders, so the PNG
+  contains no original voter names. Revealed reports show the original names.
+  Revealed GMs receive a ping; roles and everyone mentions remain disabled.
+  The channel's DM reminder is deleted after a choice or cancellation.
+- Both reveal modes add an NBA historical comparison using the displayed
+  rounded record: a roast below 30 wins, encouragement around .500, and elite
+  praise at 50+ wins. Exact win-loss matches take priority. Unmatched records
+  explicitly say "Closest historical comparison" and show the real NBA record.
+  Historical links are included. The bundled `nba_records.json` uses completed
+  82-game regular seasons from ESPN standings and NBA historical sources;
+  shortened seasons are excluded. Comparisons require no runtime network call.
+  Refresh the data with `python tools/update_nba_records.py` when needed.
+- The response tab must contain one table with adjacent `Team`, `Wins`, `Losses`,
+  `GM` headers. Seeds use the exact formula wins, descending; exact ties retain
+  sheet order. There is no hard-coded 30/32-team limit. Rounded records preserve
+  an integer season total; formula values are retained for history.
+- `!revealsync 113`: save the entire final standings as a historical baseline,
+  without posting any reveals. Repeating it replaces that draft's snapshot.
+  Each successful reveal also saves that individual team's result.
+- `!revealgm 113 :lakers: @GM [@coGM]`: explicitly identify GMs for a team in
+  that draft. Exact Discord names and `!votealias` mappings also work automatically.
+  Slash/comma/ampersand-separated co-GMs must all resolve. Ambiguous cells such
+  as `Sors Deuce Axyr` are never guessed or split on spaces.
+- GM comparisons use Discord IDs across teams and the latest earlier saved ATD.
+  A co-GM receives the team's full record once. Deltas use exact formula values,
+  displayed to one decimal. Missing/ambiguous history is stated rather than treated
+  as zero; unmatched GM cells are retained but excluded from personal comparisons.
+  Sync earlier ATDs and map their GMs to build comparison coverage.
+- These results stay in Voting Bot's local SQLite database. They do not alter
+  Google formulas or ATD Win Bot's historical records. Run Voting Bot in your
+  terminal as usual; no background service or Fly deployment is needed.
 
 The normal `bot.py` entry point holds an OS lock in `state/bot.lock` for this
 installation; a second launch exits before connecting to Discord or polling votes.

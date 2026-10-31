@@ -150,7 +150,15 @@ class Renderer {
     }
     return this.page;
   }
+  // A crashed or detached tab is thrown away by drawOnce, so one retry gets a fresh one.
   async draw(model) {
+    try { return await this.drawOnce(model); }
+    catch (error) {
+      console.error('Render retry:', error.message);
+      return this.drawOnce(model);
+    }
+  }
+  async drawOnce(model) {
     const page = await this.warm();
     try {
       await page.setContent(html(model), { waitUntil: 'domcontentloaded', timeout: 10000 });

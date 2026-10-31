@@ -18,7 +18,7 @@ spec.loader.exec_module(clock)
 
 def load_commands(ns):
     tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
-    names = {'timermode', 'timerstart', 'timerlink', '_anonymous_command_guard'}
+    names = {'timermode', 'timerstart', 'timerlink', 'timerskip', '_anonymous_command_guard'}
     nodes = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
     for node in nodes:
         node.decorator_list = []
@@ -27,6 +27,16 @@ def load_commands(ns):
 
 
 class AnonymousModes(unittest.IsolatedAsyncioTestCase):
+    async def test_linked_skip_routes_to_theme_without_local_skip_logic(self):
+        session = NS(draft=NS(mode='anon', theme_draft_id=25))
+        adapter = NS(skip=AsyncMock(return_value={'status': 'active'}), render=AsyncMock())
+        fallback = AsyncMock()
+        ns = load_commands(dict(_sessions={99: session}, _theme_clocks=adapter, _resolve_command_session=fallback))
+        ctx = NS(channel=NS(id=99), author=NS(id=100), message=NS(id=123), send=AsyncMock())
+        await ns['timerskip'](ctx)
+        adapter.skip.assert_awaited_once_with(session, 100, 123)
+        fallback.assert_not_awaited()
+
     def setup_command(self, state='idle'):
         session = NS(channel_id=99, draft=NS(mode='snake', state=state, theme_draft_id=None, save=Mock()))
         ns = load_commands({'_resolve_command_session': AsyncMock(return_value=session),
@@ -66,11 +76,13 @@ class AnonymousModes(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_mutations_are_blocked_but_status_allowed(self):
         session, ns, ctx = self.setup_command()
         session.draft.mode = 'partner'
-        for name in ('timerstart', 'timerskip', 'timerloadlotto', 'timerjumpto', 'timerpause'):
+        for name in ('timerstart', 'timerloadlotto', 'timerjumpto', 'timerpause'):
             ctx.command.name = name
             with self.assertRaises(commands.CheckFailure):
                 await ns['_anonymous_command_guard'](ctx)
         ctx.command.name = 'timerstatus'
+        self.assertTrue(await ns['_anonymous_command_guard'](ctx))
+        ctx.command.name = 'timerskip'
         self.assertTrue(await ns['_anonymous_command_guard'](ctx))
 
     async def test_failed_link_does_not_persist_draft_id(self):
@@ -83,6 +95,18 @@ class AnonymousModes(unittest.IsolatedAsyncioTestCase):
 
 
 class ClockTransport(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_skip_pins_token_and_actor_and_rejects_waiting_clock(self):
+        adapter = clock.ThemeClocks(Mock(), {})
+        session = object()
+        data = dict(status='active', current={'token': 'a:0:3'})
+        adapter.fetch = AsyncMock(side_effect=[data, {'status': 'active', 'current': None}])
+        await adapter.skip(session, 100, 1234)
+        self.assertEqual(adapter.fetch.call_args.kwargs, dict(token='a:0:3', action='skip', actor_id=100, request_id=1234))
+        adapter.fetch = AsyncMock(return_value=dict(status='active', current=None))
+        with self.assertRaisesRegex(ValueError, 'No team'):
+            await adapter.skip(session, 100, 1234)
+        adapter.fetch.assert_awaited_once()
+
     async def test_authenticated_snapshot_and_expiry_use_same_channel_and_guild(self):
         requests = []
         data = {'mode': 'partner', 'status': 'active', 'finished': False, 'rounds': 10,

@@ -13,6 +13,7 @@ from discord.ext import commands
 from googleapiclient.discovery import build
 from oauth2client.service_account import ServiceAccountCredentials
 from player_years import get_default_year
+from flux_rules import parse_prices, find_player, qualify as qualify_flux_pick, threshold as flux_threshold, failure_message, saved_message, failure_reports
 
 from config import (
     DISCORD_TOKEN,
@@ -104,6 +105,137 @@ _canonical_names: dict[str, str] = {}
 
 # Tracks the last auto-pick so we can retry if the timer bot rejects it
 _last_autopick: dict | None = None  # {"user": discord.User, "pick_num": int}
+_flux_turn = None
+_flux_in_progress = False
+FLUX_BOT_ID = int(os.getenv('FLUX_BOT_ID', '1466803932310405181'))
+_FLUX_SOURCE_FILE = os.path.join(os.getenv('STATE_DIR', '/data'), 'flux_source.json')
+
+
+def _flux_source():
+    try:
+        with open(_FLUX_SOURCE_FILE) as source_file:
+            return json.load(source_file)
+    except (OSError, ValueError):
+        return {'sheet': SPREADSHEET_ID, 'tab': PLAYERS_SHEET_NAME}
+
+
+def _fetch_flux_book(source=None):
+    source = source or _flux_source()
+    service = _build_sheets_service()
+    try:
+        title = source['tab'].replace("'", "''")
+        rows = service.spreadsheets().values().get(spreadsheetId=source['sheet'],
+            range=f"'{title}'!A:AZ", valueRenderOption='FORMATTED_VALUE').execute().get('values', [])
+        return parse_prices(rows)
+    finally:
+        service.close()
+
+
+async def _flux_books(picks):
+    books = {}
+    if globals().get('_flux_in_progress', False):
+        return books
+    for pick in picks:
+        if 'flux_drop' in pick:
+            source = pick.get('flux_source') or _flux_source()
+            token = json.dumps(source, sort_keys=True)
+            if token not in books:
+                try:
+                    books[token] = await asyncio.to_thread(_fetch_flux_book, source)
+                except Exception:
+                    log.warning('Flux price read failed; conditional picks will wait.')
+                    books[token] = {}
+    return books
+
+
+async def _maybe_flux_pick(uid):
+    turn = _flux_turn
+    if not turn or int(uid) not in turn['user_ids'] or _data.get(str(uid), {}).get('anon_draft_id'):
+        return
+    pending = _last_autopick
+    if pending and pending['pick_num'] == turn['pick_num'] and pending['user'].id in turn['user_ids']:
+        return
+    entry = _data.get(str(uid), {})
+    if not entry.get('enabled', True) or not any('flux_drop' in p for p in entry.get('picks', [])):
+        return
+    channel = bot.get_channel(turn['channel_id'])
+    user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+    if channel:
+        await _do_auto_pick(channel, user, turn['pick_num'])
+
+
+async def _recover_flux_activity(channel):
+    global _flux_in_progress
+    _flux_in_progress = True
+    try:
+        async for message in channel.history(limit=100):
+            if message.author.bot and message.author.id == FLUX_BOT_ID:
+                text = message.content.replace('*', '').strip()
+                if 'flux is in progress' in text.casefold():
+                    return
+                if re.fullmatch(r'✅\s*Round\s+\d+\s+Flux is done', text, re.I):
+                    _flux_in_progress = False
+                    return
+        _flux_in_progress = False
+    except Exception:
+        log.warning('Could not recover Flux status; conditional picks will wait for the next Flux completion.')
+
+
+async def _normal_flux_window(uid, source_round):
+    turn = globals().get('_flux_turn')
+    if turn and int(uid) in turn['user_ids']:
+        return False
+    emoji = await _ensure_team_emoji(str(uid))
+    lotto = await _load_lotto_teams()
+    teams = {value for value in lotto.values() if value}
+    channel = bot.get_channel(DRAFT_CHANNEL_ID)
+    if not emoji or not teams or channel is None:
+        return False
+    current_round = source_round
+    messages = [message async for message in channel.history(limit=1000)]
+    first_pick = next((message.id for message in messages if re.match(r'^\s*1\s*\.', message.content)), None)
+    if first_pick is None:
+        return False
+    _data[str(uid)]['flux_draft_start'] = first_pick
+    for message in messages:
+        if message.author.id == TIMER_BOT_ID and message.embeds:
+            match = re.search(r'Round\s+(\d+)', message.embeds[0].title or '', re.I)
+            if match:
+                current_round = int(match[1]); break
+    for message in messages:
+        match = re.match(r'^\s*(\d+)\s*\.', message.content)
+        if (match and (current_round-1)*len(teams) < int(match[1]) <= current_round*len(teams)
+                and emoji in message.content and not message.content.strip().lower().endswith('skipped')
+                and not any(str(reaction.emoji) == '❌' for reaction in getattr(message, 'reactions', []))):
+            return True
+    return False
+
+
+async def _settle_normal_flux(completed_round):
+    for uid, entry in list(_data.items()):
+        if entry.get('anon_draft_id'):
+            continue
+        rules = [pick for pick in entry.get('picks', []) if 'flux_drop' in pick]
+        if not rules:
+            continue
+        books = await _flux_books(rules)
+        notices, remaining = [], []
+        for pick in entry.get('picks', []):
+            if 'flux_drop' not in pick or pick.get('flux_target_round', completed_round) > completed_round:
+                remaining.append(pick); continue
+            source = pick.get('flux_source') or _flux_source()
+            book = books.get(json.dumps(source, sort_keys=True), {})
+            if 'flux_target_round' in pick and qualify_flux_pick(pick, book) is not None:
+                remaining.append(pick)
+            else:
+                notices.append(failure_message(pick, book) if qualify_flux_pick(pick, book) is None else
+                               f"Your old Flux rule for {pick['player']} was cleared because it was not tied to an upcoming Flux. Finish your current pick before submitting a fresh rule.")
+        if notices:
+            entry['picks'] = remaining
+            _save_data(_data)
+            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+            for notice in failure_reports(notices):
+                await user.send(notice)
 
 def _iter_player_rows():
     """Read only names and fill colours, in bounded batches.
@@ -317,7 +449,9 @@ def _format_pick(pick: dict) -> str:
     parts = [pick["player"]]
     if pick.get("year"):
         parts.append(f"'{pick['year'][-2:]}")
-    if pick.get("price") is not None:
+    if 'flux_drop' in pick:
+        parts.append(f"[Flux Round {pick.get('flux_target_round', '?')}: drop >= ${pick['flux_drop']:g}]")
+    elif pick.get("price") is not None:
         parts.append(f"${pick['price']}")
     if pick.get("lock"):
         parts.append("🔒")
@@ -462,6 +596,9 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
     uid       = str(user.id)
     user_data = _data.get(uid, {})
 
+    if user_data.get('anon_draft_id'):
+        return  # Theme Bot owns anonymous turns; never fall back to public picks.
+
     if not user_data.get("enabled", True):
         log.info("AUTO-PICK | %s | paused — skipping", user.display_name)
         return
@@ -543,6 +680,7 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
         log.error("AUTO-PICK | ROSTER sheet fetch also failed: %s", e)
 
     # Walk list — find first available player
+    flux_books = await _flux_books(picks) if any('flux_drop' in p for p in picks) else {}
     chosen_idx  = None
     chosen_pick = None
     skipped     = []
@@ -553,6 +691,14 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
             skipped.append(pick["player"])
             log.info("AUTO-PICK | %s | '%s' barred for this repick — skipping", user.display_name, pick["player"])
         elif _player_available(pick["player"], availability, roster_names):
+            if 'flux_drop' in pick:
+                if 'flux_target_round' not in pick:
+                    continue
+                source = pick.get('flux_source') or _flux_source()
+                eligible = qualify_flux_pick(pick, flux_books.get(json.dumps(source, sort_keys=True), {}))
+                if eligible is None:
+                    continue
+                pick = eligible
             chosen_idx  = idx
             chosen_pick = pick
             break
@@ -561,6 +707,9 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
             log.info("AUTO-PICK | %s | '%s' already taken — skipping", user.display_name, pick["player"])
 
     if chosen_pick is None:
+        if any('flux_drop' in p for p in picks):
+            await user.send('No available player currently meets your list conditions, or live Flux prices could not be verified. Your timer keeps running. I will recheck after Flux or a list update while it is your turn.')
+            return
         log.warning("AUTO-PICK | %s | all picks taken", user.display_name)
         try:
             taken_list = "\n".join(f"• {n}" for n in skipped)
@@ -580,6 +729,10 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
         chosen_pick = {**chosen_pick, "player": canonical}
 
     # Mark as drafted BEFORE posting so no concurrent path can pick the same player
+    if 'flux_drop' in chosen_pick:
+        turn = globals().get('_flux_turn')
+        if not turn or turn['pick_num'] != pick_num or user.id not in turn['user_ids']:
+            return  # The authoritative Timer prompt changed during the price read.
     _drafted_this_session.add(chosen_pick["player"].lower())
 
     # Set BEFORE posting (not after) — the gateway can echo our own message back
@@ -592,7 +745,7 @@ async def _do_auto_pick_inner(channel: discord.TextChannel, user: discord.User, 
     _last_autopick = pending
     team_lists = {
         team_uid: source_lists.get(team_uid) for team_uid, entry in _data.items()
-        if team_uid == uid or _resolve_emoji_input(entry.get("emoji", "")) == emoji
+        if not entry.get('anon_draft_id') and (team_uid == uid or _resolve_emoji_input(entry.get("emoji", "")) == emoji)
     }
 
     # Post the pick
@@ -637,6 +790,135 @@ intents.message_content = True
 intents.members         = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+from anon_bridge import AnonymousLists, BridgeError
+
+def _anon_guild_id():
+    channel = bot.get_channel(DRAFT_CHANNEL_ID)
+    return getattr(getattr(channel, 'guild', None), 'id', None) or int(os.getenv('DISCORD_GUILD_ID', '0'))
+
+_anonymous_lists = AnonymousLists(bot, _data, _save_data, _parse_pick_line, _anon_guild_id, owner=OWNER_ID, price_source=_flux_source)
+
+@bot.check
+async def _anonymous_command_check(ctx):
+    if ctx.command.name in ('wipelists', 'resetall', 'clearlist', 'setlistfor') and any(e.get('anon_draft_id') for e in _data.values()):
+        await ctx.send('Anonymous lists are controlled privately by Theme Bot. Use its commissioner tools, or have the owner run !draftmode normal before a global reset.')
+        return False
+    return await _anonymous_lists.check(ctx)
+
+@bot.command(name='draftmode')
+async def cmd_draftmode(ctx, *, mode: str = ''):
+    if ctx.guild is not None and ctx.guild.id != _anon_guild_id():
+        await ctx.send('Use this command in the ATD server or DM Draft List Bot.')
+        return
+    try:
+        await _anonymous_lists.mode(ctx, mode.strip().lower())
+    except BridgeError as exc:
+        await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name='fluxsource')
+async def cmd_fluxsource(ctx, sheet_url: str = '', *, tab: str = ''):
+    if ctx.author.id != OWNER_ID:
+        await ctx.send('Only the bot owner can configure the Flux price sheet.')
+        return
+    if not sheet_url:
+        source = _flux_source()
+        await ctx.send(f"Flux price tab: **{source['tab']}**. Use `!fluxsource <Google Sheet URL> <tab name>` to change it, or `!fluxsource reset`.")
+        return
+    if sheet_url.lower() == 'reset':
+        source = {'sheet': SPREADSHEET_ID, 'tab': PLAYERS_SHEET_NAME}
+    else:
+        match = re.search(r'/spreadsheets/d/([A-Za-z0-9_-]+)', sheet_url)
+        if not match or not tab.strip():
+            await ctx.send('Use `!fluxsource <Google Sheet URL> <tab name>`. The tab must contain Player, Value and Round N columns.')
+            return
+        source = {'sheet': match[1], 'tab': tab.strip()}
+    try:
+        await asyncio.to_thread(_fetch_flux_book, source)
+    except Exception:
+        await ctx.send('Could not validate that Flux price tab. Check access and its Player / Value headers. The previous source was kept.')
+        return
+    os.makedirs(os.path.dirname(_FLUX_SOURCE_FILE), exist_ok=True)
+    with open(_FLUX_SOURCE_FILE, 'w') as source_file:
+        json.dump(source, source_file)
+    try:
+        await _anonymous_lists.sync_price_source(source)
+    except BridgeError as exc:
+        await ctx.send(f'The Draft List source was saved, but Theme Bot could not confirm it: {exc}. Rerun this command before continuing the anonymous draft.')
+        return
+    await ctx.send('Flux price source saved. New conditional picks will use this tab; existing rules retain their original source.')
+
+
+@bot.command(name='fluxpick')
+async def cmd_fluxpick(ctx, *, text: str = ''):
+    if not _dm_only(ctx):
+        await ctx.send('DM this command to Draft List Bot: `!fluxpick <player> [year] <drop amount>`.')
+        return
+    try:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not 1 <= len(lines) <= 100:
+            raise ValueError('Use `!fluxpick` followed by one player and minimum drop per line. Example: `Alvan Adams 2`. Up to 100 entries.')
+        source = _flux_source()
+        book = await asyncio.to_thread(_fetch_flux_book, source)
+        additions, seen = [], set()
+        for number, line in enumerate(lines, 1):
+            parts = line.rsplit(None, 1)
+            if len(parts) != 2:
+                raise ValueError(f'Line {number}: expected a player and minimum drop, for example Alvan Adams 2. No rules were saved.')
+            drop = flux_threshold(parts[1])
+            pick = _parse_pick_line(parts[0])
+            record = find_player(book, pick['player'])
+            if record['current'] is None:
+                raise ValueError('The latest Flux price is not available yet. Wait until Flux finishes.')
+            if record['player'].casefold() in seen:
+                raise ValueError(f"{record['player']} appears twice. Each player can only be submitted once. No rules were saved.")
+            seen.add(record['player'].casefold())
+            pick.update(player=record['player'], price=float(record['current']), flux_drop=drop, flux_source=source,
+                        flux_from_round=record['round'], flux_target_round=record['round']+1)
+            additions.append(pick)
+    except ValueError as exc:
+        await ctx.send(str(exc))
+        return
+    except Exception:
+        await ctx.send('Could not read the live Flux prices. No rule was saved. Ask the owner to check !fluxsource.')
+        return
+    uid = str(ctx.author.id)
+    if _anonymous_lists.linked(uid):
+        try:
+            await _anonymous_lists.add_flux(ctx, additions)
+        except BridgeError as exc:
+            await ctx.send(str(exc))
+        return
+    _ensure_user(uid)
+    if _flux_in_progress or not await _normal_flux_window(uid, record['round']):
+        await ctx.send('Finish your team’s current-round pick before setting a Flux pick for the next round. Flux rules must be submitted before Flux starts.')
+        return
+    existing = _data[uid]['picks']
+    tokens = []
+    for pick in additions:
+        token = json.dumps([_data[uid].get('flux_draft_start'), pick['player'].casefold(), source, pick['flux_target_round']], sort_keys=True)
+        if any(p['player'].casefold() == pick['player'].casefold() for p in existing) or token in _data[uid].get('flux_rule_attempts', []):
+            await ctx.send(f"You already submitted {pick['player']} for the upcoming Flux. No new rules were saved.")
+            return
+        tokens.append(token)
+    if len(existing)+len(additions) > 100:
+        await ctx.send('Your list can contain up to 100 players. No new rules were saved.')
+        return
+    try:
+        available = await asyncio.to_thread(_fetch_availability, force=True)
+        rosters = await asyncio.to_thread(_fetch_roster_names, force=True)
+        for pick in additions:
+            if not _player_available(pick['player'], available, rosters):
+                await ctx.send(f"{pick['player']} has already been drafted. No new rules were saved.")
+                return
+    except Exception:
+        await ctx.send('Could not verify player availability. No Flux rule was saved; please try again.')
+        return
+    _data[uid].setdefault('flux_rule_attempts', []).extend(tokens)
+    existing.extend(additions)
+    _save_data(_data)
+    await ctx.send(saved_message(additions))
 
 
 def _resolve_emoji_input(raw: str) -> str:
@@ -705,10 +987,12 @@ def _reresolve_stored_emojis():
 @bot.event
 async def on_ready():
     log.info("ATD Draft List Bot ready — %s", bot.user)
+    _anonymous_lists.start()
     _reresolve_stored_emojis()
     asyncio.create_task(_repair_team_emojis())
     channel = bot.get_channel(DRAFT_CHANNEL_ID)
     if channel:
+        await _recover_flux_activity(channel)
         asyncio.create_task(_backfill_drafted_session(channel))
 
 
@@ -764,6 +1048,22 @@ async def _backfill_drafted_session(channel: discord.TextChannel):
 
 @bot.event
 async def on_message(message: discord.Message):
+    global _flux_turn, _flux_in_progress
+    if message.author.bot and re.fullmatch(r'\s*\d+\.\s+.+?\s+skipped\s*', message.content, re.I):
+        return
+    if (message.author.bot and message.author.id == globals().get('FLUX_BOT_ID', 1466803932310405181)
+            and message.channel.id == DRAFT_CHANNEL_ID):
+        text = message.content.replace('*', '').strip()
+        if 'flux is in progress' in text.casefold():
+            _flux_in_progress = True
+            return
+        if re.fullmatch(r'✅\s*Round\s+\d+\s+Flux is done', text, re.I):
+            _flux_in_progress = False
+            await _settle_normal_flux(int(re.search(r'Round\s+(\d+)', text, re.I)[1]))
+            if _flux_turn:
+                for uid in _flux_turn['user_ids']:
+                    await _maybe_flux_pick(str(uid))
+            return
     global _last_autopick, _availability_cache, _roster_cache
 
     # ── Timer bot rejection — retry with next available pick ──────────────────
@@ -833,11 +1133,14 @@ async def on_message(message: discord.Message):
     ):
         embed = message.embeds[0]
         desc  = embed.description or ""
+        _flux_turn = None
 
         if "your turn" in desc.lower():
             m = _PICK_NUM_RE.search(embed.title or "")
             if m:
                 pick_num = int(m.group(1))
+                _flux_turn = {'pick_num': pick_num, 'channel_id': message.channel.id,
+                              'user_ids': [member.id for member in message.mentions]}
                 for mentioned_user in message.mentions:
                     uid = str(mentioned_user.id)
                     if uid in _data and _data[uid].get("picks") and _data[uid].get("enabled", True):
@@ -851,6 +1154,10 @@ async def on_message(message: discord.Message):
         return  # don't process bot messages as commands
 
     # ── Real-time pick tracking (draft channel) ───────────────────────────────
+    # Any attempted pick invalidates the cached turn until Timer confirms it again.
+    attempted = re.match(r'^\s*(\d+)\s*\.', message.content)
+    if attempted and globals().get('_flux_turn') and int(attempted[1]) == _flux_turn['pick_num']:
+        _flux_turn = None
     # Any message that starts with "N." or "N ." is a pick announcement.
     # Check it against every registered pick list and mark matched players as
     # drafted so auto-picks skip them immediately — even before the sheet updates.
@@ -885,6 +1192,8 @@ async def on_message(message: discord.Message):
 
         # Track against all registered users' pick lists
         for uid, user_data in _data.items():
+            if user_data.get('anon_draft_id'):
+                continue
             if uid == auto_pick_uid:
                 continue
             picks = user_data.get("picks", [])
@@ -1299,6 +1608,8 @@ async def cmd_alllists(ctx):
     # best entry (active > paused, then more picks).
     seen: dict[int, str] = {}  # real_user_id → uid to keep
     for uid, user_data in _data.items():
+        if user_data.get('anon_draft_id') and not in_dm:
+            continue
         member  = ctx.guild.get_member(int(uid)) if ctx.guild else None
         fetched = bot.get_user(int(uid))
         real_id = member.id if member else (fetched.id if fetched else int(uid))
@@ -1735,6 +2046,7 @@ async def cmd_resume(ctx):
     _data[uid]["enabled"] = True
     _save_data(_data)
     await ctx.send("▶️ Auto-drafting **resumed**.")
+    await _maybe_flux_pick(uid)
 
 
 @bot.command(name="help")
@@ -1800,6 +2112,10 @@ async def cmd_help(ctx):
         ),
         inline=False,
     )
+    embed.add_field(name='Anonymous Budget', value='The owner runs `!draftmode anon <Theme draft ID>` once for every registered GM. '
+                    'Then DM `!setlist` with prices. No emoji setup needed; years optional. Owner: `!draftmode normal` withdraws everyone.', inline=False)
+    embed.add_field(name='Flux price conditions', value="After finishing your current pick, DM `!fluxpick Devin Booker '23 3` for the NEXT Flux only. "
+                    'Failed conditions expire with a DM; repeat players are blocked. Owner: `!fluxsource <sheet URL> <tab name>`.', inline=False)
     embed.set_footer(text="All commands must be sent as a DM to this bot.")
     await ctx.send(embed=embed)
 

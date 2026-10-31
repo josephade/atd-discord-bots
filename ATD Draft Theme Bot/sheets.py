@@ -163,6 +163,10 @@ def load_prices(spreadsheet_id: str, tab_name: str) -> dict[str, float]:
     return prices
 
 
+def load_flux_rule_rows(source):
+    return _client().open_by_key(source['sheet']).worksheet(source['tab']).get_all_values(value_render_option='FORMATTED_VALUE')
+
+
 _ROUND_COL_RE = re.compile(r'^round\s+(\d+)$', re.IGNORECASE)
 
 

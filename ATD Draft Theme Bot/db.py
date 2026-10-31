@@ -87,6 +87,22 @@ def init_db():
                 created_at       TEXT NOT NULL
             )
         ''')
+        con.execute('''
+            CREATE TABLE IF NOT EXISTS suspect_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                draft_id INTEGER NOT NULL REFERENCES drafts(id),
+                message_id INTEGER NOT NULL UNIQUE,
+                guesser_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                logo TEXT NOT NULL,
+                correct INTEGER NOT NULL,
+                charged INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                penalty_kind TEXT,
+                penalty_amount INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        ''')
 
 
 def _row(r) -> dict | None:
@@ -115,6 +131,45 @@ def create_draft(guild_id: int, admin_channel_id: int | None, theme: str, name: 
 def get_draft(draft_id: int) -> dict | None:
     with _conn() as con:
         return _row(con.execute('SELECT * FROM drafts WHERE id = ?', (draft_id,)).fetchone())
+
+
+def record_suspect(draft_id, message_id, guesser_id, target_id, logo, correct,
+                   phase, expected_state, consume_wrong=True, allow_repeat=False):
+    """Atomically enforce attempt/catch limits and persist the penalty audit."""
+    with _conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        previous = con.execute('SELECT id FROM suspect_attempts WHERE message_id=?', (message_id,)).fetchone()
+        if previous:
+            return {'status': 'replay'}
+        draft = con.execute('SELECT * FROM drafts WHERE id=?', (draft_id,)).fetchone()
+        if not draft or draft['status'] not in ('active', 'paused', 'complete'):
+            return {'status': 'closed'}
+        state = json.loads(draft['state_json'])
+        if state.get('identities_revealed'):
+            return {'status': 'revealed'}
+        if state != expected_state:
+            return {'status': 'changed'}
+        used = con.execute('SELECT COALESCE(SUM(charged),0) FROM suspect_attempts WHERE draft_id=? AND guesser_id=?',
+                           (draft_id, guesser_id)).fetchone()[0]
+        if used >= 3:
+            return {'status': 'limit', 'remaining': 0}
+        if not allow_repeat and con.execute('SELECT 1 FROM suspect_attempts WHERE draft_id=? AND target_id=? AND correct=1',
+                                           (draft_id, target_id)).fetchone():
+            return {'status': 'caught', 'remaining': 3 - used}
+        charged = bool(correct or consume_wrong)
+        kind = ('wins' if phase == 'draft' else 'odds_percent') if correct else None
+        amount = (5 if phase == 'draft' else 10) if correct else 0
+        con.execute('''INSERT INTO suspect_attempts
+            (draft_id,message_id,guesser_id,target_id,logo,correct,charged,phase,penalty_kind,penalty_amount,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+            (draft_id, message_id, guesser_id, target_id, logo, int(correct), int(charged), phase, kind, amount, _now()))
+        return {'status': 'correct' if correct else 'wrong', 'remaining': 3 - used - int(charged),
+                'penalty_kind': kind, 'penalty_amount': amount}
+
+
+def suspect_attempts(draft_id):
+    with _conn() as con:
+        return [dict(row) for row in con.execute('SELECT * FROM suspect_attempts WHERE draft_id=? ORDER BY id', (draft_id,))]
 
 
 def get_draft_by_name(name: str) -> dict | None:
@@ -320,6 +375,12 @@ def get_picks(draft_id: int, drafter_id: int) -> list[str]:
             'SELECT player FROM picks WHERE draft_id = ? AND drafter_id = ? ORDER BY id', (draft_id, drafter_id)
         ).fetchall()
         return [r[0] for r in rows]
+
+
+def get_pick_numbers(draft_id, drafter_id):
+    with _conn() as con:
+        return [r[0] for r in con.execute('SELECT pick_number FROM picks WHERE draft_id=? AND drafter_id=? AND pick_number IS NOT NULL',
+                                        (draft_id, drafter_id)).fetchall()]
 
 
 def get_pick_timestamps(draft_id: int, drafter_id: int) -> list[datetime]:

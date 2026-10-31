@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import discord
+import aiohttp
 from discord.ext import commands
 from rapidfuzz import fuzz, process
 
@@ -146,7 +147,7 @@ _theme_clocks = ThemeClocks(bot, _sessions)
 async def _anonymous_command_guard(ctx):
     session = _sessions.get(ctx.channel.id)
     if session and session.draft.mode in ('anon', 'partner'):
-        allowed = {'timermode', 'timerlink', 'timerunlink', 'timerstatus', 'timerhelp'}
+        allowed = {'timermode', 'timerlink', 'timerunlink', 'timerstatus', 'timerhelp', 'timerskip'}
         if ctx.command.name not in allowed:
             raise commands.CheckFailure('This anonymous draft is controlled by Theme Bot. Use its pause/resume and picking commands.')
     return True
@@ -3215,6 +3216,16 @@ async def challenge_cmd(ctx):
 
 @bot.command(name="timerskip")
 async def timerskip(ctx):
+    linked = _sessions.get(ctx.channel.id)
+    if linked and linked.draft.mode in ('anon', 'partner') and linked.draft.theme_draft_id:
+        try:
+            data = await _theme_clocks.skip(linked, ctx.author.id, ctx.message.id)
+            await _theme_clocks.render(linked, data)
+        except ValueError as exc:
+            await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            await ctx.send('Theme Bot could not confirm the skip. Check the current prompt before retrying.')
+        return
     s = await _resolve_command_session(ctx)
     if s is None:
         return

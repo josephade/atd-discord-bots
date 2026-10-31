@@ -57,6 +57,8 @@ class DefaultYearTests(unittest.TestCase):
         pick = {'player': 'Shawn Kemp', 'year': '1993-94'}
         self.assertEqual(self.ns['_build_pick_message'](74, ':team:', pick), "74. :team: Shawn Kemp '94")
 
+    @unittest.skipUnless((BOT_DIR.parent / 'ATD Draft Theme Bot' / 'themes' / 'player_years.py').exists(),
+                         'Cross-repository default-year parity is checked in the workspace.')
     def test_deployed_table_matches_theme_bots_commissioner_table(self):
         original = runpy.run_path(str(BOT_DIR.parent / 'ATD Draft Theme Bot' / 'themes' / 'player_years.py'))
         self.assertEqual(DEFAULTS['PLAYER_YEARS'], original['PLAYER_YEARS'])

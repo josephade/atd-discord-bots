@@ -13,7 +13,8 @@
 #      member team, whoever submits first becomes the proposer and every
 #      other member gets an agree (`1`)-or-counter (`2`) prompt; countering
 #      hands the proposer role to them instead, ping-ponging until someone
-#      agrees or a 2-minute response window lapses (silence = agreement).
+#      agrees or a 10-minute response window lapses (silence = agreement),
+#      capped by the original pick deadline.
 #   3. Posts each finalized pick as "<logo> picks <Player> [year] [price]"
 #      into a single fixed results channel (_RESULTS_CHANNEL_ID) — the only
 #      public record of a pick; there's no other downstream bot integration.
@@ -26,17 +27,19 @@ import logging
 import math
 import re
 import time
+import discord
 
 import db
 import lotto
 from timer import PickTimer
 from .base import DraftContext, Theme, draft_lock
+from .player_years import get_default_year
 
 log = logging.getLogger(__name__)
 
 _timer = PickTimer()  # keyed by (draft_id, team_index) — one clock per team, not per drafter
-_proposal_timer = PickTimer()  # same keying — the 2-minute agree-or-counter window for a pending proposal
-_PROPOSAL_RESPONSE_MINUTES = 2.0
+_proposal_timer = PickTimer()  # same keying — up to 10 minutes, within the original pick clock
+_PROPOSAL_RESPONSE_MINUTES = 10.0
 
 # This bot now runs turn order itself instead of watching ATD Timer Bot's
 # pings (see _open_pick_for_team/_advance_live_pick) — every finalized pick
@@ -68,8 +71,12 @@ def _display_year(year: str) -> str:
     Team Sheet Bot's year regex only consumes the apostrophe together with a
     2-digit year, so a 4-digit one leaves the "'" stuck on the player name
     in the sheet cell instead of being stripped into the year column."""
-    digits = year.split('-')[0]
+    digits = year.split('-')[-1]
     return digits[-2:] if len(digits) > 2 else digits
+
+
+def _year_suffix(year: str) -> str:
+    return f" '{_display_year(year)}" if year else ''
 
 # Team Sheet Bot treats any message starting with "N." or containing a raw
 # custom-emoji token as a pick attempt (its `looks_like_pick` check) and
@@ -173,6 +180,12 @@ class AnonDraftTheme(Theme):
         state['last_finalized_pick_number'] = 0
         state['live_pick_number'] = 1
         ctx.save_state(state)
+        for lotto_number, team in enumerate(teams, 1):
+            for member_id in team['member_ids']:
+                member = db.get_drafter(member_id)
+                await ctx.dm(member['user_id'],
+                             f"**{ctx.draft['name']}**\nYour team: {team['logo']}\n"
+                             f"Lotto number: **{lotto_number}** \u00b7 Round 1 pick **#{lotto_number}**")
         await self._open_pick_for_team(ctx, 0, 1)
         return f"Anonymous Draft started — {len(teams)} teams, {settings['rounds']} rounds. Pick #1 is now open."
 
@@ -199,18 +212,25 @@ class AnonDraftTheme(Theme):
         from flux_gate import hold_for_round
         if hold_for_round(ctx, state, (pick_number - 1) // len(state['teams']) + 1):
             return
-        price_hint = ' `<price>`' if settings['require_price'] else ''
 
         if not force and pick_number <= state.get('last_finalized_pick_number', 0):
             # Defensive: don't reopen a pick that's already been finalized.
             return
 
         entry = next((p for p in team['open_picks'] if p['pick_number'] == pick_number), None)
+        if entry is not None and entry.get('skipped'):
+            if state.get('live_pick_number') == pick_number:
+                await self._advance_live_pick(ctx, pick_number)
+            return
         is_new = entry is None
         if is_new:
             entry = {'pick_number': pick_number, 'skipped': False, 'proposal': None, 'pending_from': []}
             team['open_picks'].append(entry)
             ctx.save_state(state)
+
+            if any(p.get('skipped') and p['pick_number'] < pick_number for p in team['open_picks']):
+                await self._skip_locked(ctx, team_idx, entry, 'An earlier skipped pick is still owed, so this turn was automatically skipped too.')
+                return
 
             if await self._try_consume_queued_pick(ctx, state, team_idx, entry):
                 return  # a teammate's standing pick already fired — nothing else to do
@@ -233,8 +253,9 @@ class AnonDraftTheme(Theme):
                 drafter['user_id'],
                 f"🏀 **Pick #{pick_number} — you're on the clock!**\n"
                 f"Your team: {team['logo']}\n"
+                + self._budget_note(ctx, team) +
                 f"Deadline: <t:{deadline_ts}:R>\n"
-                f"DM me your pick: `!pick <player> <year>`{price_hint}",
+                f"DM me your pick: `{self._submission_format(ctx)}`",
             )
 
         self._start_team_timer(ctx, state, team_idx, minutes)
@@ -323,14 +344,14 @@ class AnonDraftTheme(Theme):
     # lapses.
     async def on_pick(self, ctx: DraftContext, drafter: dict, text: str) -> str:
         async with draft_lock(ctx.draft_id):
-            if ctx.state.get('flux_wait'):
-                return 'The round is finished. Waiting for a commissioner to complete Flux before accepting picks.'
             team_idx = drafter['state'].get('team_index')
             if team_idx is None:
                 return "You're not assigned to a team yet."
 
             state = ctx.state
             team = state['teams'][team_idx]
+            if state.get('flux_wait') and not any(p.get('skipped') for p in team['open_picks']):
+                return 'Waiting for a commissioner to complete Flux before opening the next round. Only owed makeup picks can be submitted now.'
             if not team['open_picks']:
                 # Anonymous Draft hides GM identity, so a GM who'll be away
                 # for their actual turn can't just ask a friend to pick for
@@ -406,6 +427,7 @@ class AnonDraftTheme(Theme):
 
     async def _propose(self, ctx: DraftContext, state: dict, team_idx: int, entry: dict, drafter: dict,
                         player: str, year: str, price: float | None) -> str:
+        year = year or get_default_year(player) or ''
         # state/entry are exactly what on_pick already fetched via ctx.state —
         # deliberately NOT re-fetched here. ctx.state re-reads straight from
         # the DB, so a fresh fetch would be a *different* object graph than
@@ -423,7 +445,7 @@ class AnonDraftTheme(Theme):
                 await ctx.dm(
                     old_proposer['user_id'],
                     f"↩️ **{drafter['display_name']}** picked someone else instead of "
-                    f"**{old_proposal['player']} '{_display_year(old_proposal['year'])}**.",
+                    f"**{old_proposal['player']}{_year_suffix(old_proposal['year'])}**.",
                 )
 
         other_ids = [mid for mid in team['member_ids'] if mid != drafter['id']]
@@ -431,22 +453,28 @@ class AnonDraftTheme(Theme):
         entry['pending_from'] = list(other_ids)
         ctx.save_state(state)
 
-        price_note = f' at ${price:.0f}' if price is not None else ''
+        price_note = f' at ${price:g}' if price is not None else ''
         for mid in other_ids:
             mate = db.get_drafter(mid)
             await ctx.dm(
                 mate['user_id'],
-                f"📝 **{drafter['display_name']}** proposed **{player} '{_display_year(year)}**{price_note} for pick #{entry['pick_number']}.\n"
+                f"📝 **{drafter['display_name']}** proposed **{player}{_year_suffix(year)}**{price_note} for pick #{entry['pick_number']}.\n"
                 f"Reply `1` to agree, or `2` to pick someone else instead.\n"
-                f"(No response in {_PROPOSAL_RESPONSE_MINUTES:.0f} minutes = automatically agreed.)",
+                f"You have up to {_PROPOSAL_RESPONSE_MINUTES:.0f} minutes to respond. Your original pick clock keeps running. "
+                f"If either timer expires first, this proposal is automatically submitted.",
             )
 
         async def _on_proposal_timeout():
             await self._resolve_proposal_timeout(ctx, team_idx, entry['pick_number'])
 
-        _proposal_timer.start((ctx.draft_id, team_idx), _PROPOSAL_RESPONSE_MINUTES, _on_proposal_timeout)
+        response_minutes = _PROPOSAL_RESPONSE_MINUTES
+        if team.get('timer_deadline') is not None:
+            response_minutes = min(response_minutes, max(0, team['timer_deadline']-time.time()) / 60)
+        _proposal_timer.start((ctx.draft_id, team_idx), response_minutes, _on_proposal_timeout)
 
-        return f"✅ Proposed **{player} '{_display_year(year)}**{price_note}. Waiting for your teammate to respond (2 min)."
+        return (f"✅ Proposed **{player}{_year_suffix(year)}**{price_note}. "
+                f"Waiting for your teammate to respond (up to {_PROPOSAL_RESPONSE_MINUTES:.0f} min). "
+                "Your original pick clock keeps running; the proposal is automatically submitted when either timer expires.")
 
     async def _handle_agree(self, ctx: DraftContext, state: dict, team_idx: int, entry: dict, drafter: dict) -> str:
         entry['pending_from'] = [mid for mid in entry['pending_from'] if mid != drafter['id']]
@@ -473,10 +501,10 @@ class AnonDraftTheme(Theme):
                 await ctx.dm(
                     proposer['user_id'],
                     f"↩️ **{drafter['display_name']}** wants to pick someone else instead of "
-                    f"**{old_proposal['player']} '{_display_year(old_proposal['year'])}**.",
+                    f"**{old_proposal['player']}{_year_suffix(old_proposal['year'])}**.",
                 )
 
-        return "OK — DM me your pick: `!pick <player> <year>`"
+        return f"OK — DM me your pick: `{self._submission_format(ctx)}`"
 
     async def _resolve_proposal_timeout(self, ctx: DraftContext, team_idx: int, pick_number: int) -> None:
         async with draft_lock(ctx.draft_id):
@@ -516,25 +544,39 @@ class AnonDraftTheme(Theme):
                 await self._finalize_pick(ctx, team_idx, entry, proposal['player'], proposal['year'], proposal['price'])
                 return
 
-            entry['skipped'] = True
-            team['skip_count'] = team.get('skip_count', 0) + 1
-            was_live = pick_number == state.get('live_pick_number')
-            ctx.save_state(state)
-            await ctx.announce(
-                f"⏭️ **Pick {pick_number} skipped** — {_safe_logo_text(team['logo'])} didn't submit in time."
-            )
-            for mid in team['member_ids']:
-                mate = db.get_drafter(mid)
-                await ctx.dm(
-                    mate['user_id'],
-                    f"⏰ Nobody on your team submitted pick #{pick_number} in time — skipped. "
-                    f"DM me anytime with your pick and I'll record it as a makeup.",
-                )
-            if was_live:
-                await self._advance_live_pick(ctx, pick_number)
+            await self._skip_locked(ctx, team_idx, entry, 'Nobody on your team submitted this pick in time.')
+
+    async def _skip_locked(self, ctx, team_idx, entry, reason):
+        state = ctx.state
+        team = state['teams'][team_idx]
+        current = next((p for p in team['open_picks'] if p['pick_number'] == entry['pick_number']), None)
+        if current is None or current.get('skipped'):
+            return
+        pick_number = current['pick_number']
+        current.update(skipped=True, proposal=None, pending_from=[])
+        team['skip_count'] = team.get('skip_count', 0)+1
+        if team.get('timer_pick_number') == pick_number:
+            team.update(timer_pick_number=None, timer_deadline=None)
+        ctx.save_state(state)
+        _timer.cancel((ctx.draft_id, team_idx))
+        _proposal_timer.cancel((ctx.draft_id, team_idx))
+        channel = ctx.bot.get_channel(state.get('timer_channel_id')) if state.get('timer_channel_id') else None
+        sent = await channel.send(f"{pick_number}. {team['logo']} skipped") if channel else await ctx.announce(f"{pick_number}. {team['logo']} skipped")
+        if isinstance(getattr(sent, 'id', None), int):
+            fresh = ctx.state
+            saved = next(p for p in fresh['teams'][team_idx]['open_picks'] if p['pick_number'] == pick_number)
+            saved['skip_message_id'] = sent.id
+            saved['skip_channel_id'] = getattr(channel, 'id', state.get('timer_channel_id'))
+            ctx.save_state(fresh)
+        for mid in team['member_ids']:
+            mate = db.get_drafter(mid)
+            await ctx.dm(mate['user_id'], f"⏰ Pick #{pick_number} skipped. {reason} DM me your pick to make it up; it will fill your oldest owed slot.")
+        if pick_number == state.get('live_pick_number'):
+            await self._advance_live_pick(ctx, pick_number)
 
     async def _finalize_pick(self, ctx: DraftContext, team_idx: int, entry: dict,
                               player: str, year: str, price: float | None) -> None:
+        year = year or get_default_year(player) or ''
         state = ctx.state
         team = state['teams'][team_idx]
         pick_number = entry['pick_number']
@@ -543,8 +585,13 @@ class AnonDraftTheme(Theme):
         for mid in team['member_ids']:
             db.record_pick(ctx.draft_id, mid, player, round_number=None, pick_number=pick_number, auto_pick=False)
 
+        if self.key == 'anon_budget_draft':
+            from anon_lists import clear_team
+            clear_team(team)
+
         if price is not None:
             team['budget_spent'] = team.get('budget_spent', 0.0) + price
+            team.setdefault('pick_prices', {})[str(pick_number)] = {'player': player, 'year': year, 'price': price}
 
         team['open_picks'] = [p for p in team['open_picks'] if p['pick_number'] != pick_number]
         if team.get('timer_pick_number') == pick_number:
@@ -556,13 +603,25 @@ class AnonDraftTheme(Theme):
         _timer.cancel((ctx.draft_id, team_idx))
         _proposal_timer.cancel((ctx.draft_id, team_idx))
 
-        price_part = f" ${price:.0f}" if price is not None else ''
+        price_part = f" ${price:g}" if price is not None else ''
         year_part = f" '{_display_year(year)}" if year else ''
 
         results_channel_id = ctx.state.get('timer_channel_id') or _RESULTS_CHANNEL_ID
         results_channel = ctx.bot.get_channel(results_channel_id)
         if results_channel:
-            sent = await results_channel.send(f"{pick_number}. {team['logo']} {player}{year_part}{price_part}")
+            options = {}
+            if entry.get('skipped') and not entry.get('skip_message_id') and hasattr(results_channel, 'history'):
+                try:
+                    async for previous in results_channel.history(limit=300):
+                        if (previous.author.id == ctx.bot.user.id and previous.content.strip() == f"{pick_number}. {team['logo']} skipped"):
+                            entry['skip_message_id'] = previous.id
+                            break
+                except Exception:
+                    log.warning('Could not locate the original skip message for pick %s', pick_number)
+            if entry.get('skipped') and entry.get('skip_message_id'):
+                options = dict(reference=discord.MessageReference(message_id=entry['skip_message_id'],
+                    channel_id=results_channel_id, fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
+            sent = await results_channel.send(f"{pick_number}. {team['logo']} {player}{year_part}{price_part}", **options)
             fresh = ctx.state
             fresh['announcement_revision'] = fresh.get('announcement_revision', 0) + 1
             if isinstance(getattr(sent, 'id', None), int):
@@ -627,7 +686,7 @@ class AnonDraftTheme(Theme):
         parsed = self._parse_submission(ctx, text)
         if parsed is None:
             return (
-                "Your team isn't on the clock right now. DM me `!pick <player> <year>` anyway to "
+                f"Your team isn't on the clock right now. DM me `{self._submission_format(ctx)}` anyway to "
                 "**queue** it — I'll submit it automatically the moment your team is up "
                 "(`!pick cancel` clears a queued pick)."
             )
@@ -640,9 +699,9 @@ class AnonDraftTheme(Theme):
             return budget_error
 
         db.update_drafter_state(drafter['id'], {'queued_pick': {'player': player, 'year': year, 'price': price}})
-        price_note = f' at ${price:.0f}' if price is not None else ''
+        price_note = f' at ${price:g}' if price is not None else ''
         return (
-            f"📌 Queued **{player} '{_display_year(year)}**{price_note} — I'll submit it automatically "
+            f"📌 Queued **{player}{_year_suffix(year)}**{price_note} — I'll submit it automatically "
             f"the moment your team is on the clock, unless you or a teammate picks something else first."
         )
 
@@ -653,6 +712,10 @@ class AnonDraftTheme(Theme):
         prompt. Tries each team member's queue in member-list order — a
         player who's since become unavailable or unaffordable is skipped
         (with a heads-up DM) in favor of the next queued option, if any."""
+        if self.key == 'anon_budget_draft':
+            from anon_lists import consume
+            if await consume(ctx, state, team_idx, entry):
+                return True
         team = state['teams'][team_idx]
         for mid in team['member_ids']:
             queuer = db.get_drafter(mid)
@@ -662,12 +725,18 @@ class AnonDraftTheme(Theme):
             db.update_drafter_state(mid, {'queued_pick': None})
             player, year, price = queued['player'], queued['year'], queued['price']
 
+            if self.key == 'anon_budget_draft':
+                error = await self.validate_round_price(ctx, player, price)
+                if error:
+                    await ctx.dm(queuer['user_id'], error)
+                    continue
+
             taken_by = self._already_taken(ctx, player)
             if taken_by:
                 await ctx.dm(
                     queuer['user_id'],
                     f"⚠️ Your queued pick **{player}** was already drafted by {taken_by} by the time your "
-                    f"team came up — DM me a new pick: `!pick <player> <year>`",
+                    f"team came up — DM me a new pick: `{self._submission_format(ctx)}`",
                 )
                 continue
 
@@ -689,12 +758,12 @@ class AnonDraftTheme(Theme):
     # ── Submission parsing ──────────────────────────────────────────────────
     def _parse_submission(self, ctx: DraftContext, text: str) -> tuple[str, str, float | None] | None:
         parts = text.strip().split()
-        if len(parts) < 2:
+        if not parts:
             return None
         require_price = self._settings(ctx)['require_price']
         price = None
         if require_price:
-            if len(parts) < 3:
+            if len(parts) < 2:
                 return None
             try:
                 price = float(parts[-1].lstrip('$'))
@@ -703,18 +772,33 @@ class AnonDraftTheme(Theme):
             except ValueError:
                 return None
             parts = parts[:-1]
-        year_token = parts[-1]
-        if not _YEAR_TOKEN_RE.match(year_token):
+        year = ''
+        if len(parts) > 1 and _YEAR_TOKEN_RE.fullmatch(parts[-1]):
+            year = parts.pop().lstrip("'")
+        player = ' '.join(parts).strip()
+        if not player or not any(c.isalpha() for c in player):
             return None
-        player = ' '.join(parts[:-1]).strip()
-        if not player:
-            return None
-        return player, year_token.lstrip("'"), price
+        return player, year or get_default_year(player) or '', price
+
+    def _submission_format(self, ctx: DraftContext) -> str:
+        return '!pick <player> [year] <price>' if self._settings(ctx)['require_price'] else '!pick <player> [year]'
+
+    def _budget_note(self, ctx: DraftContext, team: dict) -> str:
+        budget = self._settings(ctx).get('budget')
+        if budget is None:
+            return ''
+        try:
+            budget, spent = float(budget), float(team.get('budget_spent', 0))
+        except (ValueError, TypeError):
+            return 'Budget unavailable — ask the commissioner to check it.\n'
+        if not all(math.isfinite(v) and v >= 0 for v in (budget, spent)):
+            return 'Budget unavailable — ask the commissioner to check it.\n'
+        return f'Budget remaining: **${budget - spent:g}** of **${budget:g}**.\n'
 
     def _submission_usage(self, ctx: DraftContext) -> str:
         if self._settings(ctx)['require_price']:
-            return "Usage: `!pick <player> <year> <price>` (e.g. `!pick LeBron James 2013 42`)"
-        return "Usage: `!pick <player> <year>` (e.g. `!pick LeBron James 2013`)"
+            return f"Usage: `{self._submission_format(ctx)}`. Year is optional: `!pick LeBron James $42` or `!pick LeBron James 2013 $42`."
+        return f"Usage: `{self._submission_format(ctx)}`. Year is optional: `!pick LeBron James` or `!pick LeBron James 2013`."
 
     # ── Status / misc ────────────────────────────────────────────────────────
     async def on_status(self, ctx: DraftContext, drafter: dict) -> str:
@@ -733,7 +817,7 @@ class AnonDraftTheme(Theme):
         if queued:
             price_note = f" ${queued['price']:.0f}" if queued.get('price') is not None else ''
             queued_line = (
-                f"\nQueued pick: **{queued['player']} '{_display_year(queued['year'])}**{price_note} "
+                f"\nQueued pick: **{queued['player']}{_year_suffix(queued['year'])}**{price_note} "
                 f"(auto-submits when your team is on the clock)"
             )
         return (
@@ -782,14 +866,22 @@ class AnonDraftTheme(Theme):
         _start_team_timer) so a team gets its genuine remaining time, not a
         fresh full clock — or an immediate resolution if it had already
         expired while the bot was down. Proposal-response timers (the
-        2-minute agree-or-counter window) are NOT resumed — that window is
-        short enough that a restart almost always means it's already
-        moot, and a GM can still resolve it manually via `1`/`2` regardless
-        of whether the auto-timeout survives a restart."""
+        agree-or-counter window) are NOT resumed. A pending proposal still
+        resolves at the original pick deadline after a restart, and a GM
+        can resolve it manually via `1`/`2`."""
         settings = self._settings(ctx)
         state = ctx.state
         if state.get('flux_wait'):
             return 0
+        if self.key == 'anon_budget_draft' and ctx.draft['status'] == 'active':
+            from anon_lists import consume
+            async with draft_lock(ctx.draft_id):
+                state = ctx.state
+                for idx, team in enumerate(state.get('teams', [])):
+                    entry = next((p for p in team.get('open_picks', []) if p['pick_number'] == state.get('live_pick_number')), None)
+                    if entry and await consume(ctx, state, idx, entry):
+                        return 1
+            state = ctx.state
         teams = state.get('teams', [])
         live = state.get('live_pick_number')
         if live and teams and not any(t.get('timer_pick_number') == live for t in teams):

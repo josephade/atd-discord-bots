@@ -5,6 +5,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 from dataclasses import asdict
+from decimal import Decimal, InvalidOperation
 
 from votes import normalize, resolve_member, parse_rows
 
@@ -30,10 +31,14 @@ def compact(text):
 def match_team(query, teams):
     emoji = re.fullmatch(r'<a?:([^:>]+):\d+>', query.strip())
     query = emoji[1] if emoji else query.strip(': ')
+    literal = [t for t in teams if compact(t) == compact(query)]
+    if len(literal) == 1:
+        return literal[0]
     aliases = {normalize(name): team for name, team in EMOJI_ALIASES.items()}
     mapped = ALIASES.get(normalize(query), aliases.get(normalize(query), query))
-    if any(compact(t) == compact(mapped) for t in teams):
-        query = mapped
+    # A known alias must retain its identity even when that team is absent.
+    # Otherwise "Rockets" (Houston) can fall through to Denver Rockets.
+    query = mapped
     q = compact(query)
     exact = [t for t in teams if compact(t) == q]
     matches = exact or [t for t in teams if q and q in compact(t)]
@@ -42,6 +47,14 @@ def match_team(query, teams):
     if matches:
         raise ValueError('That emoji/name matches multiple teams: ' + ', '.join(matches) + '. Use the full team name.')
     raise ValueError('No team matches that emoji/name in this draft. Use a team name or emoji from this draft\'s ballot.')
+
+
+def team_emoji_candidates(team, emojis):
+    """Logo selection requires an exact identity, never a partial team match."""
+    aliases = {normalize(name): value for name, value in EMOJI_ALIASES.items()}
+    canonical_team = ALIASES.get(normalize(team), aliases.get(normalize(team), team))
+    return [emoji for emoji in emojis if compact(
+        ALIASES.get(normalize(emoji.name), aliases.get(normalize(emoji.name), emoji.name))) == compact(canonical_team)]
 
 
 def timestamp(value):
@@ -57,8 +70,49 @@ def timestamp(value):
 def report_from_rows(rows, query, tier_count=10, members=(), aliases=None, name_column='Enter Discord Name'):
     """Only current response rows participate; never merge the delivery archive."""
     ballots = parse_rows(rows, name_column)
-    records = [{'payload': json.dumps(asdict(ballot))} for ballot in reversed(ballots)]
+    calculated = calculated_rows(rows, name_column)
+    records = []
+    for ballot in reversed(ballots):
+        payload = asdict(ballot)
+        candidates = calculated.get(normalize(ballot.name), [])
+        # Copied formula-table timestamps can predate edits to the live ballot.
+        # A unique exact name is safe; duplicate names require a timestamp match.
+        if len(candidates) > 1:
+            candidates = [r for r in candidates if r[0] == ballot.timestamp]
+        payload['calculated_values'] = candidates[0][1] if len(candidates) == 1 else {}
+        records.append({'payload': json.dumps(payload)})
     return team_report(records, query, tier_count, members, aliases)
+
+
+def calculated_rows(rows, name_column):
+    """Read the second table separately, without creating ballots or receipts."""
+    headers = []
+    for index, row in enumerate(rows):
+        times = [i for i, c in enumerate(row) if normalize(c) in {'timestamp', 'tidsmerke'}]
+        names = [i for i, c in enumerate(row) if normalize(c) == normalize(name_column)]
+        if len(times) == len(names) == 1:
+            headers.append((index, times[0], names[0]))
+    if len(headers) < 2:
+        return {}
+    start, time_col, name_col = headers[1]
+    end = headers[2][0] if len(headers) > 2 else len(rows)
+    columns = [(i, m.group(1).strip()) for i, h in enumerate(rows[start])
+               if (m := re.search(r'\[([^\]]+)\]\s*$', h.strip()))]
+    result = {}
+    for row in rows[start+1:end]:
+        cell = lambda i: row[i].strip() if i < len(row) else ''
+        if not re.match(r'^\d{1,4}[./-]\d{1,2}[./-]\d{1,4}\s', cell(time_col)) or not cell(name_col):
+            continue
+        values = {}
+        for i, team in columns:
+            try:
+                value = Decimal(cell(i))
+            except InvalidOperation:
+                continue
+            if value.is_finite():
+                values[team] = format(value, 'f').rstrip('0').rstrip('.') if '.' in format(value, 'f') else str(value)
+        result.setdefault(normalize(cell(name_col)), []).append((cell(time_col), values))
+    return result
 
 
 def team_report(records, query, tier_count=10, members=(), aliases=None):
@@ -80,7 +134,10 @@ def team_report(records, query, tier_count=10, members=(), aliases=None):
         seen.add(identity)
         chosen = next((t for name, t in ballot['teams'] if name == team), None)
         if chosen is not None:
-            votes.append({'name': ballot['name'], 'tier': chosen})
+            vote = {'name': ballot['name'], 'tier': chosen}
+            if 'calculated_values' in ballot:
+                vote['calculated_value'] = ballot['calculated_values'].get(team)
+            votes.append(vote)
     if not votes:
         raise ValueError('No valid votes for this team remain in the current response sheet.')
     values = [v['tier'] for v in votes]

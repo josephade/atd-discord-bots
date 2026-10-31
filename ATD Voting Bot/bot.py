@@ -315,7 +315,7 @@ def create_bot():
 
     @bot.command()
     async def tierlist(ctx, *, query: str = ''):
-        from team_report import report_from_rows, match_team
+        from team_report import report_from_rows, match_team, team_emoji_candidates
         from report_image import render_team_report, nba_logo
         import re
         if not query.strip():
@@ -353,13 +353,7 @@ def create_bot():
         logo = None
         emoji_match = re.search(r'<a?:[^:>]+:(\d+)>', query)
         emojis = getattr(guild, 'emojis', ())
-        candidates = []
-        for emoji in emojis:
-            try:
-                if match_team(emoji.name, [report['team']]) == report['team']:
-                    candidates.append(emoji)
-            except ValueError:
-                continue
+        candidates = team_emoji_candidates(report['team'], emojis)
         if emoji_match:
             candidates.sort(key=lambda emoji: str(emoji.id) != emoji_match[1])
         for emoji in candidates[:2]:
@@ -375,11 +369,214 @@ def create_bot():
                        allowed_mentions=discord.AllowedMentions.none())
 
     @bot.command()
+    @commissioner()
+    async def revealgm(ctx, *, query: str = ''):
+        """Explicit, draft-specific mappings for ambiguous sheet GM names."""
+        import re
+        from team_report import match_team
+        from reveal import standings
+        match = re.fullmatch(r'(\d+)\s+(.+?)\s+((?:<@!?\d+>\s*)+)', query.strip())
+        if not match:
+            await ctx.send('Use `!revealgm <ATD> <team emoji or name> @GM [@coGM]`. Example: `!revealgm 113 :lakers: @GM`.')
+            return
+        draft, team_query, mentions = match.groups()
+        track = store.db.execute('SELECT * FROM tracks WHERE draft=?', (draft,)).fetchone()
+        if track is None:
+            await ctx.send('Register that ATD with `!votetrack` first.')
+            return
+        ids = list(dict.fromkeys(int(i) for i in re.findall(r'<@!?(\d+)>', mentions)))
+        if any(not any(m.id == uid and not m.bot for m in ctx.guild.members) for uid in ids):
+            await ctx.send('Mention actual GMs who are members of this server.')
+            return
+        try:
+            async with lock:
+                rows = await asyncio.to_thread(sheets.read, track['sheet'], track['gid'])
+            team = match_team(team_query, [r['team'] for r in standings(rows)])
+        except ValueError as exc:
+            await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
+            return
+        store.set_reveal_mapping(draft, team, ids)
+        await ctx.send(f'Saved the GM mapping for ATD {draft} · {team}.', allowed_mentions=discord.AllowedMentions.none())
+
+    @bot.command()
+    @commissioner()
+    async def revealsync(ctx, draft: str = ''):
+        from reveal import standings, gm_ids
+        track = store.db.execute('SELECT * FROM tracks WHERE draft=?', (draft,)).fetchone()
+        if not draft.isdigit() or track is None:
+            await ctx.send('Use `!revealsync <registered ATD>`, for example `!revealsync 113`, to save final standings for future GM comparisons.')
+            return
+        try:
+            async with lock:
+                rows = await asyncio.to_thread(sheets.read, track['sheet'], track['gid'])
+            results = standings(rows)
+        except ValueError as exc:
+            await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
+            return
+        for row in results:
+            row['gm_ids'] = gm_ids(row, ctx.guild.members, store.gm_aliases(), store.reveal_mapping(draft, row['team']))
+        store.save_reveal_results(draft, results, track['sheet'], track['gid'], replace=True)
+        mapped = sum(bool(r['gm_ids']) for r in results)
+        await ctx.send(f'Saved ATD {draft}: {len(results)} teams; {mapped} with verified Discord GM mappings. '
+                       'Unmatched GM cells are retained but excluded from personal comparisons. Use `!revealgm` to map them. No reveals were posted.')
+
+    @bot.command()
+    @commissioner()
+    async def reveal(ctx, *, query: str = ''):
+        await start_reveal(ctx, query)
+
+    @bot.command()
+    @commissioner()
+    async def revealall(ctx, draft: str = ''):
+        await start_reveal(ctx, draft, all_seeds=True)
+
+    active_reveal_channels = set()
+
+    async def start_reveal(ctx, query, all_seeds=False):
+        from reveal import standings, record_text, gm_ids, comparison, ordinal
+        from nba_comparison import historical_comparison
+        from team_report import report_from_rows, team_emoji_candidates
+        from report_image import render_team_report, nba_logo
+        parts = query.split()
+        if len(parts) not in ((0, 1) if all_seeds else (1, 2)) or not all(p.isdigit() for p in parts):
+            await ctx.send('Use `!revealall` for the current ATD or `!revealall 113`.' if all_seeds else 'Use `!reveal <seed>` for the current ATD, or `!reveal <ATD> <seed>`. Example: `!reveal 30` or `!reveal 113 29`.')
+            return
+        explicit_draft = bool(parts) if all_seeds else len(parts) == 2
+        draft = parts[0] if explicit_draft else max((t['draft'] for t in store.tracks() if t['draft'].isdigit()), key=int, default=None)
+        seed = None if all_seeds else int(parts[-1])
+        track = store.db.execute('SELECT * FROM tracks WHERE draft=?', (draft,)).fetchone() if draft else None
+        if track is None:
+            await ctx.send('That ATD is not registered. Use `!votetrack` first.')
+            return
+        try:
+            async with lock:
+                rows = await asyncio.to_thread(sheets.read, track['sheet'], track['gid'])
+            results = standings(rows)
+            if not all_seeds and not 1 <= seed <= len(results):
+                await ctx.send(f'ATD {draft} has {len(results)} teams. Choose a seed from 1 to {len(results)}.')
+                return
+            pending = []
+            for result in (list(reversed(results)) if all_seeds else [results[seed-1]]):
+                result['gm_ids'] = gm_ids(result, ctx.guild.members, store.gm_aliases(), store.reveal_mapping(draft, result['team']))
+                report = report_from_rows(rows, result['team'], track['tiers'], ctx.guild.members, store.aliases(), name_column)
+                pending.append((result, report))
+        except ValueError as exc:
+            await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
+            return
+        except Exception:
+            log.exception('Could not prepare reveal for ATD %s', draft)
+            await ctx.send('Could not read the live voting sheet. Nothing was revealed. Try again shortly.')
+            return
+        async def post_result(result, report, show_gm):
+            seed = result['seed']
+            logo, emoji_text = None, result['team']
+            for emoji in team_emoji_candidates(result['team'], getattr(ctx.guild, 'emojis', ())):
+                emoji_text = f'{emoji} {result["team"]}'
+                try:
+                    logo = await asyncio.wait_for(emoji.read(), timeout=5)
+                except (discord.HTTPException, OSError, asyncio.TimeoutError):
+                    pass
+                break
+            if logo is None:
+                logo = await asyncio.to_thread(nba_logo, result['team'])
+            text = f"**ATD {draft} · {ordinal(seed)} Seed**\n{seed}. {emoji_text} **{record_text(result)}**"
+            if show_gm:
+                text += ' · ' + (' / '.join(f'<@{uid}>' for uid in result['gm_ids']) or discord.utils.escape_markdown(result['gm'] or 'GM not listed'))
+                for uid in result['gm_ids']:
+                    previous = store.previous_reveal(draft, uid)
+                    text += '\n' + (comparison(result, previous, uid) if previous else f'<@{uid}>: no unambiguous earlier saved ATD result available for comparison.')
+            text += '\n\n' + historical_comparison(result)
+            png = await asyncio.to_thread(render_team_report, draft, report, logo, anonymous=not show_gm)
+            await ctx.send(text, file=discord.File(io.BytesIO(png), filename=f'ATD-{draft}-seed-{seed}-votes.png'),
+                           allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
+                               users=[discord.Object(id=uid) for uid in result['gm_ids']] if show_gm else False,
+                               replied_user=False))
+            store.save_reveal_results(draft, [result], track['sheet'], track['gid'])
+        notice_ready = asyncio.Event()
+        notice = None
+
+        async def remove_notice():
+            await notice_ready.wait()
+            if notice is not None:
+                try:
+                    await notice.delete()
+                except discord.HTTPException:
+                    log.warning('Could not delete reveal notice in channel %s', ctx.channel.id)
+
+        class RevealChoice(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=180)
+                self.used = False
+
+            async def interaction_check(self, interaction):
+                return interaction.user.id == ctx.author.id
+
+            async def post(self, interaction, show_gm):
+                if self.used:
+                    return
+                if ctx.channel.id in active_reveal_channels:
+                    await interaction.response.send_message('A reveal is already running in that channel. Wait for it to finish before choosing again.')
+                    return
+                self.used = True
+                active_reveal_channels.add(ctx.channel.id)
+                for child in self.children:
+                    child.disabled = True
+                posted = 0
+                try:
+                    await interaction.response.edit_message(content='Posting your reveals from last seed to first…' if all_seeds else 'Posting your reveal…', view=self)
+                    self.stop()
+                    await remove_notice()
+                    for index, (result, report) in enumerate(pending):
+                        if index:
+                            await asyncio.sleep(1.5)
+                        await post_result(result, report, show_gm)
+                        posted += 1
+                except Exception:
+                    log.exception('Reveal post failed')
+                    await interaction.edit_original_response(content=f'Reveal stopped after {posted} confirmed posts. Check the channel before retrying; nothing will be retried automatically.', view=self)
+                    return
+                finally:
+                    active_reveal_channels.discard(ctx.channel.id)
+                summary = f'all {posted} seeds, from {len(results)} to 1' if all_seeds else f'{ordinal(seed)} Seed'
+                await interaction.edit_original_response(content=f'Posted {summary} in <#{ctx.channel.id}>. Results saved for future GM comparisons.', view=self)
+
+            @discord.ui.button(label='Reveal with GM', style=discord.ButtonStyle.primary)
+            async def with_gm(self, interaction, button):
+                await self.post(interaction, True)
+
+            @discord.ui.button(label='Keep GM anonymous', style=discord.ButtonStyle.secondary)
+            async def without_gm(self, interaction, button):
+                await self.post(interaction, False)
+
+            @discord.ui.button(label='Cancel', style=discord.ButtonStyle.danger)
+            async def cancel(self, interaction, button):
+                if self.used:
+                    return
+                self.used = True
+                self.stop()
+                await interaction.response.edit_message(content='Reveal cancelled. Nothing was posted.', view=None)
+                await remove_notice()
+
+        try:
+            description = f'ATD {draft} · Reveal all {len(results)} seeds, from {len(results)} to 1' if all_seeds else f'ATD {draft} · {ordinal(seed)} Seed: {result["team"]} · {record_text(result)}'
+            await ctx.author.send(description+'\n'
+                                  f'Post in <#{ctx.channel.id}> with or without the GM? Buttons expire in 3 minutes.', view=RevealChoice())
+        except discord.HTTPException:
+            await ctx.send('I could not send your private reveal prompt. Enable DMs from this server and run the command again. Nothing was revealed.')
+            return
+        try:
+            notice = await ctx.send('Check your DMs to choose whether to reveal the GM. Nothing is posted until you choose.')
+        finally:
+            notice_ready.set()
+
+    @bot.command()
     async def votehelp(ctx):
         await ctx.send('Vote using the announcement Google Form. Your tier list arrives by DM.\n'
                        '`!mytierlist <draft>` — show your saved list here, including votes from before registration.\n'
                        '`!tierlist [draft] <team emoji or name>` — all voters\' tiers and standouts. Defaults to the latest active draft; test with `!tierlist 112 :celtics:`.\n'
                        'Commissioners: `!votetrack <draft> <response-sheet-url> [tiers]`, '
+                       '`!reveal [ATD] <seed>` (private GM choice), `!revealsync <ATD>`, `!revealgm <ATD> <team> @GM [@coGM]`, '
+                       '`!revealall [ATD]` (last seed to first, one private GM choice), '
                        '`!votealias @member <form name>`, `!votestatus`, `!voteretry <draft>`, '
                        '`!votematches <draft>`, `!voteissues <draft>`, `!votepause <draft>`, `!voteresume <draft>`.')
 
