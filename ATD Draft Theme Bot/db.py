@@ -104,6 +104,20 @@ def init_db():
             )
         ''')
 
+        con.execute("""CREATE TABLE IF NOT EXISTS suspect_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id INTEGER NOT NULL REFERENCES drafts(id),
+            message_id INTEGER NOT NULL UNIQUE,
+            buyer_id INTEGER NOT NULL,
+            team_users TEXT NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            cost INTEGER NOT NULL CHECK(cost > 0),
+            status TEXT NOT NULL DEFAULT 'pending',
+            expires_at REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            confirmed_at TEXT
+        )""")
+
 
 def _row(r) -> dict | None:
     if r is None:
@@ -134,7 +148,8 @@ def get_draft(draft_id: int) -> dict | None:
 
 
 def record_suspect(draft_id, message_id, guesser_id, target_id, logo, correct,
-                   phase, expected_state, consume_wrong=True, allow_repeat=False):
+                   phase, expected_state, consume_wrong=True, allow_repeat=False, attempt_user_ids=None,
+                   caught_user_ids=None):
     """Atomically enforce attempt/catch limits and persist the penalty audit."""
     with _conn() as con:
         con.execute('BEGIN IMMEDIATE')
@@ -149,13 +164,23 @@ def record_suspect(draft_id, message_id, guesser_id, target_id, logo, correct,
             return {'status': 'revealed'}
         if state != expected_state:
             return {'status': 'changed'}
-        used = con.execute('SELECT COALESCE(SUM(charged),0) FROM suspect_attempts WHERE draft_id=? AND guesser_id=?',
-                           (draft_id, guesser_id)).fetchone()[0]
-        if used >= 3:
+        users = sorted(set(attempt_user_ids or []) | {guesser_id})
+        placeholders = ','.join('?' for _ in users)
+        used = con.execute(f'SELECT COALESCE(SUM(charged),0) FROM suspect_attempts WHERE draft_id=? AND guesser_id IN ({placeholders})',
+                           (draft_id, *users)).fetchone()[0]
+        purchased = con.execute(f"SELECT COALESCE(SUM(quantity),0) FROM suspect_purchases WHERE draft_id=? AND buyer_id IN ({placeholders}) AND status='confirmed'", (draft_id, *users)).fetchone()[0]
+        allowance = 1 + purchased
+        targets = sorted(set(caught_user_ids or []) | {target_id})
+        target_params = ','.join('?' for _ in targets)
+        if not allow_repeat and con.execute(f'SELECT 1 FROM suspect_attempts WHERE draft_id=? AND target_id IN ({target_params}) AND correct=1',
+                                           (draft_id, *targets)).fetchone():
+            return {'status': 'caught', 'remaining': max(0, allowance - used)}
+        target_guesses = con.execute(f'SELECT COUNT(*) FROM suspect_attempts WHERE draft_id=? AND target_id IN ({target_params}) AND charged=1',
+                                     (draft_id, *targets)).fetchone()[0]
+        if target_guesses >= 5:
+            return {'status': 'target_limit', 'remaining': max(0, allowance - used)}
+        if used >= allowance:
             return {'status': 'limit', 'remaining': 0}
-        if not allow_repeat and con.execute('SELECT 1 FROM suspect_attempts WHERE draft_id=? AND target_id=? AND correct=1',
-                                           (draft_id, target_id)).fetchone():
-            return {'status': 'caught', 'remaining': 3 - used}
         charged = bool(correct or consume_wrong)
         kind = ('wins' if phase == 'draft' else 'odds_percent') if correct else None
         amount = (5 if phase == 'draft' else 10) if correct else 0
@@ -163,8 +188,9 @@ def record_suspect(draft_id, message_id, guesser_id, target_id, logo, correct,
             (draft_id,message_id,guesser_id,target_id,logo,correct,charged,phase,penalty_kind,penalty_amount,created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
             (draft_id, message_id, guesser_id, target_id, logo, int(correct), int(charged), phase, kind, amount, _now()))
-        return {'status': 'correct' if correct else 'wrong', 'remaining': 3 - used - int(charged),
-                'penalty_kind': kind, 'penalty_amount': amount}
+        return {'status': 'correct' if correct else 'wrong', 'remaining': max(0, allowance - used - int(charged)),
+                'penalty_kind': kind, 'penalty_amount': amount,
+                'target_limit_reached': target_guesses+int(charged) >= 5}
 
 
 def suspect_attempts(draft_id):
@@ -429,3 +455,130 @@ def relay_message_stats(draft_id: int, from_drafter_id: int) -> tuple[int, int]:
             (draft_id, from_drafter_id),
         ).fetchall()
         return len(rows), sum(len(r[0]) for r in rows)
+
+
+def suspect_purchases(draft_id):
+    with _conn() as con:
+        return [dict(row) for row in con.execute('SELECT * FROM suspect_purchases WHERE draft_id=? ORDER BY id', (draft_id,))]
+
+
+def _check_suspect_purchase_limit(con, draft_id, team_users, quantity):
+    users = _anonymous_ledger_users(con, draft_id, team_users)
+    placeholders = ','.join('?' for _ in users)
+    bought = con.execute(f"SELECT COALESCE(SUM(quantity),0) FROM suspect_purchases WHERE draft_id=? AND buyer_id IN ({placeholders}) AND status='confirmed'",
+                         (draft_id, *users)).fetchone()[0]
+    remaining = max(0, 10-bought)
+    if quantity > remaining:
+        raise ValueError(f'Your team can buy at most 10 extra suspect guesses per draft, shared by both partners. You have already bought {bought}; you can buy {remaining} more. No wins were charged.')
+
+
+def create_suspect_purchase(draft_id, message_id, buyer_id, team_users, quantity):
+    import time
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 10:
+        raise ValueError('Buy between 1 and 10 extra suspect guesses. The maximum is 10 per team per draft, shared by partners.')
+    with _conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        previous = con.execute('SELECT * FROM suspect_purchases WHERE message_id=?', (message_id,)).fetchone()
+        if previous:
+            return dict(previous)
+        _check_suspect_purchase_limit(con, draft_id, team_users, quantity)
+        cur = con.execute("""INSERT INTO suspect_purchases
+            (draft_id,message_id,buyer_id,team_users,quantity,cost,expires_at,created_at)
+            VALUES (?,?,?,?,?,?,?,?)""", (draft_id, message_id, buyer_id, json.dumps(sorted(team_users)), quantity, quantity*5, time.time()+300, _now()))
+        return dict(con.execute('SELECT * FROM suspect_purchases WHERE id=?', (cur.lastrowid,)).fetchone())
+
+
+def finish_suspect_purchase(purchase_id, buyer_id, team_users, confirm=True):
+    import time
+    with _conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute('SELECT * FROM suspect_purchases WHERE id=?', (purchase_id,)).fetchone()
+        if not row or row['buyer_id'] != buyer_id:
+            raise ValueError('Only the GM who requested this purchase can confirm it.')
+        if row['status'] != 'pending':
+            return dict(row)
+        if row['expires_at'] <= time.time():
+            status = 'expired'
+        elif not confirm:
+            status = 'cancelled'
+        else:
+            draft = con.execute('SELECT * FROM drafts WHERE id=?', (row['draft_id'],)).fetchone()
+            if not draft or draft['status'] not in ('active', 'paused', 'complete') or json.loads(draft['state_json']).get('identities_revealed'):
+                raise ValueError('Suspect purchases are closed for this draft. No wins were charged.')
+            if sorted(team_users) != json.loads(row['team_users']):
+                raise ValueError('Your team assignment changed. Start a new purchase. No wins were charged.')
+            _check_suspect_purchase_limit(con, row['draft_id'], team_users, row['quantity'])
+            status = 'confirmed'
+        con.execute('UPDATE suspect_purchases SET status=?,confirmed_at=? WHERE id=?', (status, _now() if status == 'confirmed' else None, purchase_id))
+        return dict(con.execute('SELECT * FROM suspect_purchases WHERE id=?', (purchase_id,)).fetchone())
+
+
+def anonymous_ledger_users(draft_id, user_ids):
+    with _conn() as con:
+        return _anonymous_ledger_users(con, draft_id, user_ids)
+
+
+def _anonymous_ledger_users(con, draft_id, user_ids):
+    users = set(user_ids)
+    for row in con.execute('SELECT user_id,state_json FROM drafters WHERE draft_id=?', (draft_id,)):
+        if row['user_id'] in users:
+            users.update(json.loads(row['state_json']).get('former_user_ids', []))
+    return sorted(users)
+
+
+def edit_anonymous_member(draft_id, expected_state, index, new_user, display_name, actor_id, replace_user=None):
+    """Change membership atomically without moving a team's seat or picks."""
+    with _conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute('SELECT * FROM drafts WHERE id=?', (draft_id,)).fetchone()
+        if not row or row['theme'] not in ('anon_draft', 'anon_budget_draft') or row['status'] not in ('setup', 'active', 'paused'):
+            raise ValueError('Choose an Anonymous Draft or Anonymous Budget draft that has not finished.')
+        state = json.loads(row['state_json'])
+        if state != expected_state:
+            raise ValueError('The draft changed. Try again; no membership was changed.')
+        team = state['teams'][index]
+        old = con.execute('SELECT * FROM drafters WHERE draft_id=? AND user_id=?', (draft_id, replace_user)).fetchone() if replace_user else None
+        if replace_user and (not old or old['id'] not in team['member_ids']):
+            raise ValueError('The GM being replaced is not on that team.')
+        if new_user == replace_user:
+            raise ValueError('Choose a different GM as the replacement.')
+        existing = con.execute('SELECT * FROM drafters WHERE draft_id=? AND user_id=?', (draft_id, new_user)).fetchone()
+        if existing and any(existing['id'] in t['member_ids'] for t in state['teams']):
+            raise ValueError('That GM is already assigned to a team in this draft. No changes made.')
+        if existing and con.execute('SELECT 1 FROM picks WHERE drafter_id=?', (existing['id'],)).fetchone():
+            raise ValueError('That GM already has picks in this draft; their history cannot be merged automatically.')
+        for member in con.execute('SELECT id,state_json FROM drafters WHERE draft_id=?', (draft_id,)):
+            if new_user in json.loads(member['state_json']).get('former_user_ids', []) and (not old or member['id'] != old['id']):
+                raise ValueError('That GM previously held a seat in this draft. Contact the owner to review the history before reassigning them.')
+        if not replace_user and len(team['member_ids']) >= 3:
+            raise ValueError('This team already has the maximum of 3 GMs.')
+        if old:
+            former = sorted((set(json.loads(old['state_json']).get('former_user_ids', [])) | {replace_user}) - {new_user})
+            new_state = dict(team_index=index, former_user_ids=former)
+            if existing:
+                if con.execute('SELECT 1 FROM relay_messages WHERE from_drafter_id=?', (existing['id'],)).fetchone():
+                    raise ValueError('That unassigned GM has existing draft history. Review it before merging their registration.')
+                con.execute('DELETE FROM drafters WHERE id=?', (existing['id'],))
+            con.execute('UPDATE drafters SET user_id=?,display_name=?,state_json=? WHERE id=?',
+                        (new_user, display_name, json.dumps(new_state), old['id']))
+            mid = old['id']
+        else:
+            if existing:
+                mid = existing['id']
+                con.execute('UPDATE drafters SET state_json=? WHERE id=?', (json.dumps({'team_index': index}), mid))
+            else:
+                mid = con.execute('INSERT INTO drafters (draft_id,user_id,display_name,state_json) VALUES (?,?,?,?)',
+                                  (draft_id, new_user, display_name, json.dumps({'team_index': index}))).lastrowid
+            source = team['member_ids'][0]
+            con.execute("""INSERT INTO picks (draft_id,drafter_id,player,round_number,pick_number,auto_pick,created_at)
+                         SELECT draft_id,?,player,round_number,pick_number,auto_pick,created_at FROM picks WHERE draft_id=? AND drafter_id=?""", (mid, draft_id, source))
+            team['member_ids'].append(mid)
+        cleared = False
+        for entry in team.get('open_picks', []):
+            if entry.get('proposal'):
+                cleared = True
+                entry.update(proposal=None, pending_from=[], proposal_deadline=None)
+                entry.pop('paused_proposal_seconds', None)
+        state.setdefault('membership_changes', []).append(dict(actor_id=actor_id, team=index, old_user=replace_user, new_user=new_user, created_at=_now()))
+        con.execute('UPDATE drafts SET state_json=? WHERE id=?', (json.dumps(state), draft_id))
+        return dict(member_id=mid, cleared_proposal=cleared)

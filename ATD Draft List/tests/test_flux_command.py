@@ -59,19 +59,19 @@ class FluxCommandTests(unittest.IsolatedAsyncioTestCase):
                        _player_available=Mock(return_value=True))
         return data['100']
 
-    async def test_normal_mode_saves_batch_once_and_rejects_repeat_without_partial_write(self):
+    async def test_normal_mode_newest_list_replaces_previous_order_and_threshold(self):
         data = self.normal_mode()
         await self.ns['cmd_fluxpick'](self.ctx, text='Al Horford 2\nDerek Harper 1')
         self.assertEqual([p['player'] for p in data['picks']], ['Al Horford', 'Derek Harper'])
-        self.assertEqual(len(data['flux_rule_attempts']), 2)
         self.ns['_save_data'].assert_called_once()
         await self.ns['cmd_fluxpick'](self.ctx, text='Bob Lanier 2\nAl Horford 1')
-        self.assertEqual(len(data['picks']), 2)
-        self.ns['_save_data'].assert_called_once()
+        self.assertEqual([(p['player'], p['flux_drop']) for p in data['picks']], [('Bob Lanier', 2), ('Al Horford', 1)])
+        self.assertEqual(self.ns['_save_data'].call_count, 2)
 
-    async def test_normal_mode_unavailable_later_entry_saves_nothing(self):
+    async def test_normal_mode_unavailable_entry_removed_and_reported(self):
         data = self.normal_mode()
         self.ns['_player_available'].side_effect = [True, False]
         await self.ns['cmd_fluxpick'](self.ctx, text='Al Horford 2\nDerek Harper 1')
-        self.assertEqual(data['picks'], [])
-        self.ns['_save_data'].assert_not_called()
+        self.assertEqual([p['player'] for p in data['picks']], ['Al Horford'])
+        self.assertIn('Derek Harper', self.ctx.send.call_args.args[0])
+        self.ns['_save_data'].assert_called_once()

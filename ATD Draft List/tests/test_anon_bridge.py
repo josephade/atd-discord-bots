@@ -16,9 +16,9 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.data['100']['anon_draft_id'] = 24
         original = dict(player='Earlier', price=5)
         additions = [dict(player=name, price=20, flux_drop=drop) for name, drop in [('Al Horford', 2), ('Derek Harper', 2), ('Bob Lanier', 1)]]
-        self.client.request.side_effect = [dict(snapshot([original]), can_fluxpick=True), snapshot([original]+additions, revision=2)]
+        self.client.request.side_effect = [dict(snapshot([original]), can_fluxpick=True), snapshot(additions, revision=2)]
         await self.client.add_flux(self.ctx, additions)
-        self.assertEqual(self.client.request.call_args.args[2]['picks'], [original]+additions)
+        self.assertEqual(self.client.request.call_args.args[2]['picks'], additions)
         self.assertEqual(self.client.request.await_count, 2)
         self.assertIn('Larger drops qualify', self.ctx.send.call_args.args[0])
 
@@ -44,8 +44,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(BridgeError, 'current-round pick'):
             await self.client.add_flux(self.ctx, pick)
         self.client.request.return_value = dict(snapshot([pick]), can_fluxpick=True)
-        with self.assertRaisesRegex(BridgeError, 'same Flux player twice'):
-            await self.client.add_flux(self.ctx, pick)
+        await self.client.add_flux(self.ctx, pick)
+        self.assertTrue(self.client.request.call_args.args[2]['replace_flux'])
     async def test_owner_enables_every_registered_gm_without_importing_normal_lists(self):
         self.client.owner = 999
         self.ctx.author.id = 999

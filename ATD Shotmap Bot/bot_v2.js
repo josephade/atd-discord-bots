@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const Discord = require('discord.js');
+const { selectSeasons, canCache } = require('./seasons');
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,8 @@ function toCache(key, buf) {
 
 async function generateShotmap(playerName, yearStart, yearEnd, modern = false, playoff = false, dark = false) {
   const cacheKey = getCacheKey(playerName, yearStart, yearEnd, modern, playoff, dark);
-  const cached = fromCache(cacheKey);
+  const cacheable = canCache(yearStart, yearEnd);
+  const cached = cacheable ? fromCache(cacheKey) : null;
   if (cached) {
     console.log(`Cache hit: ${cacheKey}`);
     return cached;
@@ -49,20 +51,7 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
   const start = parseInt(yearStart);
   const end = yearEnd ? parseInt(yearEnd) : start;
 
-  // Build seasons array newest-first (matches page JS logic)
-  const allSeasons = [];
-  for (let y = 2026; y >= 1997; y--) allSeasons.push(yearToSeason(y));
-  const startSeason = yearToSeason(start);
-  const endSeason   = yearToSeason(end);
-  const si = allSeasons.indexOf(startSeason);
-  const ei = allSeasons.indexOf(endSeason);
-  if (si === -1) throw new Error(`Season ${startSeason} not available. Use 1997–2026.`);
-  if (ei === -1) throw new Error(`Season ${endSeason} not available. Use 1997–2026.`);
-  const seasons = allSeasons.slice(Math.min(si, ei), Math.max(si, ei) + 1);
-
   const stype = playoff ? 'playoffs' : 'regular';
-  const seasonLabel = seasons.length === 1 ? seasons[0] : `${seasons[seasons.length - 1]} – ${seasons[0]}`;
-  console.log(`Generating: ${playerName} | ${seasonLabel}${playoff ? ' | Playoffs' : ''}`);
 
   const b = await puppeteer.launch({
     headless: 'new',
@@ -80,7 +69,15 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
 
     // ── 1. Load page — establishes session cookie + gets CSRF token ──
     console.log('Loading page...');
-    await page.goto('https://nbavisuals.com/shotmap', { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto('https://courtsketch.com/shotmap', { waitUntil: 'networkidle2', timeout: 30000 });
+
+    const availableSeasons = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#season-start option, #season-end option, #season-dropdown option'))
+        .map(option => option.value)
+    );
+    const seasons = selectSeasons(availableSeasons, start, end);
+    const seasonLabel = seasons.length === 1 ? seasons[0] : `${seasons[seasons.length - 1]} - ${seasons[0]}`;
+    console.log(`Generating: ${playerName} | ${seasonLabel}${playoff ? ' | Playoffs' : ''}`);
 
     const csrfToken = await page.evaluate(() =>
       document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
@@ -208,7 +205,7 @@ async function generateShotmap(playerName, yearStart, yearEnd, modern = false, p
     if (!result.image) throw new Error('No image returned from server');
 
     const screenshot = Buffer.from(result.image, 'base64');
-    toCache(cacheKey, screenshot);
+    if (cacheable) toCache(cacheKey, screenshot);
     console.log(`Done: ${foundName} | ${seasonLabel}`);
     return screenshot;
 
@@ -241,7 +238,7 @@ client.on('messageCreate', async (message) => {
       .setTitle('ShotMap Bot — Commands')
       .setColor(0x5865F2)
       .setDescription(
-        'Generates NBA shot charts from [nbavisuals.com](https://nbavisuals.com/shotmap).\n\n' +
+        'Generates NBA shot charts from [CourtSketch](https://courtsketch.com/shotmap).\n\n' +
         '**Usage:** `!shotmap <player> <year> [endYear] [ps] [--modern] [--dark]`'
       )
       .addFields(
@@ -321,7 +318,9 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN).catch(err => {
+if (require.main === module) client.login(process.env.DISCORD_TOKEN).catch(err => {
   console.error('Login failed:', err.message);
   process.exit(1);
 });
+
+module.exports = { generateShotmap };

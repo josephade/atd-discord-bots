@@ -6,6 +6,7 @@ import time
 from aiohttp import web
 import db
 import themes
+import anon_clock
 from themes.base import DraftContext, draft_lock
 
 MODES = {'partner_draft': 'partner', 'anon_budget_draft': 'anon'}
@@ -33,24 +34,32 @@ def snapshot(draft):
         for i, team in enumerate(state.get('teams', [])):
             deadline = team.get('timer_deadline')
             pick = team.get('timer_pick_number')
-            if deadline is not None and pick is not None:
+            if pick is not None:
                 clock = {'token': f'a:{i}:{pick}', 'deadline': deadline,
                          'round': (pick - 1) // max(1, len(state['teams'])) + 1,
                          'pick': pick, 'logo': team['logo']}
-                clocks.append(clock)
+                if deadline is not None:
+                    clocks.append(clock)
                 if pick == state.get('live_pick_number'):
                     current = clock
         rounds = draft['settings'].get('rounds', 10)
     waiting = state.get('flux_wait', {}).get('round')
+    settings = themes.get_theme(draft['theme'])._settings(DraftContext(None, draft['id']))
+    clock_running = (anon_clock.running(state, settings, time.time()) if mode == 'anon' else True)
     finished = themes.get_theme(draft['theme']).is_pick_phase_complete(DraftContext(None, draft['id']))
     scheduled_remaining = (state.get('turn_index', 0) < len(state.get('turns', [])) if mode == 'partner'
                            else state.get('live_pick_number') is not None)
     return {'draft_id': draft['id'], 'mode': mode, 'status': draft['status'],
+            'presenter': 'theme' if mode == 'anon' else 'timer',
             'rounds': rounds, 'current': None if waiting else current,
+            'window_notice': anon_clock.window_info(draft),
+            'window_delivery_complete': state.get('theme_window_delivery', {}).get('key') if state.get('theme_window_delivery', {}).get('complete') else None,
             'waiting_for_flux': waiting,
+            'timers_off': bool(state.get('timers_off')),
+            'window_closed': mode == 'anon' and settings.get('timer_window_et', True) and not anon_clock.in_window(time.time()),
             'announcement_revision': state.get('announcement_revision', 0),
             'transitioning': bool(draft['status'] == 'active' and scheduled_remaining and not current and not waiting and not finished),
-            'clocks': clocks if draft['status'] == 'active' and not waiting else [],
+            'clocks': clocks if draft['status'] == 'active' and not waiting and clock_running else [],
             'finished': finished}
 
 
@@ -163,7 +172,14 @@ def create_app(bot, key):
             raise web.HTTPNotFound()
         if request.method == 'POST':
             payload = await request.json()
-            if payload.get('action') == 'skip':
+            if payload.get('action') == 'window-notice':
+                return web.json_response(await anon_clock.window_delivery(draft_id, ack=payload.get('notice')))
+            elif payload.get('action') in ('timeron', 'timeroff'):
+                try:
+                    await anon_clock.toggle(bot, draft_id, int(payload.get('actor_id', 0)), payload['action'] == 'timeron')
+                except (ValueError, TypeError) as exc:
+                    return web.json_response({'error': str(exc)}, status=400)
+            elif payload.get('action') == 'skip':
                 try:
                     await skip_turn(bot, draft_id, payload)
                 except (ValueError, TypeError) as exc:

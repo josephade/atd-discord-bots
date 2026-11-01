@@ -34,6 +34,7 @@ RUN npm install
 
 # Copy the rest of the app
 COPY . .
+RUN node --test tests/*.test.js
 
 # Puppeteer flags for Fly
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false

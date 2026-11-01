@@ -7,7 +7,7 @@ import json
 import db
 import themes
 import sheets
-from flux_rules import parse_prices, qualify, threshold, failure_message, failure_reports
+from flux_rules import parse_prices, qualify, threshold, failure_message, failure_reports, key as player_key
 from themes.base import DraftContext, draft_lock
 
 
@@ -26,7 +26,8 @@ def view(draft, drafter):
     ready, error = flux_window(draft, drafter)
     return dict(version=queue.get('version', ''), picks=queue.get('picks', []),
                 enabled=queue.get('enabled', True), status=draft['status'],
-                revision=queue.get('revision', 0), can_fluxpick=ready, fluxpick_error=error)
+                revision=queue.get('revision', 0), can_fluxpick=ready, fluxpick_error=error,
+                unavailable=queue.get('unavailable', []))
 
 
 def flux_window(draft, drafter):
@@ -143,37 +144,48 @@ async def update(bot, draft_id, user_id, guild_id, payload):
         # Replaying a successful upload after a timeout never restores a used list.
         if version == old.get('version'):
             return view(draft, drafter)
-        if payload.get('expected_revision', 0) != old.get('revision', 0):
+        replacing = payload.get('replace_flux') is True
+        submission_id = payload.get('submission_id', 0)
+        if not isinstance(submission_id, int) or isinstance(submission_id, bool) or submission_id < 0:
+            raise ValueError('Invalid list submission ID.')
+        if replacing and submission_id and submission_id < old.get('submission_id', 0):
+            return dict(view(draft, drafter), superseded=True)
+        if not replacing and payload.get('expected_revision', 0) != old.get('revision', 0):
             raise ValueError('Your list changed while it was being edited. Refresh it and try again.')
         if not isinstance(payload.get('enabled', True), bool):
             raise ValueError('Enabled must be true or false.')
         picks = validate(payload.get('picks', []))
         state = draft['state']
         team = state['teams'][drafter['state']['team_index']]
-        attempts = team.setdefault('flux_rule_attempts', [])
-        changed = False
+        if replacing:
+            ready, error = flux_window(draft, drafter)
+            if not ready:
+                raise ValueError(error)
+        unavailable, available = [], []
         for pick in picks:
             if 'flux_drop' not in pick:
+                available.append(pick)
+                continue
+            if themes.get_theme('anon_budget_draft')._already_taken(DraftContext(bot, draft_id), pick['player']):
+                unavailable.append(pick['player'])
                 continue
             prior = next((p for p in old.get('picks', []) if p.get('player', '').casefold() == pick['player'].casefold()
                           and p.get('flux_target_round') == pick['flux_target_round'] and p.get('flux_drop') == pick['flux_drop']
                           and p.get('flux_source') == pick['flux_source']), None)
-            if prior:
+            if prior and not replacing:
+                available.append(pick)
                 continue  # pause/resume and edits to other entries preserve an existing rule.
             ready, error = flux_window(draft, drafter)
             if not ready:
                 raise ValueError(error)
-            token = json.dumps([pick['player'].casefold(), pick['flux_source'], pick['flux_target_round']], sort_keys=True)
-            if token in attempts:
-                raise ValueError('Your team already submitted a Flux rule for that player for the upcoming Flux. Choose another player.')
-            if themes.get_theme('anon_budget_draft')._already_taken(DraftContext(bot, draft_id), pick['player']):
-                raise ValueError('That player has already been drafted. Choose another player.')
-            attempts.append(token)
-            changed = True
-        if changed:
-            db.set_draft_state(draft_id, state)
-        queue = dict(version=version, picks=picks, enabled=payload.get('enabled', True),
-                     revision=old.get('revision', 0)+1)
+            current_round = (state['flux_wait']['round']-1 if state.get('flux_wait') else
+                             (state['live_pick_number']-1)//len(state['teams'])+1)
+            if pick['flux_from_round'] != current_round:
+                raise ValueError('Submit fresh rules for the next Flux after your current-round pick.')
+            available.append(pick)
+        queue = dict(version=version, picks=available, enabled=payload.get('enabled', True),
+                     revision=old.get('revision', 0)+1, unavailable=unavailable,
+                     submission_id=submission_id if replacing else old.get('submission_id', 0))
         db.update_drafter_state(drafter['id'], {'draftlist_queue': queue})
         ctx = DraftContext(bot, draft_id)
         state = ctx.state
@@ -318,6 +330,7 @@ async def recover_flux(bot):
     for draft in db.list_drafts():
         if draft['theme'] == 'anon_budget_draft' and draft['status'] in ('active', 'paused'):
             async with draft_lock(draft['id']):
+                await prune_taken(DraftContext(bot, draft['id']))
                 await settle_flux(DraftContext(bot, draft['id']), legacy_only=True)
 
 
@@ -328,3 +341,38 @@ def clear_team(team):
         if queue:
             queue.update(picks=[], revision=queue.get('revision', 0)+1)
             db.update_drafter_state(mid, {'draftlist_queue': queue})
+
+
+async def prune_taken(ctx, taken=None, exclude=()):
+    """Remove drafted options immediately, including paused lists and restarts."""
+    state = ctx.state
+    if taken is None:
+        taken = {}
+        for mid, names in db.get_all_picks(ctx.draft_id).items():
+            drafter = db.get_drafter(mid)
+            index = drafter['state'].get('team_index') if drafter else None
+            logo = state['teams'][index]['logo'] if index is not None else 'another team'
+            for name in names:
+                taken[player_key(name)] = logo
+    notices = []
+    for drafter in ctx.drafters():
+        if drafter['id'] in exclude:
+            continue
+        queue = drafter['state'].get('draftlist_queue')
+        if not queue:
+            continue
+        removed = [p for p in queue.get('picks', []) if player_key(p['player']) in taken]
+        if not removed:
+            continue
+        queue['picks'] = [p for p in queue['picks'] if player_key(p['player']) not in taken]
+        queue['revision'] = queue.get('revision', 0)+1
+        db.update_drafter_state(drafter['id'], {'draftlist_queue': queue})
+        lines = [f"**{p['player']}** was drafted by {taken[player_key(p['player'])]} and removed from your list." for p in removed]
+        chunk = '⚠️ **Draft List update**\n'
+        for line in lines:
+            if len(chunk)+len(line) > 1700:
+                notices.append((drafter['user_id'], chunk))
+                chunk = ''
+            chunk += line+'\n'
+        notices.append((drafter['user_id'], chunk+f"**{len(queue['picks'])} options remaining.**"))
+    await asyncio.gather(*(ctx.dm(uid, message) for uid, message in notices))

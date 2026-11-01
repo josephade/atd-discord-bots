@@ -7,7 +7,7 @@ from emoji_map import EMOJI_TEAM_MAP
 from themes.base import DraftContext, draft_lock
 
 ANON_THEMES = frozenset(('anon_draft', 'anon_budget_draft', 'partner_draft'))
-ALLOWED_CHANNEL_IDS = frozenset((934052158532378634, 1533242104304631969))
+ALLOWED_CHANNEL_IDS = frozenset((1566394824288894976, 1533242104304631969))
 CONSUME_WRONG_ATTEMPTS = True
 ALLOW_REPEAT_CATCHES = False
 _CUSTOM = re.compile(r'<a?:([^:<>]+):(\d+)>')
@@ -73,23 +73,34 @@ async def guess(bot, draft_id, message_id, user_id, target_id, emoji):
             return {'status': 'revealed'}
         guesser = db.get_drafter_by_user(draft_id, user_id)
         target = db.get_drafter_by_user(draft_id, target_id)
-        if not guesser or not target:
-            return {'status': 'invalid', 'message': 'Both you and the suspected GM must be in this anonymous draft.'}
-        if user_id == target_id:
-            return {'status': 'invalid', 'message': 'You cannot suspect yourself.'}
+        if not guesser:
+            return {'status': 'invalid', 'message': 'You must be registered in this anonymous draft to guess.'}
+        own_teams = [t for t in teams(draft) if guesser['id'] in t['member_ids']]
+        if len(own_teams) != 1:
+            return {'status': 'invalid', 'message': 'Your team assignment is unclear. Ask the commissioner to check it.'}
+        attempt_users = [db.get_drafter(mid)['user_id'] for mid in own_teams[0]['member_ids']]
+        attempt_users = db.anonymous_ledger_users(draft_id, attempt_users)
+        target_teams = [t for t in teams(draft) if target and target['id'] in t['member_ids']]
+        if target and len(target_teams) != 1:
+            return {'status': 'invalid', 'message': 'The targeted GM\u2019s team assignment is unclear. Ask the commissioner to check it.'}
+        caught_users = [db.get_drafter(mid)['user_id'] for mid in target_teams[0]['member_ids']] if target_teams else [target_id]
+        caught_users = db.anonymous_ledger_users(draft_id, caught_users)
         matches = [t for t in teams(draft) if logo_matches(emoji, t['logo'])]
         if len(matches) != 1:
             return {'status': 'invalid', 'message': 'Use one uniquely assigned team emoji from this draft.'}
         team = matches[0]
-        if guesser['id'] in team['member_ids'] or any(
-                guesser['id'] in t['member_ids'] and target['id'] in t['member_ids'] for t in teams(draft)):
-            return {'status': 'invalid', 'message': 'You cannot suspect your own team or a teammate.'}
-        correct = target['id'] in team['member_ids']
+        # Self/own-team/teammate guesses spend the shared life as wrong guesses.
+        # Rejecting them for free would permit unlimited apparent guesses and
+        # a distinguishable response could expose the anonymous relationship.
+        own_guess = (user_id == target_id or guesser['id'] in team['member_ids']
+                     or target is not None and target['id'] in own_teams[0]['member_ids'])
+        correct = target is not None and not own_guess and target['id'] in team['member_ids']
         phase = 'post_draft' if after_final_round(ctx) else 'draft'
         result = db.record_suspect(draft_id, message_id, user_id, target_id, team['logo'], correct,
-                                   phase, draft['state'], CONSUME_WRONG_ATTEMPTS, ALLOW_REPEAT_CATCHES)
+                                   phase, draft['state'], CONSUME_WRONG_ATTEMPTS, ALLOW_REPEAT_CATCHES,
+                                   attempt_user_ids=attempt_users, caught_user_ids=caught_users)
         result['logo'] = team['logo']
-        if bot is not None and result['status'] in ('correct', 'wrong'):
+        if bot is not None and target is not None and target_id != user_id and result['status'] in ('correct', 'wrong'):
             if correct:
                 penalty = '5 wins' if result['penalty_kind'] == 'wins' else '10% odds in your next matchup'
                 notice = f"You were correctly suspected of being the GM of {team['logo']}. You lose {penalty}."

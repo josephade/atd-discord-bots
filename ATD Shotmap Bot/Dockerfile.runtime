@@ -1,0 +1,9 @@
+# Code-only rollout using the already deployed browser/dependencies.
+# Supply the exact verified app image with --build-arg RUNTIME_IMAGE=...
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+WORKDIR /app
+COPY bot_v2.js seasons.js ./
+COPY tests/seasons.test.js ./tests/seasons.test.js
+RUN node --check bot_v2.js && node --test tests/seasons.test.js
+CMD ["npm", "start"]

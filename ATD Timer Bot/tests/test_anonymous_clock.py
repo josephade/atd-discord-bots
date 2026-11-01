@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from discord.ext import commands
+import admin_routing
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('anonymous_clock_under_test', ROOT / 'theme_clock.py')
@@ -17,8 +18,10 @@ spec.loader.exec_module(clock)
 
 
 def load_commands(ns):
+    ns.setdefault('_draft_channel_id', admin_routing.target)
+    ns.setdefault('admin_routing', admin_routing)
     tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
-    names = {'timermode', 'timerstart', 'timerlink', 'timerskip', '_anonymous_command_guard'}
+    names = {'timermode', 'timerstart', 'timerlink', 'timerskip', 'anontimers', '_anonymous_command_guard'}
     nodes = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
     for node in nodes:
         node.decorator_list = []
@@ -27,6 +30,21 @@ def load_commands(ns):
 
 
 class AnonymousModes(unittest.IsolatedAsyncioTestCase):
+    async def test_timer_off_on_routes_owner_identity_to_theme(self):
+        session = NS(draft=NS(mode='anon', theme_draft_id=25))
+        adapter = NS(fetch=AsyncMock(return_value={'status': 'active', 'timers_off': True}), render=AsyncMock())
+        ns = load_commands(dict(_sessions={99: session}, _theme_clocks=adapter))
+        ctx = NS(channel=NS(id=99), author=NS(id=100), invoked_with='timeroff', send=AsyncMock())
+        await ns['anontimers'](ctx)
+        adapter.fetch.assert_awaited_once_with(session, action='timeroff', actor_id=100)
+
+    def test_disabled_clock_embed_never_requires_a_deadline(self):
+        adapter = clock.ThemeClocks(None, {})
+        data = dict(mode='anon', status='active', rounds=10, timers_off=True,
+                    current=dict(logo='TEAM', round=3, pick=61, deadline=None))
+        self.assertIn('off', adapter.embed(data).description)
+        data.update(timers_off=False, window_closed=True)
+        self.assertIn('10am ET', adapter.embed(data).description)
     async def test_linked_skip_routes_to_theme_without_local_skip_logic(self):
         session = NS(draft=NS(mode='anon', theme_draft_id=25))
         adapter = NS(skip=AsyncMock(return_value={'status': 'active'}), render=AsyncMock())
@@ -95,6 +113,50 @@ class AnonymousModes(unittest.IsolatedAsyncioTestCase):
 
 
 class ClockTransport(unittest.IsolatedAsyncioTestCase):
+    async def test_schedule_notice_comes_from_timer_with_logo_and_private_delivery_receipt(self):
+        user = NS(send=AsyncMock())
+        adapter = clock.ThemeClocks(Mock(get_user=Mock(return_value=user)), {})
+        session = NS(channel_id=99, channel=NS(send=AsyncMock(return_value=NS(delete=AsyncMock()))))
+        data = dict(mode='anon', status='active', rounds=10, clocks=[], timers_off=True,
+                    current=dict(logo='TEAM_LOGO', round=5, pick=10, deadline=None),
+                    window_notice=dict(key='2026-11-01:closed', text='Timers are OFF. Resume at 10 AM ET.'))
+        adapter.fetch = AsyncMock(side_effect=[data, dict(mode='anon', key='2026-11-01:closed', pending_users=[100, 101], public=False), {}])
+        await adapter.tick(session)
+        self.assertEqual(user.send.await_count, 2)
+        for call in user.send.call_args_list:
+            self.assertIn('TEAM_LOGO', call.kwargs['embed'].description)
+            self.assertIn('Resume at 10 AM', call.kwargs['embed'].description)
+            self.assertFalse(call.kwargs['allowed_mentions'].users)
+        self.assertIn('TEAM_LOGO', session.channel.send.call_args.kwargs['embed'].description)
+        self.assertEqual(adapter.fetch.call_args.kwargs['notice']['users'], [100, 101])
+        self.assertNotIn('100', session.channel.send.call_args.kwargs['embed'].description)
+
+    async def test_completed_period_does_not_send_another_schedule_dm(self):
+        bot = Mock()
+        adapter = clock.ThemeClocks(bot, {})
+        session = NS(channel_id=99, channel=NS(send=AsyncMock()))
+        data = dict(mode='anon', status='active', rounds=10, clocks=[], current=None,
+                    window_notice=dict(key='closed', text='Resume at 10 AM ET'), window_delivery_complete='closed')
+        adapter.fetch = AsyncMock(return_value=data)
+        await adapter.tick(session)
+        adapter.fetch.assert_awaited_once()
+        bot.get_user.assert_not_called()
+
+    async def test_theme_presenter_suppresses_timer_cards_dms_and_removes_previous_card(self):
+        bot = Mock()
+        adapter = clock.ThemeClocks(bot, {})
+        old = NS(delete=AsyncMock())
+        adapter.messages[99] = old
+        session = NS(channel_id=99, channel=NS(send=AsyncMock()))
+        adapter.fetch = AsyncMock(return_value=dict(presenter='theme', clocks=[], current=None,
+            window_notice=dict(key='closed', text='Timer off')))
+        await adapter.tick(session)
+        await adapter.tick(session)
+        session.channel.send.assert_not_awaited()
+        bot.get_user.assert_not_called()
+        old.delete.assert_awaited_once()
+        self.assertEqual(adapter.fetch.await_count, 2)
+
     async def test_manual_skip_pins_token_and_actor_and_rejects_waiting_clock(self):
         adapter = clock.ThemeClocks(Mock(), {})
         session = object()

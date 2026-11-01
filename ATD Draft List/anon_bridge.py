@@ -60,9 +60,11 @@ class AnonymousLists:
         self.apply(uid, snapshot)
         return snapshot
 
-    async def push(self, uid, snapshot, picks, enabled):
+    async def push(self, uid, snapshot, picks, enabled, *, replace_flux=False, submission_id=0):
         payload = dict(picks=picks, enabled=enabled, version=uuid.uuid4().hex,
                        expected_revision=snapshot['revision'])
+        if replace_flux:
+            payload.update(replace_flux=True, submission_id=submission_id)
         result = await self.request(uid, self.data[str(uid)]['anon_draft_id'], payload)
         self.apply(uid, result)
         return result
@@ -74,15 +76,20 @@ class AnonymousLists:
             snapshot = await self.refresh(uid)
             if not snapshot.get('can_fluxpick', False):
                 raise BridgeError(snapshot.get('fluxpick_error') or 'Finish your current-round pick before setting a Flux rule.')
-            picks = copy.deepcopy(snapshot['picks'])
-            seen = {p['player'].casefold() for p in picks}
+            picks, seen = [], set()
             for pick in additions:
                 if pick['player'].casefold() in seen:
-                    raise BridgeError('That player is already in your list. You cannot submit the same Flux player twice.')
+                    raise BridgeError('List each player once in the same message.')
                 picks.append(pick)
                 seen.add(pick['player'].casefold())
-            await self.push(uid, snapshot, picks, snapshot['enabled'])
-            await ctx.send(saved_message(additions))
+            result = await self.push(uid, snapshot, picks, snapshot['enabled'], replace_flux=True,
+                                     submission_id=getattr(getattr(ctx, 'message', None), 'id', 0))
+            if result.get('superseded'):
+                await ctx.send('Your newer Flux list is already saved; this older message was ignored.')
+                return
+            await ctx.send(saved_message(result['picks']))
+            if result.get('unavailable'):
+                await ctx.send('⚠️ Already drafted and removed: **'+', '.join(result['unavailable'])+'**.')
 
     def parse_list(self, text):
         picks, seen = [], set()

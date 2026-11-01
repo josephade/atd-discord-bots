@@ -59,7 +59,7 @@ class PartnerTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def make(self, members=4, **settings):
-        options = {**self.theme.default_settings(), 'roster_size': 2, **settings}
+        options = {**self.theme.default_settings(), 'roster_size': 2, 'timer_window_et': False, **settings}
         draft_id = db.create_draft(1, None, 'partner_draft', 'Test', options)
         for n in range(members):
             db.add_drafter(draft_id, 1000 + draft_id * 100 + n, f'Owner{n}')

@@ -61,6 +61,22 @@ class Worksheet:
 
 
 class SkipNoticeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_mapped_tab_reports_trusted_pick_instead_of_silent_drop(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1]/'bot.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'on_message')
+        node.decorator_list = []
+        ns = dict(re=re, TIMER_BOT_ID=0, FLUX_BOT_ID=0, TRUSTED_BOT_IDS={99},
+                  _get_manager_async=AsyncMock(return_value=None),
+                  _channel_sheet_map={123: dict(tab='Old renamed tab')}, _SILENT_PICK_ERROR_CHANNELS=set())
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
+        message = SimpleNamespace(author=SimpleNamespace(id=99, bot=True),
+                                  content="1. <:Cavs:123> LeBron James '13 $43",
+                                  channel=SimpleNamespace(id=123, send=AsyncMock()), add_reaction=AsyncMock())
+        await ns['on_message'](message)
+        self.assertIn('not written', message.channel.send.call_args.args[0])
+        self.assertIn('Old renamed tab', message.channel.send.call_args.args[0])
+        self.assertIn('!setsheet', message.channel.send.call_args.args[0])
+        message.add_reaction.assert_awaited_once_with('⚠️')
     async def test_numbered_skip_from_trusted_theme_bot_never_reaches_sheet_writer(self):
         tree = ast.parse((Path(__file__).resolve().parents[1]/'bot.py').read_text(encoding='utf-8'))
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'on_message')

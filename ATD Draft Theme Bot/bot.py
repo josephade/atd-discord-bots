@@ -62,6 +62,8 @@ _ET = ZoneInfo('America/New_York')
 
 
 async def _apply_night_pause(draft: dict):
+    if draft['theme'] in ('anon_draft', 'anon_budget_draft'):
+        return  # These clocks exclude closed hours; drafting stays open.
     theme = themes.get_theme(draft['theme'])
     draft_ctx = DraftContext(bot, draft['id'])
     try:
@@ -113,6 +115,17 @@ async def _morning_resume():
 # gets a silent admin-channel announce()), everyone gets DMed directly plus
 # a heads-up in the results channel, since missing the window here costs a
 # whole round rather than just a slower pick.
+@tasks.loop(seconds=2)
+async def _anonymous_clock_cards():
+    import clock_presenter
+    for draft in db.list_drafts():
+        if draft['theme'] == 'anon_budget_draft' and (draft['status'] in ('active', 'paused') or draft['state'].get('theme_clock_card')):
+            try:
+                await clock_presenter.publish(bot, draft['id'])
+            except Exception:
+                log.exception('Theme clock card failed for draft %s', draft['id'])
+
+
 _IRISH_TZ = ZoneInfo('Europe/Dublin')  # handles IST/GMT DST transitions automatically
 
 
@@ -931,6 +944,18 @@ async def cmd_setteams(ctx, draft_ref: str = '', *, text: str = ''):
     await ctx.send(result)
 
 
+@bot.command(name='anonaddgm')
+async def cmd_anonaddgm(ctx, *, text: str = ''):
+    import member_admin
+    await member_admin.execute(ctx, bot, text)
+
+
+@bot.command(name='anonreplacegm')
+async def cmd_anonreplacegm(ctx, *, text: str = ''):
+    import member_admin
+    await member_admin.execute(ctx, bot, text, replace=True)
+
+
 @bot.command(name='setwaiver')
 @commands.has_permissions(administrator=True)
 async def cmd_setwaiver(ctx, draft_ref: str = '', *, text: str = ''):
@@ -951,6 +976,57 @@ async def cmd_setwaiver(ctx, draft_ref: str = '', *, text: str = ''):
     theme = themes.get_theme(draft['theme'])
     result = await theme.set_waiver_order(DraftContext(bot, draft['id']), text)
     await ctx.send(result)
+
+
+@bot.command(name='timeron', aliases=['timeroff'])
+async def cmd_anontimers(ctx, *, draft_ref: str = ''):
+    if not draft_ref and ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        return  # Bare commands in a linked selection channel belong to Timer Bot.
+    if ctx.author.id != OWNER_ID:
+        await ctx.send('Only the bot owner can change anonymous draft timers.')
+        return
+    if not ctx.guild:
+        await ctx.send('Run this in the draft selection channel or your private channel, with a draft ID.')
+        return
+    draft = _resolve_draft(draft_ref) if draft_ref else _resolve_draft_for_channel(ctx.channel.id)
+    if not draft and not draft_ref:
+        matches = [d for d in db.list_drafts(guild_id=ctx.guild.id, status='active')
+                   if d['theme'] in ('anon_draft', 'anon_budget_draft') and d['state'].get('timer_channel_id') == ctx.channel.id]
+        draft = matches[0] if len(matches) == 1 else None
+    if not draft or draft['guild_id'] != ctx.guild.id:
+        await ctx.send('Specify the draft: `!timeron <draft ID>` or `!timeroff <draft ID>`.')
+        return
+    import anon_clock
+    enabled = ctx.invoked_with == 'timeron'
+    try:
+        await anon_clock.toggle(bot, draft['id'], ctx.author.id, enabled)
+    except ValueError as exc:
+        await ctx.send(str(exc))
+        return
+    await ctx.send('Timers '+('on: remaining time resumes during 10am\u2013midnight ET.' if enabled else
+                             'off: picks and next-team DMs continue; no automatic expiry.'))
+
+
+@bot.command(name='anonpick')
+async def cmd_anonpick(ctx, draft_ref: str = '', team_ref: str = '', *, text: str = ''):
+    """Owner-only pick for an anonymous team, exclusively in the private channel."""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send('Only the bot owner can use `!anonpick`.')
+        return
+    if not ctx.guild or not OWNER_REPORT_CHANNEL_ID or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        await ctx.send(f'Use `!anonpick` only in <#{OWNER_REPORT_CHANNEL_ID}>.')
+        return
+    if not draft_ref or not team_ref or not text.strip():
+        await ctx.send('Usage: `!anonpick <draft ID> <team emoji/number> <player> [year] <price>`')
+        return
+    draft = _resolve_draft(draft_ref)
+    if not draft:
+        await ctx.send('Draft not found.')
+        return
+    import owner_picks
+    reply = await owner_picks.submit(bot, draft['id'], ctx.author.id, ctx.channel.id, ctx.guild.id,
+                                     team_ref, text, ctx.message.id)
+    await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name='anonoverride')
@@ -1676,15 +1752,53 @@ async def cmd_teamlist(ctx):
 
 
 # ── DM commands (drafters) ──────────────────────────────────────────────────────
+@bot.command(name='nextpick')
+async def cmd_nextpick(ctx):
+    if not _dm_only(ctx):
+        return
+    import upcoming_picks
+    try:
+        await ctx.send(embed=upcoming_picks.embed(ctx.author.id), allowed_mentions=discord.AllowedMentions.none())
+    except ValueError as exc:
+        await ctx.send(str(exc))
+
+
+@bot.command(name='market')
+async def cmd_market(ctx):
+    import market
+    if not await market.channel_check(ctx):
+        return
+    embed = discord.Embed(title='Suspect Market', color=0xD4AF37,
+        description=('**Extra suspect guess - 5 wins each**\n'
+                     '`!buys suspect <quantity>`\nExample: `!buys suspect 2` costs **10 wins**.\n\n'
+                     'Confirm your purchase before any wins are charged.\n'
+                     'Maximum **10 purchased guesses per team per draft**, shared by partners. The free guess is unchanged.\n'
+                     'Purchases apply to your current anonymous draft, until identities are revealed.\n'
+                     'Each target team can receive at most **5 guesses** across both partners. Blocked guesses cost no attempt.\n'
+                     'Use guesses in <#1566394824288894976>.'))
+    await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name='buys')
+async def cmd_buys(ctx, *, text: str = ''):
+    import market
+    if not await market.channel_check(ctx):
+        return
+    try:
+        await market.buy(ctx, text)
+    except ValueError as exc:
+        await ctx.reply(str(exc), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.command(name='suspect')
 async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
-    """!suspect @GM :emoji: — three identity guesses per GM per anonymous draft."""
+    """!suspect @GM :emoji: — one shared identity guess per team per draft."""
     import suspects
     if not ctx.guild:
         await ctx.reply('Use `!suspect @GM :emoji:` in the draft’s server.', mention_author=False)
         return
     if ctx.channel.id not in suspects.ALLOWED_CHANNEL_IDS:
-        await ctx.reply('`!suspect` is only available in <#934052158532378634> or the owner’s private channel.',
+        await ctx.reply('Head to <#1566394824288894976> to make your guess. Your guess has not been used; your remaining attempts are unchanged.',
                         mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         return
     if member is None or not emoji.strip():
@@ -1692,30 +1806,43 @@ async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
         return
     draft, error = suspects.resolve_draft(ctx.guild.id, ctx.channel.id, ctx.author.id)
     if error:
-        await ctx.reply(error, mention_author=False)
+        await ctx.reply('No guess was submitted. I could not select your anonymous draft; ask the commissioner to check it.',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         return
     result = await suspects.guess(bot, draft['id'], ctx.message.id, ctx.author.id, member.id, emoji)
     status = result['status']
     if status == 'replay':
+        return
+    if status == 'target_limit':
+        await ctx.reply('This team has already received **5 suspect guesses** and cannot be guessed again this draft. **No guess was used; your remaining attempts are unchanged.**',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
+    if status == 'limit' or status == 'caught' and result.get('remaining') == 0:
+        await ctx.reply('You have no lives left. Use `!market` to buy extra guesses.',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         return
     if status == 'correct':
         penalty = ('5 wins' if result['penalty_kind'] == 'wins' else '10% odds in your next matchup')
         # An embed keeps this announcement out of Team Sheet Bot's pick parser.
         embed = discord.Embed(description=f'{member.mention} You have been caught out being the GM of {result["logo"]}, you lose {penalty}',
                               color=discord.Color.orange())
-        embed.set_footer(text=f'Suspect attempts remaining for the accuser: {result["remaining"]}/3')
+        embed.set_footer(text=f'Team suspect attempts remaining: {result["remaining"]}')
         await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         return
-    messages = {
-        'wrong': f'Incorrect suspicion. {result.get("remaining", 0)}/3 attempts remaining for this draft.',
-        'limit': 'You have used all 3 suspect attempts for this draft.',
-        'caught': 'That GM has already been caught in this draft. No additional penalty or attempt was charged.',
-        'revealed': 'Team identities have already been revealed. Suspect attempts are closed for this draft.',
-        'closed': 'No running or unrevealed completed anonymous draft is available.',
-        'changed': 'The draft changed while checking. Try again; no attempt was used.',
-        'invalid': result.get('message', 'Use a GM and team emoji from this draft.'),
-    }
-    await ctx.reply(messages[status], mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    if status == 'wrong':
+        remaining = result.get('remaining', 0)
+        reply = ('Your guess was wrong. '+
+                 (f'Your team has **{remaining} guess(es) left**.' if remaining else
+                  'Your team has no lives left. Use `!market` to buy extra guesses.'))
+        if result.get('target_limit_reached'):
+            reply += ' This team has now reached its limit of 5 guesses and cannot be guessed again this draft.'
+    elif status in ('closed', 'revealed'):
+        reply = 'Suspect is closed for this draft. No guess was submitted.'
+    elif status == 'changed':
+        reply = 'The draft changed while checking. Try again; no attempt was used.'
+    else:
+        reply = 'No guess was submitted. Check the GM and team emoji. No attempt was used.'
+    await ctx.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name='suspects')
@@ -1742,6 +1869,23 @@ async def cmd_suspects(ctx, *, draft_ref: str = ''):
         lines.append(f'<@{row["target_id"]}> · {row["logo"]} · {penalty} · caught by <@{row["guesser_id"]}>')
     if not catches:
         lines.append('No correct catches recorded.')
+    purchases = [p for p in db.suspect_purchases(draft['id']) if p['status'] == 'confirmed']
+    if purchases:
+        import json
+        lines.append('**Market win deductions (separate from catches)**')
+        totals = {}
+        for purchase in purchases:
+            members = tuple(json.loads(purchase['team_users']))
+            import suspects
+            for team in suspects.teams(draft):
+                current_users = [db.get_drafter(mid)['user_id'] for mid in team['member_ids']]
+                if set(members) & set(db.anonymous_ledger_users(draft['id'], current_users)):
+                    members = tuple(sorted(current_users))
+                    break
+            totals[members] = totals.get(members, 0)+purchase['cost']
+            lines.append(f"Buyer <@{purchase['buyer_id']}>: {purchase['quantity']} extra guesses / -{purchase['cost']} wins")
+        for members, cost in totals.items():
+            lines.append('Team '+ ' / '.join(f'<@{uid}>' for uid in members)+f': **-{cost} wins total market cost**')
     await _send_chunked(ctx, '\n'.join(lines))
 
 
@@ -2158,7 +2302,7 @@ async def cmd_help(ctx):
         color=discord.Color.blue(),
     )
     embed.add_field(name='Anonymous identity guesses',
-                    value='`!suspect @GM :emoji:` — only in #atd-chat or the owner’s private channel; three attempts per GM per anonymous draft. '
+                    value='`!suspect @GM :emoji:` — only in <#1566394824288894976> or the owner’s private channel; one free attempt per team per anonymous draft, shared by partners. `!market` buys extras for 5 wins each. '
                           'Correct catch: −5 wins during picking; −10% next-matchup odds after the final round. '
                           'Guesses close at official reveal. `!suspects <draft ID>` — owner-only private penalty ledger.',
                     inline=False)
@@ -2320,6 +2464,8 @@ async def cmd_help(ctx):
 @bot.event
 async def on_ready():
     log.info('ATD Draft Theme Bot ready — %s', bot.user)
+    import team_logos
+    await team_logos.repair(bot)
     import timer_bridge
     await timer_bridge.start(bot)
     import flux_gate
@@ -2352,6 +2498,10 @@ async def on_ready():
     if resumed_total:
         log.info('on_ready | resumed %d timer(s) lost to a restart', resumed_total)
 
+    for draft in db.list_drafts(status='paused'):
+        if draft['theme'] in ('anon_draft', 'anon_budget_draft') and draft['state'].get('night_paused'):
+            await _apply_morning_resume(draft)
+
     # Catch up on the overnight window if a restart happened while it should
     # already be closed/open — otherwise a draft could sit wrongly active (or
     # wrongly paused) for up to ~22h until the next scheduled tick fires.
@@ -2375,6 +2525,8 @@ async def on_ready():
             if draft['theme'] == 'auto_draft' and draft['state'].get('night_paused'):
                 await _apply_auto_draft_resume(draft)
 
+    if not _anonymous_clock_cards.is_running():
+        _anonymous_clock_cards.start()
     if not _nightly_pause.is_running():
         _nightly_pause.start()
     if not _morning_resume.is_running():

@@ -35,6 +35,8 @@ from zoneinfo import ZoneInfo
 
 import discord
 import aiohttp
+import admin_routing
+from admin_routing import target as _draft_channel_id
 from discord.ext import commands
 from rapidfuzz import fuzz, process
 
@@ -135,6 +137,7 @@ _sessions: dict[int, DraftSession] = {}
 
 
 def _get_session(channel_id: int) -> DraftSession:
+    channel_id = _draft_channel_id(channel_id)
     if channel_id not in _sessions:
         _sessions[channel_id] = DraftSession(channel_id)
     return _sessions[channel_id]
@@ -145,9 +148,9 @@ _theme_clocks = ThemeClocks(bot, _sessions)
 
 @bot.check
 async def _anonymous_command_guard(ctx):
-    session = _sessions.get(ctx.channel.id)
+    session = _sessions.get(_draft_channel_id(ctx.channel.id))
     if session and session.draft.mode in ('anon', 'partner'):
-        allowed = {'timermode', 'timerlink', 'timerunlink', 'timerstatus', 'timerhelp', 'timerskip'}
+        allowed = {'timermode', 'timerlink', 'timerunlink', 'timerstatus', 'timerhelp', 'timerskip', 'timeron', 'timeradminchannel'}
         if ctx.command.name not in allowed:
             raise commands.CheckFailure('This anonymous draft is controlled by Theme Bot. Use its pause/resume and picking commands.')
     return True
@@ -156,7 +159,7 @@ async def _anonymous_command_guard(ctx):
 # Channels that aren't a draft themselves, but are allowed to remotely view or
 # operate on whichever draft is currently in progress elsewhere (e.g. a
 # general/admin channel).
-_REMOTE_VIEW_CHANNELS = {934052158532378634, 1471629828208988314}
+_REMOTE_VIEW_CHANNELS = {934052158532378634, 1471629828208988314, 1533242104304631969}
 
 _ACTIVE_DRAFT_STATES = ("active", "paused", "window_paused")
 
@@ -174,6 +177,8 @@ async def _resolve_viewable_session(ctx) -> DraftSession | None:
     In a remote-view channel, auto-detect the single currently-active draft
     across all tracked channels. Sends an explanatory message and returns
     None if there isn't exactly one to show."""
+    if ctx.channel.id == admin_routing.PRIVATE_CHANNEL_ID:
+        return _get_session(ctx.channel.id)
     if ctx.channel.id not in _REMOTE_VIEW_CHANNELS:
         return _get_session(ctx.channel.id)
 
@@ -198,6 +203,8 @@ async def _resolve_command_session(ctx) -> DraftSession | None:
     in progress (lotto-loaded through complete) across all tracked channels.
     Sends an explanatory message and returns None if there isn't exactly one
     to act on."""
+    if ctx.channel.id == admin_routing.PRIVATE_CHANNEL_ID:
+        return _get_session(ctx.channel.id)
     if ctx.channel.id not in _REMOTE_VIEW_CHANNELS:
         return _get_session(ctx.channel.id)
 
@@ -2659,6 +2666,19 @@ async def timerlink(ctx, draft_id: int):
     await _theme_clocks.render(s, data)
 
 
+@bot.command(name='timeradminchannel')
+async def timeradminchannel(ctx, channel: discord.TextChannel = None):
+    if ctx.author.id != admin_routing.OWNER_ID or ctx.channel.id != admin_routing.PRIVATE_CHANNEL_ID:
+        await ctx.send('Only the owner can configure this from the private control channel.')
+        return
+    if channel is not None:
+        if channel.guild.id != ctx.guild.id or channel.id == admin_routing.PRIVATE_CHANNEL_ID:
+            await ctx.send('Choose a selection channel in this server.')
+            return
+        admin_routing.configure(channel.id)
+    await ctx.send(f'Private Timer commands control <#{_draft_channel_id(ctx.channel.id)}>.')
+
+
 @bot.command(name='timerunlink')
 @is_commissioner()
 async def timerunlink(ctx):
@@ -3214,9 +3234,28 @@ async def challenge_cmd(ctx):
     await _process_challenge(s, ctx.author.mention, ctx.author.display_name)
 
 
+@bot.command(name='timeron', aliases=['timeroff'])
+async def anontimers(ctx, *, draft_ref: str = ''):
+    if ctx.channel.id == admin_routing.PRIVATE_CHANNEL_ID:
+        return  # Theme Bot handles these controls in the private channel.
+    if draft_ref:
+        return  # Explicit draft IDs are handled by Theme Bot.
+    linked = _sessions.get(_draft_channel_id(ctx.channel.id))
+    if not linked or linked.draft.mode != 'anon' or not linked.draft.theme_draft_id:
+        return
+    try:
+        data = await _theme_clocks.fetch(linked, action=ctx.invoked_with, actor_id=ctx.author.id)
+        await _theme_clocks.render(linked, data)
+        await ctx.send('Timers are '+('off. Picking continues.' if data.get('timers_off') else 'on during 10am–midnight ET.'))
+    except ValueError as exc:
+        await ctx.send(str(exc))
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        await ctx.send('Theme Bot could not confirm the timer change. Check !timerstatus before retrying.')
+
+
 @bot.command(name="timerskip")
 async def timerskip(ctx):
-    linked = _sessions.get(ctx.channel.id)
+    linked = _sessions.get(_draft_channel_id(ctx.channel.id))
     if linked and linked.draft.mode in ('anon', 'partner') and linked.draft.theme_draft_id:
         try:
             data = await _theme_clocks.skip(linked, ctx.author.id, ctx.message.id)

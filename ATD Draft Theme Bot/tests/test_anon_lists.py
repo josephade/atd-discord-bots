@@ -18,6 +18,359 @@ def option(name, price=5, year=''):
 
 
 class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
+    async def test_theme_publishes_exact_clock_card_once_then_reposts_changed_turn(self):
+        import clock_presenter
+        self.channel.get_partial_message = Mock(return_value=SimpleNamespace(delete=AsyncMock()))
+        await clock_presenter.publish(self.bot, self.draft)
+        await clock_presenter.publish(self.bot, self.draft)
+        self.channel.send.assert_awaited_once()
+        self.assertEqual(self.channel.send.call_args.kwargs['embed'].title, 'Anonymous Budget Draft')
+        db.set_draft_status(self.draft, 'active')
+        state = db.get_draft(self.draft)['state']
+        state['teams'][0]['timer_deadline'] = 1234567890
+        db.set_draft_state(self.draft, state)
+        await clock_presenter.publish(self.bot, self.draft)
+        self.assertEqual(self.channel.send.await_count, 2)
+        self.assertIn('TEAM', self.channel.send.call_args.kwargs['embed'].description)
+        self.channel.get_partial_message.return_value.delete.assert_awaited_once()
+        saved = db.get_draft(self.draft)['state']['theme_clock_card']
+        self.assertEqual(saved['id'], 200)
+
+    async def test_timezone_transition_dms_every_gm_schedule_only_and_records_deliveries(self):
+        import clock_presenter
+        db.set_draft_status(self.draft, 'active')
+        state = db.get_draft(self.draft)['state']
+        state['teams'][0]['timer_deadline'] = 1234567890
+        db.set_draft_state(self.draft, state)
+        db.update_draft_settings(self.draft, {'timer_window_et': True})
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0]['member_ids'] = [self.a, self.b]
+        ctx.save_state(state)
+        users = {uid: SimpleNamespace(send=AsyncMock()) for uid in (100, 101)}
+        self.bot.get_user.side_effect = users.get
+        # Timer Bot delivered the old notice; Theme must still DM its own card.
+        with patch('anon_clock.in_window', return_value=False):
+            import anon_clock
+            period = anon_clock.window_info(db.get_draft(self.draft))['key']
+            db.update_draft_state(self.draft, {'theme_window_delivery': dict(key='previous:open', users=[], complete=True, public=True)})
+            await clock_presenter.publish(self.bot, self.draft)
+            await clock_presenter.publish(self.bot, self.draft)
+        self.channel.send.assert_awaited_once()
+        card = self.channel.send.call_args.kwargs['embed']
+        for user in users.values():
+            user.send.assert_awaited_once()
+            self.assertEqual(user.send.call_args.kwargs['embed'].title, 'Draft timer hours')
+            self.assertNotIn('is on the clock', user.send.call_args.kwargs['embed'].description)
+            self.assertIn('Timers are OFF', user.send.call_args.kwargs['embed'].description)
+        self.assertTrue(db.get_draft(self.draft)['state']['theme_window_delivery']['complete'])
+
+    async def test_starting_draft_in_either_window_never_broadcasts_personal_turn(self):
+        import clock_presenter
+        db.set_draft_status(self.draft, 'active')
+        state = db.get_draft(self.draft)['state']
+        state['teams'][0]['timer_deadline'] = 1234567890
+        db.set_draft_state(self.draft, state)
+        db.update_draft_settings(self.draft, {'timer_window_et': True})
+        for opened in (True, False):
+            db.update_draft_state(self.draft, {'theme_window_delivery': {}})
+            with patch('anon_clock.in_window', return_value=opened):
+                self.channel.get_partial_message = Mock(return_value=SimpleNamespace(delete=AsyncMock()))
+                for n in range(3): await clock_presenter.publish(self.bot, self.draft)
+            self.assertTrue(db.get_draft(self.draft)['state']['theme_window_delivery']['complete'])
+        self.bot.get_user.assert_not_called()
+
+    async def test_presenter_never_posts_placeholder_before_deadline_is_saved(self):
+        import clock_presenter
+        db.set_draft_status(self.draft, 'active')
+        await clock_presenter.publish(self.bot, self.draft)
+        self.channel.send.assert_not_awaited()
+        self.assertNotIn('theme_clock_card', db.get_draft(self.draft)['state'])
+
+    async def test_clock_publication_waits_for_in_progress_pick_state_save(self):
+        import clock_presenter
+        from themes.base import draft_lock
+        db.set_draft_status(self.draft, 'active')
+        async with draft_lock(self.draft):
+            stale_state = db.get_draft(self.draft)['state']
+            stale_state['teams'][0]['timer_deadline'] = 1234567890
+            task = asyncio.create_task(clock_presenter.publish(self.bot, self.draft))
+            await asyncio.sleep(0)
+            self.channel.send.assert_not_awaited()
+            db.set_draft_state(self.draft, stale_state)
+        await task
+        self.channel.send.assert_awaited_once()
+        self.assertIn('Turn expires', self.channel.send.call_args.kwargs['embed'].description)
+        saved = db.get_draft(self.draft)['state']['theme_clock_card']
+        self.assertEqual(saved['id'], 200)
+        await clock_presenter.publish(self.bot, self.draft)
+        self.channel.send.assert_awaited_once()
+
+    async def test_turn_card_only_goes_to_both_gms_on_current_team(self):
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0]['member_ids'] = [self.a, self.b]
+        other = db.add_drafter(self.draft, 102, 'Other team')
+        db.update_drafter_state(other, {'team_index': 1})
+        state['teams'].append(dict(member_ids=[other], logo='OTHER', open_picks=[], skip_count=0, timer_pick_number=None))
+        ctx.save_state(state)
+        users = {uid: SimpleNamespace(send=AsyncMock()) for uid in (100, 101, 102)}
+        self.bot.get_user.side_effect = users.get
+        await self.theme._open_pick_for_team(ctx, 0, 1)
+        for uid in (100, 101):
+            users[uid].send.assert_awaited_once()
+            self.assertIn('TEAM', users[uid].send.call_args.kwargs['embed'].description)
+            self.assertIn('on the clock', users[uid].send.call_args.kwargs['content'])
+        users[102].send.assert_not_awaited()
+
+    async def test_timer_window_delivery_receipts_survive_retries_and_include_all_partners(self):
+        import anon_clock
+        from datetime import datetime
+        db.set_draft_status(self.draft, 'active')
+        db.update_draft_settings(self.draft, {'timer_window_et': True})
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0]['member_ids'] = [self.a, self.b]
+        ctx.save_state(state)
+        def stamp(hour): return datetime(2026, 11, 1, hour, tzinfo=anon_clock.ET).timestamp()
+        db.update_draft_state(self.draft, {'theme_window_delivery': dict(key='2026-10-31:open', complete=True)})
+        first = await anon_clock.window_delivery(self.draft, timestamp=stamp(0))
+        self.assertEqual(first['pending_users'], [100, 101])
+        partial = await anon_clock.window_delivery(self.draft, dict(key=first['key'], users=[100], public=True), timestamp=stamp(5))
+        self.assertEqual(partial['pending_users'], [101])
+        done = await anon_clock.window_delivery(self.draft, dict(key=first['key'], users=[101], public=True), timestamp=stamp(5))
+        self.assertEqual(done['pending_users'], [])
+        morning = await anon_clock.window_delivery(self.draft, timestamp=stamp(10))
+        self.assertEqual(morning['pending_users'], [100, 101])
+        self.assertFalse(morning['public'])
+        self.channel.send.assert_not_awaited()
+        self.bot.get_user.assert_not_called()
+
+    async def test_window_snapshot_has_schedule_but_no_gm_identities(self):
+        import anon_clock, timer_bridge
+        from datetime import datetime
+        db.set_draft_status(self.draft, 'active')
+        db.update_draft_settings(self.draft, {'timer_window_et': True})
+        at_midnight = datetime(2026, 11, 1, 0, tzinfo=anon_clock.ET).timestamp()
+        info = anon_clock.window_info(db.get_draft(self.draft), at_midnight)
+        opening = int(datetime(2026, 11, 1, 10, tzinfo=anon_clock.ET).timestamp())
+        self.assertIn(str(opening), info['text'])
+        db.update_draft_state(self.draft, {'timers_off': True})
+        info = anon_clock.window_info(db.get_draft(self.draft), opening)
+        self.assertIn('remain OFF', info['text'])
+        snapshot = timer_bridge.snapshot(db.get_draft(self.draft))
+        self.assertIn('window_notice', snapshot)
+        self.assertNotIn('pending_users', str(snapshot))
+
+    async def test_window_receipt_action_requires_authenticated_matching_channel(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        from timer_bridge import create_app
+        db.set_draft_status(self.draft, 'active')
+        db.update_draft_settings(self.draft, {'timer_window_et': True})
+        async with TestClient(TestServer(create_app(self.bot, 'key'))) as client:
+            path = f'/clock/{self.draft}?channel=99&guild=10'
+            response = await client.post(path, json={'action': 'window-notice'})
+            self.assertEqual(response.status, 401)
+            response = await client.post(path.replace('channel=99', 'channel=98'), headers={'Authorization': 'Bearer key'}, json={'action': 'window-notice'})
+            self.assertEqual(response.status, 404)
+            response = await client.post(path, headers={'Authorization': 'Bearer key'}, json={'action': 'window-notice'})
+            self.assertEqual(response.status, 200)
+
+    async def test_phone_apostrophes_split_year_from_player_before_price_lookup(self):
+        ctx = DraftContext(self.bot, self.draft)
+        for quote in ("'", '\u2018', '\u2019', '\u02bc', '\u00b4', '`'):
+            with self.subTest(quote=quote):
+                self.assertEqual(self.theme._parse_submission(ctx, f'Tracy McGrady {quote}03 $31'),
+                                 ('Tracy McGrady', '03', 31))
+        self.assertEqual(self.theme._parse_submission(ctx, "Shaquille O\u2019Neal \u201803 $38"),
+                         ("Shaquille O'Neal", '03', 38))
+
+    async def test_tracy_screenshot_pick_verifies_clean_name_and_records_explicit_year(self):
+        self.price_patch.stop()
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0]['budget_spent'] = 0
+        state['flux_price_source'] = dict(sheet='test-sheet-id', tab='Prices')
+        ctx.save_state(state)
+        with patch.object(anon_lists.sheets, 'load_flux_rule_rows', create=True,
+                          return_value=[['Player', 'Value'], ['Tracy McGrady', 31]]):
+            await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Tracy McGrady \u201803 $31')
+        self.assertEqual(db.get_picks(self.draft, self.a), ['Tracy McGrady'])
+        self.assertEqual(ctx.state['teams'][0]['pick_prices']['1']['year'], '03')
+        self.assertEqual(ctx.state['teams'][0]['budget_spent'], 31)
+        self.assertIn("Tracy McGrady '03 $31", self.channel.send.call_args.args[0])
+
+    async def test_already_off_legacy_turn_gets_one_notice_on_repeat_command(self):
+        import anon_clock, config
+        db.set_draft_status(self.draft, 'active')
+        db.update_draft_state(self.draft, {'timers_off': True})
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, False)
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, False)
+        send = self.bot.get_user.return_value.send
+        send.assert_awaited_once()
+        self.assertIn('Timers are now off', send.call_args.kwargs['content'])
+    async def test_timer_toggle_notifies_both_current_cogms_once_and_no_other_team(self):
+        import anon_clock, config, time
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0].update(member_ids=[self.a, self.b], timer_deadline=time.time()+300)
+        other = db.add_drafter(self.draft, 102, 'Other team')
+        state['teams'].append(dict(member_ids=[other], logo='OTHER', open_picks=[], timer_pick_number=None))
+        ctx.save_state(state)
+        users = {uid: SimpleNamespace(send=AsyncMock()) for uid in (100, 101, 102)}
+        self.bot.get_user.side_effect = users.get
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, False)
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, False)
+        for uid in (100, 101):
+            users[uid].send.assert_awaited_once()
+            self.assertIn('Timers are now off', users[uid].send.call_args.kwargs['content'])
+        users[102].send.assert_not_awaited()
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, True)
+        for uid in (100, 101):
+            self.assertEqual(users[uid].send.await_count, 2)
+            self.assertIn('Timers are back on', users[uid].send.call_args.kwargs['content'])
+            self.assertIn('Pick deadline:', users[uid].send.call_args.kwargs['content'])
+
+    async def test_no_current_team_is_notified_during_flux_hold(self):
+        import anon_clock, config
+        db.set_draft_status(self.draft, 'active')
+        db.update_draft_state(self.draft, {'flux_wait': {'round': 2}})
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, False)
+        self.bot.get_user.return_value.send.assert_not_awaited()
+    async def test_private_clock_api_off_on_is_owner_only_and_keeps_live_turn(self):
+        import config, time
+        from aiohttp.test_utils import TestClient, TestServer
+        from timer_bridge import create_app
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0]['timer_deadline'] = time.time()+240
+        ctx.save_state(state)
+        async with TestClient(TestServer(create_app(self.bot, 'key'))) as client:
+            path = f'/clock/{self.draft}?channel=99&guild=10'
+            headers = {'Authorization': 'Bearer key'}
+            response = await client.post(path, headers=headers, json=dict(action='timeroff', actor_id=config.OWNER_ID))
+            data = await response.json()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(data['current']['pick'], 1)
+            self.assertIsNone(data['current']['deadline'])
+            self.assertEqual(data['clocks'], [])
+            self.assertTrue(data['timers_off'])
+            response = await client.post(path, headers=headers, json=dict(action='timeron', actor_id=-1))
+            self.assertEqual(response.status, 400)
+            response = await client.post(path, headers=headers, json=dict(action='timeron', actor_id=config.OWNER_ID))
+            data = await response.json()
+            self.assertFalse(data['timers_off'])
+            self.assertTrue(230 < data['current']['deadline']-time.time() <= 240)
+
+    async def test_teammate_approval_does_not_expire_while_timers_off(self):
+        import anon_clock, config, time
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['timers_off'] = True
+        state['teams'][0].update(member_ids=[self.a, self.b], paused_timer_seconds=300)
+        ctx.save_state(state)
+        await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Michael Jordan $5')
+        self.assertFalse(_proposal_timer.is_running((self.draft, 0)))
+        await self.theme._resolve_proposal_timeout(ctx, 0, 1)
+        self.channel.send.assert_not_awaited()
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, True)
+        entry = ctx.state['teams'][0]['open_picks'][0]
+        self.assertTrue(290 < entry['proposal_deadline']-time.time() <= 300)
+        self.assertLessEqual(entry['proposal_deadline'], ctx.state['teams'][0]['timer_deadline'])
+    async def test_timer_off_freezes_expiry_and_timer_on_preserves_remaining(self):
+        import anon_clock, config, time
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'][0]['timer_deadline'] = time.time()+240
+        ctx.save_state(state)
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, False)
+        frozen = ctx.state['teams'][0]['paused_timer_seconds']
+        self.assertTrue(235 < frozen <= 240)
+        self.assertIsNone(ctx.state['teams'][0]['timer_deadline'])
+        await self.theme._resolve_on_timeout(ctx, 0, 1)
+        self.channel.send.assert_not_awaited()
+        self.assertEqual(ctx.state['teams'][0].get('skip_count', 0), 0)
+        await anon_clock.toggle(self.bot, self.draft, config.OWNER_ID, True)
+        self.assertTrue(230 < ctx.state['teams'][0]['timer_deadline']-time.time() <= 240)
+        with self.assertRaises(ValueError):
+            await anon_clock.toggle(self.bot, self.draft, -1, False)
+
+    async def test_picks_and_next_team_dm_continue_while_timers_are_off(self):
+        self.advance.stop()
+        db.set_draft_status(self.draft, 'active')
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['timers_off'] = True
+        state['teams'].append(dict(member_ids=[self.b], logo='SECOND', budget_spent=0,
+                                   open_picks=[], timer_pick_number=None, timer_deadline=None, skip_count=0))
+        db.update_drafter_state(self.b, {'team_index': 1})
+        ctx.save_state(state)
+        await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Michael Jordan $5')
+        self.assertEqual(ctx.state['live_pick_number'], 2)
+        self.assertEqual(ctx.state['teams'][1]['timer_pick_number'], 2)
+        self.assertIsNone(ctx.state['teams'][1]['timer_deadline'])
+        messages = [call.kwargs.get('content', '') for call in self.bot.get_user.return_value.send.call_args_list]
+        self.assertTrue(any('SECOND' in text and 'Timers are off' in text for text in messages))
+    async def owner_submit(self, text='Michael Jordan $5', **changes):
+        import owner_picks
+        payload = dict(bot=self.bot, draft_id=self.draft, actor_id=owner_picks.OWNER_ID,
+                       channel_id=1533242104304631969, guild_id=10,
+                       team_ref='1', text=text, message_id=123)
+        with patch.object(owner_picks, 'OWNER_REPORT_CHANNEL_ID', 1533242104304631969):
+            return await owner_picks.submit(**(payload | changes))
+
+    async def test_owner_pick_finalizes_for_cogms_without_approval_and_audits(self):
+        db.set_draft_status(self.draft, 'active')
+        state = db.get_draft(self.draft)['state']
+        state['teams'][0]['member_ids'] = [self.a, self.b]
+        db.set_draft_state(self.draft, state)
+        result = await self.owner_submit()
+        self.assertIn('Recorded pick #1', result)
+        self.assertEqual(db.get_picks(self.draft, self.a), ['Michael Jordan'])
+        self.assertEqual(db.get_picks(self.draft, self.b), ['Michael Jordan'])
+        state = db.get_draft(self.draft)['state']
+        self.assertEqual(state['teams'][0]['budget_spent'], 95)
+        self.assertEqual(state['owner_pick_audit'][0]['message_id'], 123)
+        self.theme._advance_live_pick.assert_awaited_once()
+
+    async def test_owner_pick_rejects_wrong_actor_channel_dm_guild_and_paused(self):
+        db.set_draft_status(self.draft, 'active')
+        for changes in (dict(actor_id=-1), dict(channel_id=99), dict(guild_id=None), dict(guild_id=11)):
+            result = await self.owner_submit(**changes)
+            self.assertNotIn('Recorded pick', result)
+        db.set_draft_status(self.draft, 'paused')
+        self.assertIn('must be active', await self.owner_submit())
+        self.channel.send.assert_not_awaited()
+        self.assertEqual(db.get_picks(self.draft, self.a), [])
+
+    async def test_owner_pick_enforces_taken_budget_price_and_open_turn(self):
+        db.set_draft_status(self.draft, 'active')
+        db.record_pick(self.draft, self.b, 'Taken', pick_number=0)
+        for text in ('Taken $5', 'Too Expensive $20'):
+            self.assertNotIn('Recorded pick', await self.owner_submit(text))
+        self.theme.validate_round_price.return_value = 'Wrong round price'
+        self.assertEqual(await self.owner_submit(), 'Wrong round price')
+        self.theme.validate_round_price.return_value = None
+        state = db.get_draft(self.draft)['state']; state['teams'][0]['open_picks'] = []
+        db.set_draft_state(self.draft, state)
+        self.assertIn('not on the clock', await self.owner_submit())
+        self.channel.send.assert_not_awaited()
+
+    async def test_owner_makeup_during_flux_hold_replies_to_original_skip(self):
+        db.set_draft_status(self.draft, 'active')
+        state = db.get_draft(self.draft)['state']
+        state.update(live_pick_number=2, flux_wait={'round': 2})
+        state['teams'][0]['open_picks'][0].update(skipped=True, skip_message_id=555)
+        db.set_draft_state(self.draft, state)
+        self.assertIn('Recorded pick #1', await self.owner_submit(team_ref='TEAM'))
+        self.assertEqual(self.channel.send.call_args.kwargs['reference'].message_id, 555)
+        self.theme._advance_live_pick.assert_not_awaited()
     def test_default_year_only_fills_omitted_year(self):
         ctx = DraftContext(self.bot, self.draft)
         self.assertEqual(self.theme._parse_submission(ctx, 'Michael Jordan $44'), ('Michael Jordan', '1990-91', 44))
@@ -36,10 +389,10 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Lotto number: **1**', dm.call_args_list[0].args[1])
         self.assertIn('SECOND-IN-DB-FIRST-IN-LOTTO', dm.call_args_list[0].args[1])
         self.assertIn('Lotto number: **2**', dm.call_args_list[1].args[1])
-    async def test_partner_response_window_is_ten_minutes_without_extending_pick_clock(self):
+    async def test_partner_response_window_is_twenty_minutes_without_extending_pick_clock(self):
         import time
         ctx = DraftContext(self.bot, self.draft)
-        for remaining, expected in ((1800, 10), (180, 3)):
+        for remaining, expected in ((1800, 20), (180, 3)):
             with self.subTest(remaining=remaining):
                 state = ctx.state
                 state['teams'][0].update(member_ids=[self.a, self.b], timer_deadline=time.time()+remaining)
@@ -47,7 +400,7 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
                 ctx.save_state(state)
                 with patch.object(_proposal_timer, 'start') as start:
                     reply = await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Michael Jordan $5')
-                self.assertIn('up to 10 min', reply)
+                self.assertIn('up to 20 min', reply)
                 self.assertIn('original pick clock keeps running', reply)
                 self.assertAlmostEqual(start.call_args.args[1], expected, delta=0.05)
                 self.assertEqual(ctx.state['teams'][0]['timer_deadline'], deadline)
@@ -80,7 +433,10 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
         ctx.save_state(state)
         with patch.object(_proposal_timer, 'start') as start:
             await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Michael Jordan $5')
-        self.assertEqual(start.call_args.args[1], 10)
+        self.assertAlmostEqual(start.call_args.args[1], 20, delta=0.05)
+        state = ctx.state
+        state['teams'][0]['open_picks'][0]['proposal_deadline'] = time.time()-1
+        ctx.save_state(state)
         await start.call_args.args[2]()
         self.assertEqual(db.get_picks(self.draft, self.a), ['Michael Jordan'])
         self.assertEqual(ctx.state['teams'][0]['budget_spent'], 95)
@@ -174,7 +530,7 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
         self.price_patch = patch.object(self.theme, 'validate_round_price', new_callable=AsyncMock, return_value=None)
         self.price_patch.start()
         self.addCleanup(self.price_patch.stop)
-        self.draft = db.create_draft(10, None, 'anon_budget_draft', 'Test', self.theme.default_settings())
+        self.draft = db.create_draft(10, None, 'anon_budget_draft', 'Test', {**self.theme.default_settings(), 'timer_window_et': False})
         self.a = db.add_drafter(self.draft, 100, 'A')
         self.b = db.add_drafter(self.draft, 101, 'B')
         for mid in (self.a, self.b): db.update_drafter_state(mid, {'team_index': 0})
@@ -217,15 +573,56 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
             ctx.save_state(state)
         return await anon_lists.consume(ctx, ctx.state, 0, ctx.state['teams'][0]['open_picks'][0])
 
-    async def test_flux_registration_requires_completed_current_pick_and_blocks_repeat_after_clear(self):
+    async def test_flux_registration_requires_completed_current_pick_but_allows_replacement(self):
         pick = dict(option('Booker', 30), flux_drop=3, flux_source=dict(sheet='test-sheet-id', tab='Prices'), flux_from_round=1, flux_target_round=2)
         with self.assertRaisesRegex(ValueError, 'current-round pick'):
             await self.upload([pick])
         self.prepare_flux(pick)
         result = await self.upload([pick])
         result = await self.upload([], version='clear', revision=result['revision'])
-        with self.assertRaisesRegex(ValueError, 'already submitted'):
-            await self.upload([pick], version='repeat', revision=result['revision'])
+        result = await self.upload([pick], version='repeat', revision=result['revision'])
+        self.assertEqual(result['picks'][0]['player'], 'Booker')
+
+    async def test_newer_replacement_ignores_stale_revision_and_older_submission(self):
+        pick = dict(option('Sam Jones'), flux_drop=0, flux_source=dict(sheet='test-sheet-id', tab='Prices'))
+        self.prepare_flux(pick)
+        async def replace(picks, message):
+            return await anon_lists.update(self.bot, self.draft, 100, 10,
+                dict(version=str(message), picks=picks, replace_flux=True, submission_id=message, expected_revision=0))
+        await replace([pick], 10)
+        other = dict(pick, player='Joe Johnson', flux_drop=2)
+        result = await replace([other, pick], 12)
+        self.assertEqual([p['player'] for p in result['picks']], ['Joe Johnson', 'Sam Jones'])
+        result = await replace([pick], 11)
+        self.assertTrue(result['superseded'])
+        self.assertEqual(len(result['picks']), 2)
+
+    async def test_accepted_pick_removes_other_teams_paused_queue_and_notifies_once(self):
+        db.update_drafter_state(self.b, {'team_index': 1, 'draftlist_queue': dict(
+            picks=[option('Sam Jones'), option('Joe Johnson')], revision=3, enabled=False)})
+        ctx = DraftContext(self.bot, self.draft)
+        state = ctx.state
+        state['teams'].append(dict(member_ids=[self.b], logo='OTHER', open_picks=[]))
+        ctx.save_state(state)
+        await self.theme._finalize_pick(ctx, 0, state['teams'][0]['open_picks'][0], 'Sam Jones', '65', 6)
+        queue = db.get_drafter(self.b)['state']['draftlist_queue']
+        self.assertEqual([p['player'] for p in queue['picks']], ['Joe Johnson'])
+        self.assertEqual(queue['revision'], 4)
+        send = self.bot.get_user.return_value.send
+        texts = [call.kwargs.get('content', '') for call in send.call_args_list]
+        self.assertEqual(sum('was drafted by TEAM' in text for text in texts), 1)
+        count = send.await_count
+        await anon_lists.prune_taken(DraftContext(self.bot, self.draft))
+        self.assertEqual(send.await_count, count)
+
+    async def test_replacement_filters_taken_options_without_rejecting_other_choices(self):
+        pick = dict(option('Sam Jones'), flux_drop=0, flux_source=dict(sheet='test-sheet-id', tab='Prices'))
+        self.prepare_flux(pick)
+        db.record_pick(self.draft, self.b, 'Sam Jones', pick_number=0)
+        result = await anon_lists.update(self.bot, self.draft, 100, 10,
+            dict(version='replace', picks=[pick, dict(pick, player='Joe Johnson')], replace_flux=True, submission_id=15))
+        self.assertEqual(result['unavailable'], ['Sam Jones'])
+        self.assertEqual([p['player'] for p in result['picks']], ['Joe Johnson'])
 
     async def test_skip_is_numbered_in_public_draft_channel(self):
         import time

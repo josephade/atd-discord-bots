@@ -3,6 +3,9 @@ app = "atd-flux-bot"
 kill_signal = "SIGINT"
 kill_timeout = 30
 
+[deploy]
+  strategy = "immediate"
+
 [env]
   FLUX_TRACKS_PATH = "/data/flux_tracks.json"
 

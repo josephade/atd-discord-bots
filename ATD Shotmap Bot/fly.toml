@@ -1,6 +1,9 @@
 app = "atd-shotmap-bot"
 primary_region = "lhr"
 
+[deploy]
+strategy = "immediate"
+
 [build]
 
 [processes]

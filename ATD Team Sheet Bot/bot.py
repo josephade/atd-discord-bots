@@ -1135,6 +1135,8 @@ async def require_commissioner(ctx):
     Read-only commands in _PUBLIC_COMMANDS are exempt."""
     if ctx.command and ctx.command.name in _PUBLIC_COMMANDS:
         return True
+    if ctx.command and ctx.command.name in ('devaddyear', 'showgms') and ctx.author.id == _DEV_SWAP_USER_ID:
+        return True
     if ctx.author.guild_permissions.administrator:
         return True
     if any(r.name == COMMISSIONER_ROLE for r in ctx.author.roles):
@@ -1144,6 +1146,8 @@ async def require_commissioner(ctx):
 
 _COMMAND_INPUT_HELP = {
     "addyear": ("a player name and season", "<player name> <year>", "Jimmy Butler 2016-17"),
+    "devaddyear": ("a team, player and season", "<team emoji> / <player> / <year>", ":Hawkeyes: / Magic Johnson / 2015"),
+    "showgms": ("on or off", "[on|off]", "off"),
     "swap": ("two players or a player and slot number, separated by /", "<player name> / <player name or slot 1-10>", "Jimmy Butler / 9"),
     "find": ("a player name", "<player name>", "Jimmy Butler"),
     "available": ("a position: PG, SG, SF, PF, or C", "<position>", "PG"),
@@ -1205,6 +1209,7 @@ async def on_command_error(ctx, error):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    _ensure_private_admin_sheet()
     import private_roster
     await private_roster.start(bot, _resolve_team_from_emoji, _swap_roster, _addyear_roster, _read_private_roster)
     if not _channel_sheet_map:
@@ -1214,6 +1219,13 @@ async def on_ready():
         ch = bot.get_channel(ch_id)
         ch_name = f"#{ch.name}" if ch else str(ch_id)
         print(f"📋 {ch_name} → '{entry['tab']}' (sheet: {entry['sheet_id']}) — will connect on first use")
+
+
+def _ensure_private_admin_sheet():
+    private, selection = 1533242104304631969, 934052208624930848
+    if private not in _channel_sheet_map and selection in _channel_sheet_map:
+        entry = _channel_sheet_map[selection]
+        _set_channel_sheet(private, entry['tab'], entry['sheet_id'])
 
 
 # A pick message carrying steal/block intent (e.g. "7. steals Stephen Curry")
@@ -1339,6 +1351,14 @@ async def on_message(message):
     # Only handle pick messages in channels that have a sheet mapping
     manager = await _get_manager_async(message.channel.id)
     if not manager:
+        mapped = _channel_sheet_map.get(message.channel.id)
+        if (mapped and message.channel.id not in _SILENT_PICK_ERROR_CHANNELS
+                and _from_trusted_bot and re.match(r'^\s*\d+\.\s+', message.content)):
+            await message.add_reaction('⚠️')
+            await message.channel.send(
+                f"⚠️ Pick was **not written**: I could not open the mapped tab **{mapped['tab']}**. "
+                'If it was renamed, update the mapping with `!setsheet <new tab name>`, then retry the pick.'
+            )
         return
 
     # These channels are budget-mirrors / general chat, not real draft
@@ -2268,6 +2288,29 @@ async def cmd_addyear(ctx, *, args: str):
     await _addyear_roster(ctx, args, team_name)
 
 
+@bot.command(name='devaddyear')
+async def cmd_devaddyear(ctx, *, args: str = ''):
+    """Owner override: edit a year on a specific team in this channel's sheet."""
+    if ctx.author.id != _DEV_SWAP_USER_ID:
+        await ctx.send('Only the bot owner can use `!devaddyear`.')
+        return
+    if '/' in args:
+        parts = [part.strip() for part in args.split('/')]
+        if len(parts) != 3 or not all(parts):
+            await ctx.send(_command_input_error(ctx))
+            return
+        team_ref, player, year = parts
+    else:
+        parts = args.strip().split(None, 1)
+        remainder = parts[1].rsplit(None, 1) if len(parts) == 2 else []
+        if len(remainder) != 2:
+            await ctx.send(_command_input_error(ctx))
+            return
+        team_ref, (player, year) = parts[0], remainder
+    team_name = _resolve_team_from_emoji(team_ref) or EMOJI_TEAM_MAP.get(team_ref.strip(':')) or team_ref
+    await _addyear_roster(ctx, f'{player} {year}', team_name, current_sheet_only=True)
+
+
 async def _read_private_roster(channel_id, team_name):
     manager = await _get_manager_async(channel_id)
     if manager is None:
@@ -2986,145 +3029,6 @@ async def cmd_available(ctx, *, position: str):
         view.message = await ctx.send(embed=embeds[0], view=view)
 
 
-@bot.command(name='roster')
-async def cmd_roster(ctx, *, team_input: str = ""):
-    """View a team's current roster from the sheet. Accepts team name, emoji
-    name, or custom emoji — or, with no argument, defaults to the team
-    you've claimed via !claimteam/!assignteam."""
-    team_input = team_input.strip()
-    emoji_match = None
-
-    if not team_input:
-        team_name = _team_owners.get(str(ctx.author.id))
-        if not team_name:
-            await ctx.send(
-                "❌ You haven't claimed a team. Use `!claimteam <:YourEmoji:>` first, "
-                "or specify one directly: `!roster <:TeamEmoji:>`."
-            )
-            return
-    else:
-        # Extract emoji name from custom emoji syntax (e.g. <:NW:123456> → "NW")
-        emoji_match = _CUSTOM_EMOJI_RE.search(team_input)
-        team_name = None
-        if emoji_match:
-            lookup = emoji_match.group(1)
-        else:
-            # Fall back to built-in Unicode emojis (e.g. flag_fr 🇫🇷, England 🏴󠁧󠁢󠁥󠁮󠁧󠁿)
-            for char, tname in UNICODE_EMOJI_MAP.items():
-                if char in team_input:
-                    team_name = tname
-                    break
-            lookup = team_input
-
-        # Resolve: emoji name → exact team name → partial team name → raw
-        if not team_name:
-            team_name = EMOJI_TEAM_MAP.get(lookup)
-        if not team_name:
-            lookup_lower = lookup.lower()
-            for ename, tname in EMOJI_TEAM_MAP.items():
-                if ename.lower() == lookup_lower:
-                    team_name = tname
-                    break
-        if not team_name:
-            for tname in set(EMOJI_TEAM_MAP.values()):
-                if tname.lower() == lookup.lower():
-                    team_name = tname
-                    break
-        if not team_name:
-            for tname in set(EMOJI_TEAM_MAP.values()):
-                if lookup.lower() in tname.lower():
-                    team_name = tname
-                    break
-        if not team_name:
-            team_name = lookup
-
-    # Use current channel's manager if available, otherwise search all mappings
-    manager = await _get_manager_async(ctx.channel.id)
-    managers_to_try = []
-    if manager:
-        managers_to_try.append(manager)
-    for ch_id in _channel_sheet_map:
-        if ch_id != ctx.channel.id:
-            m = await _get_manager_async(ch_id)
-            if m:
-                managers_to_try.append(m)
-
-    if not managers_to_try:
-        await ctx.send("❌ No sheet mappings configured. Use `!addchannel` or `!setsheet` first.")
-        return
-
-    result_name = None
-    roster = None
-    last_error = None
-    loop = asyncio.get_event_loop()
-    try:
-        async with ctx.channel.typing():
-            for m in managers_to_try:
-                result_name, roster = await loop.run_in_executor(None, m.get_roster, team_name)
-                if result_name is not None:
-                    break
-                last_error = roster
-    except Exception as exc:
-        await ctx.send(_friendly_sheet_error(exc))
-        return
-
-    if result_name is None:
-        await ctx.send(f"❌ {last_error}")
-        return
-
-    # Discord embed titles don't render custom emoji — they fall back to showing
-    # the bare ":name:" shortcode as literal text (unlike descriptions/fields,
-    # which render them fine). So the title always uses the plain fallback; the
-    # team's actual emoji still shows up correctly via the thumbnail image below.
-    title_prefix = "🏀"
-    thumbnail_url = f"https://cdn.discordapp.com/emojis/{emoji_match.group(2)}.png" if emoji_match else None
-
-    # Find GM(s) assigned to this team
-    gm_uids = [uid for uid, tname in _team_owners.items() if tname == result_name]
-    gm_line = "**GM:** " + " ".join(f"<@{uid}>" for uid in gm_uids) if gm_uids else "**GM:** *Unassigned*"
-
-    filled          = sum(1 for e in roster if e["player"])
-    starters_filled = sum(1 for e in roster[:5] if e["player"])
-    bench_filled    = sum(1 for e in roster[5:] if e["player"])
-    color           = discord.Color.gold() if filled == 10 else discord.Color.blue()
-
-    embed = discord.Embed(title=f"{title_prefix} {result_name}", description=gm_line, color=color)
-
-    if _channel_has_budget(ctx.channel.id):
-        spent = 0
-        for e in roster:
-            if not e["player"] or not e["price"]:
-                continue
-            try:
-                spent += int(float(re.sub(r'[^\d.-]', '', e["price"])))
-            except (ValueError, TypeError):
-                pass
-        team_budget = _get_budget(ctx.channel.id)
-        remaining   = team_budget - spent
-        embed.add_field(name="💰 Budget", value=f"${remaining} remaining (${spent}/${team_budget} spent)", inline=False)
-
-    if thumbnail_url:
-        embed.set_thumbnail(url=thumbnail_url)
-
-    def _format_lines(entries):
-        lines = []
-        for e in entries:
-            player = e["player"] or "*Empty*"
-            line = f"`{e['position']}` {player}"
-            if e["year"]:
-                line += f" '{e['year'][-2:]}"
-            if e["price"]:
-                p = e["price"]
-                line += f" — {p}" if p.startswith("$") else f" — ${p}"
-            lines.append(line)
-        return "\n".join(lines)
-
-    embed.add_field(name=f"⭐ Starters — {starters_filled}/5", value=_format_lines(roster[:5]), inline=False)
-    embed.add_field(name=f"🏃 Bench — {bench_filled}/5",    value=_format_lines(roster[5:]),  inline=False)
-
-    footer_icon = "✅" if filled == 10 else "🔄"
-    embed.set_footer(text=f"{footer_icon} {filled}/10 slots filled")
-    await ctx.send(embed=embed)
 
 
 # ── !matchup ────────────────────────────────────────────────────────────────
@@ -3413,7 +3317,39 @@ async def cmd_matchup(ctx, *, args: str = ''):
     await ctx.send(content=f"**{team1_name} vs {team2_name}**", file=file)
 
 
-@bot.command(name='teamshot')
+@bot.command(name='showgms')
+async def cmd_showgms(ctx, setting: str = ''):
+    """Owner-only GM visibility for this channel's spreadsheet/tab."""
+    if ctx.author.id != _DEV_SWAP_USER_ID:
+        await ctx.send('Only the bot owner can use `!showgms`.')
+        return
+    if setting.lower() not in ('', 'on', 'off'):
+        await ctx.send(_command_input_error(ctx, invalid=True))
+        return
+    entry = _channel_sheet_map.get(ctx.channel.id)
+    key = budget_rules.draft_key(entry)
+    if key is None:
+        await ctx.send('Run `!showgms on` or `!showgms off` in a channel mapped to the intended draft sheet.')
+        return
+    cfg = _load_config()
+    rules = cfg.setdefault('show_gms', {})
+    if setting:
+        rules[key] = setting.lower() == 'on'
+        _save_config(cfg)
+    state = 'shown' if rules.get(key) is True else 'hidden'
+    await ctx.send(f"GM names are **{state}** for **{entry['tab']}** on `!roster` and `!teamshot`.")
+
+
+def _teamshot_caption(team_name, channel_id):
+    caption = f'**{team_name}**'
+    key = budget_rules.draft_key(_channel_sheet_map.get(channel_id))
+    if key is not None and _load_config().get('show_gms', {}).get(key) is True:
+        owners = [f'<@{uid}>' for uid, team in _team_owners.items() if team == team_name and str(uid).isdigit()]
+        caption += '\n**GM:** '+(' / '.join(owners) if owners else 'Unassigned')
+    return caption
+
+
+@bot.command(name='teamshot', aliases=['roster'])
 async def cmd_teamshot(ctx, *, args: str = ''):
     """Post a real screenshot of one team's cells from the Google Sheet.
     Usage: !teamshot <emoji> (uses this channel's mapped sheet) or
@@ -3479,7 +3415,8 @@ async def cmd_teamshot(ctx, *, args: str = ''):
         return
 
     file = discord.File(io.BytesIO(image_bytes), filename="teamshot.png")
-    await ctx.send(content=f"**{team_name}**", file=file)
+    await ctx.send(content=_teamshot_caption(team_name, lookup_channel_id), file=file,
+                   allowed_mentions=discord.AllowedMentions.none())
 
 
 class HelpView(discord.ui.View):
@@ -3691,7 +3628,7 @@ async def cmd_sheethelp(ctx):
             "`!sheethelp` — This guide\n"
             "`!sheetinfo` — Quick-reference summary\n"
             "`!teams` — List all emoji → team mappings currently configured\n"
-            "`!roster <team>` — View a team's current roster from the sheet\n"
+            "`!roster <emoji>` / `!teamshot <emoji>` — View a team's current roster from the sheet\n"
             "`!find <player>` — Check if a player has been drafted and which team\n"
             "`!draftmatrix` — Build a Drafter × Player pick-count matrix in the sheet\n"
             "`!sheetundo` — Undo the last player addition in this channel\n"
@@ -3747,7 +3684,7 @@ async def cmd_help(ctx):
         name="Commands",
         value=(
             "`!teams` — List all emoji → team mappings\n"
-            "`!roster <team>` — View a team's current roster\n"
+            "`!roster <emoji>` / `!teamshot <emoji>` — View a team's current roster\n"
             "`!find <player>` — Check if a player has been drafted\n"
             "`!draftmatrix` — Build drafter × player matrix in the sheet\n"
             "`!sheetundo` — Undo the last player addition in this channel\n"

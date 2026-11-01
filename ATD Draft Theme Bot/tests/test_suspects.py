@@ -7,7 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
@@ -24,6 +24,114 @@ from themes.partner_draft import PartnerDraftTheme
 
 
 class SuspectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_target_cap_reply_preserves_attempt_and_does_not_dm_accuser(self):
+        tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'cmd_suspect')
+        node.decorator_list = []
+        ns = {'bot': None, 'discord': discord}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
+        ctx = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=1566394824288894976),
+            author=types.SimpleNamespace(id=100, send=AsyncMock()), message=types.SimpleNamespace(id=900), reply=AsyncMock())
+        with patch.object(suspects, 'guess', new_callable=AsyncMock, return_value={'status': 'target_limit', 'remaining': 1}):
+            await ns['cmd_suspect'](ctx, types.SimpleNamespace(id=101, mention='<@101>'), emoji=':Lakers:')
+        reply = ctx.reply.call_args.args[0]
+        self.assertIn('5 suspect guesses', reply)
+        self.assertIn('No guess was used', reply)
+        self.assertIn('remaining attempts are unchanged', reply)
+        ctx.author.send.assert_not_awaited()
+
+    async def test_all_unsuccessful_guesses_have_same_public_reply_without_accuser_dm(self):
+        from unittest.mock import patch
+        tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'cmd_suspect')
+        node.decorator_list = []
+        ns = {'bot': None, 'discord': discord}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
+        ctx = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=1566394824288894976),
+                                    author=types.SimpleNamespace(id=100, send=AsyncMock()),
+                                    message=types.SimpleNamespace(id=900), reply=AsyncMock())
+        target = types.SimpleNamespace(id=101, mention='<@101>')
+        for status in ('invalid', 'wrong', 'limit', 'caught'):
+            with patch.object(suspects, 'guess', new_callable=AsyncMock,
+                              return_value=dict(status=status, message='You cannot suspect your own team or a teammate.', remaining=0)):
+                await ns['cmd_suspect'](ctx, target, emoji=':Lakers:')
+            reply = ctx.reply.call_args.args[0]
+            if status in ('limit', 'caught'):
+                self.assertIn('no lives left', reply)
+            elif status == 'wrong':
+                self.assertIn('Your guess was wrong', reply)
+                self.assertIn('!market', reply)
+            else:
+                self.assertIn('No guess was submitted', reply)
+            self.assertNotIn('own team', reply)
+            self.assertNotIn('teammate', reply)
+            self.assertFalse(ctx.reply.call_args.kwargs['mention_author'])
+        ctx.author.send.assert_not_awaited()
+        ctx.author.send.side_effect = discord.Forbidden(types.SimpleNamespace(status=403, reason='Forbidden'), 'Cannot DM')
+        with patch.object(suspects, 'guess', new_callable=AsyncMock, return_value=dict(status='invalid', message='Secret reason')):
+            await ns['cmd_suspect'](ctx, target, emoji=':Lakers:')
+        self.assertIn('No guess was submitted', ctx.reply.call_args.args[0])
+        ctx.author.send.assert_not_awaited()
+
+    async def test_caught_duo_cannot_lose_more_than_five_wins_across_either_partner(self):
+        draft, _ = self.make_draft(mode='partner_draft', channel=60)
+        first = await self.guess(draft_id=draft, target=102)
+        self.assertEqual(first['penalty_amount'], 5)
+        # A different accuser and the other partner still cannot stack a catch.
+        second = await self.guess(draft_id=draft, user=104, target=103)
+        self.assertEqual(second['status'], 'caught')
+        self.assertEqual(second['remaining'], 1)
+        state = db.get_draft(draft)['state']
+        state['scheduled_turns_finished'] = True
+        db.set_draft_state(draft, state)
+        self.assertEqual((await self.guess(draft_id=draft, user=104, target=103))['status'], 'caught')
+        rows = db.suspect_attempts(draft)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sum(row['penalty_amount'] for row in rows), 5)
+
+    async def test_already_caught_target_with_another_emoji_does_not_spend_attempt(self):
+        await self.guess()
+        result = await self.guess(user=102, emoji='🐻')
+        self.assertEqual(result['status'], 'caught')
+        self.assertEqual(result['remaining'], 1)
+        self.assertEqual(len(db.suspect_attempts(self.draft_id)), 1)
+
+    async def test_simultaneous_catches_of_both_partners_only_create_one_penalty(self):
+        draft, _ = self.make_draft(mode='partner_draft', channel=70)
+        results = await asyncio.gather(self.guess(draft_id=draft, user=100, target=102),
+                                       self.guess(draft_id=draft, user=104, target=103))
+        self.assertEqual(sorted(r['status'] for r in results), ['caught', 'correct'])
+        self.assertEqual(len(db.suspect_attempts(draft)), 1)
+    async def test_duo_partners_share_one_attempt_in_both_anonymous_formats(self):
+        for mode in ('anon_budget_draft', 'partner_draft'):
+            if mode == 'partner_draft':
+                draft, _ = self.make_draft(mode=mode, channel=30)
+                user, partner, target, logo = 100, 101, 102, ':Lakers:'
+            else:
+                draft, members = self.make_draft(channel=40)
+                state = db.get_draft(draft)['state']
+                state['teams'][0]['member_ids'].append(members[1])
+                state['teams'].pop(1)
+                db.set_draft_state(draft, state)
+                user, partner, target, logo = 100, 101, 102, '🐻'
+            # The first valid wrong guess spends the shared attempt.
+            result = await self.guess(user=user, target=target, emoji=logo, draft_id=draft)
+            expected = 'correct' if mode == 'partner_draft' else 'wrong'
+            self.assertEqual(result['status'], expected)
+            self.assertEqual(result['remaining'], 0)
+            result = await self.guess(user=partner, target=target, emoji=logo, draft_id=draft)
+            self.assertEqual(result['status'], 'caught' if expected == 'correct' else 'limit')
+            self.assertEqual(len(db.suspect_attempts(draft)), 1)
+            db.init_db()
+            self.assertEqual((await self.guess(user=partner, target=target, emoji=logo, draft_id=draft))['status'], 'caught' if expected == 'correct' else 'limit')
+
+    async def test_concurrent_duo_guesses_only_spend_once(self):
+        draft, _ = self.make_draft(mode='partner_draft', channel=50)
+        results = await asyncio.gather(
+            self.guess(user=100, target=102, emoji=':Lakers:', draft_id=draft),
+            self.guess(user=101, target=104, emoji='🐻', draft_id=draft))
+        self.assertEqual(sum(r['status'] == 'limit' for r in results), 1)
+        self.assertEqual(len(db.suspect_attempts(draft)), 1)
     async def test_valid_wrong_and_correct_guesses_dm_target_without_repeat_on_replay(self):
         user = types.SimpleNamespace(send=AsyncMock())
         bot = Mock(get_user=Mock(return_value=user))
@@ -31,10 +139,10 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         text = user.send.call_args.kwargs['content']
         self.assertIn('guess was incorrect', text)
         self.assertNotIn('Lakers', text)
-        await suspects.guess(bot, self.draft_id, 902, 100, 101, ':Lakers:')
+        await suspects.guess(bot, self.draft_id, 902, 102, 101, ':Lakers:')
         self.assertIn('correctly suspected', user.send.call_args.kwargs['content'])
         self.assertIn('5 wins', user.send.call_args.kwargs['content'])
-        await suspects.guess(bot, self.draft_id, 902, 100, 101, ':Lakers:')
+        await suspects.guess(bot, self.draft_id, 902, 102, 101, ':Lakers:')
         self.assertEqual(user.send.await_count, 2)
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -81,19 +189,19 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
     async def test_correct_during_draft_records_five_wins(self):
         result = await self.guess()
         self.assertEqual(result['status'], 'correct')
-        self.assertEqual(result['remaining'], 2)
+        self.assertEqual(result['remaining'], 0)
         row = db.suspect_attempts(self.draft_id)[0]
         self.assertEqual((row['target_id'], row['penalty_kind'], row['penalty_amount']), (101, 'wins', 5))
         self.assertEqual(db.get_draft(self.draft_id)['status'], 'active')
 
-    async def test_wrong_guesses_use_three_attempts_without_revealing_team(self):
-        for expected in (2, 1, 0):
+    async def test_wrong_guess_uses_single_attempt_without_revealing_team(self):
+        for expected in (0,):
             result = await self.guess(emoji='🦅')
             self.assertEqual(result['status'], 'wrong')
             self.assertEqual(result['remaining'], expected)
         self.assertEqual((await self.guess())['status'], 'limit')
         rows = db.suspect_attempts(self.draft_id)
-        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows), 1)
         self.assertTrue(all(not row['correct'] and row['penalty_amount'] == 0 for row in rows))
 
     async def test_after_final_scheduled_round_uses_odds_even_with_makeups(self):
@@ -110,11 +218,40 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.guess())['status'], 'revealed')
         self.assertEqual(db.suspect_attempts(self.draft_id), [])
 
-    async def test_self_teammate_unknown_emoji_and_nonparticipant_not_charged(self):
-        for options in ({'target': 100}, {'target': 999}, {'user': 999},
-                        {'emoji': ':Unknown:'}, {'emoji': ':Nets:'}):
+    async def test_unknown_emoji_and_nonparticipant_not_charged(self):
+        for options in ({'user': 999}, {'emoji': ':Unknown:'}):
             self.assertEqual((await self.guess(**options))['status'], 'invalid')
         self.assertEqual(db.suspect_attempts(self.draft_id), [])
+
+    async def test_guessing_nonparticipant_spends_only_life_and_cannot_repeat_four_times(self):
+        first = await self.guess(target=999, emoji=':Nets:')
+        self.assertEqual(first['status'], 'wrong')
+        self.assertEqual(first['remaining'], 0)
+        for _ in range(3):
+            self.assertEqual((await self.guess(target=999, emoji=':Nets:'))['status'], 'limit')
+        rows = db.suspect_attempts(self.draft_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['charged'], 1)
+        self.assertEqual(rows[0]['penalty_amount'], 0)
+
+    async def test_self_and_own_team_guesses_count_as_wrong_once(self):
+        for i, options in enumerate(({'target': 100}, {'emoji': ':Nets:'})):
+            draft, _ = self.make_draft(channel=80+i)
+            first = await self.guess(draft_id=draft, **options)
+            self.assertEqual(first['status'], 'wrong')
+            self.assertEqual(first['remaining'], 0)
+            for _ in range(3):
+                self.assertEqual((await self.guess(draft_id=draft, **options))['status'], 'limit')
+            rows = db.suspect_attempts(draft)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['penalty_amount'], 0)
+
+    async def test_own_team_guess_also_uses_duo_partners_life(self):
+        draft, _ = self.make_draft(mode='partner_draft', channel=90)
+        first = await self.guess(draft_id=draft, user=100, target=101, emoji=':Nets:')
+        self.assertEqual(first['status'], 'wrong')
+        self.assertEqual((await self.guess(draft_id=draft, user=101, target=102))['status'], 'limit')
+        self.assertEqual(len(db.suspect_attempts(draft)), 1)
 
     async def test_custom_emoji_id_and_aliases_match(self):
         self.assertTrue(suspects.logo_matches('<:Renamed:1111>', '<:Nets~3:1111>'))
@@ -129,8 +266,9 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.guess(nonce=500))['status'], 'replay')
         self.assertEqual((await self.guess(user=102))['status'], 'caught')
         self.assertEqual(len(db.suspect_attempts(self.draft_id)), 1)
-        results = await asyncio.gather(self.guess(target=103, emoji='🐻'),
-                                       self.guess(user=102, target=103, emoji='🐻'))
+        another, _ = self.make_draft(channel=20)
+        results = await asyncio.gather(self.guess(target=103, emoji='🐻', draft_id=another),
+                                       self.guess(user=102, target=103, emoji='🐻', draft_id=another))
         self.assertEqual(sorted(r['status'] for r in results), ['caught', 'correct'])
 
     async def test_once_caught_during_draft_cannot_be_penalized_again_afterward(self):
@@ -149,9 +287,9 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partner_catches_either_owner_and_rejects_teammate_guess(self):
         partner, members = self.make_draft(mode='partner_draft')
-        self.assertEqual((await self.guess(draft_id=partner, target=101, emoji=':Nets:'))['status'], 'invalid')
-        self.assertEqual((await self.guess(draft_id=partner, target=103))['status'], 'correct')
-        self.assertEqual((await self.guess(draft_id=partner, target=102))['status'], 'correct')
+        self.assertEqual((await self.guess(draft_id=partner, target=101, emoji=':Nets:'))['status'], 'wrong')
+        self.assertEqual((await self.guess(draft_id=partner, user=104, target=103))['status'], 'correct')
+        self.assertEqual((await self.guess(draft_id=partner, user=106, target=102))['status'], 'caught')
 
     async def test_partner_final_turns_finished_uses_odds(self):
         partner, _ = self.make_draft(mode='partner_draft')
@@ -211,7 +349,7 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         node.decorator_list = []
         ns = {'bot': None, 'discord': discord}
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
-        ctx = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=934052158532378634),
+        ctx = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=1566394824288894976),
                                     author=types.SimpleNamespace(id=100), message=types.SimpleNamespace(id=800), reply=AsyncMock())
         target = types.SimpleNamespace(id=101, mention='<@101>')
         await ns['cmd_suspect'](ctx, target, emoji=':Lakers:')
@@ -221,34 +359,38 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ctx.reply.call_args.kwargs['mention_author'])
         self.change_state(scheduled_turns_finished=True)
         ctx.message.id = 801
+        ctx.author.id = 103
         target.id, target.mention = 102, '<@102>'
         await ns['cmd_suspect'](ctx, target, emoji='🦅')
         self.assertIn('you lose 10% odds in your next matchup', ctx.reply.call_args.kwargs['embed'].description)
 
-    async def test_command_only_runs_in_chat_and_private_channel_with_shared_attempts(self):
+    async def test_command_only_runs_in_suspect_and_private_channel_with_shared_attempts(self):
         tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'cmd_suspect')
         node.decorator_list = []
         ns = {'bot': None, 'discord': discord}
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
         ctx = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=11),
-                                    author=types.SimpleNamespace(id=100), message=types.SimpleNamespace(id=900), reply=AsyncMock())
+                                    author=types.SimpleNamespace(id=100, send=AsyncMock()), message=types.SimpleNamespace(id=900), reply=AsyncMock())
         target = types.SimpleNamespace(id=101, mention='<@101>')
-        for channel in (11, 10, 123456):
+        for channel in (11, 10, 123456, 934052158532378634):
             ctx.channel.id = channel
             await ns['cmd_suspect'](ctx, target, emoji='🦅')
-            self.assertIn('only available', ctx.reply.call_args.args[0])
+            self.assertIn('<#1566394824288894976>', ctx.reply.call_args.args[0])
+            self.assertIn('Your guess has not been used', ctx.reply.call_args.args[0])
+            self.assertEqual(db.suspect_attempts(self.draft_id), [])
         self.assertEqual(db.suspect_attempts(self.draft_id), [])
-        for channel in (934052158532378634, 1533242104304631969, 934052158532378634):
+        for channel in (1566394824288894976, 1533242104304631969, 1566394824288894976):
             ctx.channel.id = channel
             ctx.message.id += 1
             await ns['cmd_suspect'](ctx, target, emoji='🦅')
-        self.assertEqual(len(db.suspect_attempts(self.draft_id)), 3)
+        self.assertEqual(len(db.suspect_attempts(self.draft_id)), 1)
         ctx.channel.id = 1533242104304631969
         ctx.message.id += 1
         await ns['cmd_suspect'](ctx, target, emoji=':Lakers:')
-        self.assertIn('used all 3', ctx.reply.call_args.args[0])
-        self.assertEqual(len(db.suspect_attempts(self.draft_id)), 3)
+        self.assertEqual(ctx.reply.call_args.args[0], 'You have no lives left. Use `!market` to buy extra guesses.')
+        ctx.author.send.assert_not_awaited()
+        self.assertEqual(len(db.suspect_attempts(self.draft_id)), 1)
 
 
 if __name__ == '__main__':

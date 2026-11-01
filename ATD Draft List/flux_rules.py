@@ -111,6 +111,8 @@ def failure_message(pick, book):
 
 
 def saved_message(picks):
+    if not picks:
+        return "Your updated Flux list is empty. Submit new options with `!fluxpick`."
     lines = [f"**\u2705 Next Flux \u00b7 {len(picks)} option{'s' if len(picks) != 1 else ''}**"]
     lines += [f"{i}. {p['player'][:100]} \u00b7 drop \u2265 ${p['flux_drop']:g}" for i, p in enumerate(picks[:5], 1)]
     if len(picks) > 5:

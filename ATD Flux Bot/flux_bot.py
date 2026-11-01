@@ -10,6 +10,7 @@ from discord.ext import commands
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
+from columns import prepare_round_columns, column_letter
 from rapidfuzz import fuzz, process
 
 creds_b64 = os.environ["GOOGLE_CREDENTIALS_B64"]
@@ -136,7 +137,7 @@ def col_letter_by_name(header, name):
     if name not in header:
         raise RuntimeError(f"Column '{name}' not found")
     idx = header.index(name) + 1
-    return rowcol_to_a1(1, idx)[0]
+    return column_letter(idx)
 
 def has_commish_role(member: discord.Member) -> bool:
     return any(r.name == COMMISH_ROLE_NAME for r in member.roles)
@@ -336,16 +337,15 @@ async def flux(ctx, vol: int):
 
     log.info(f"Flux started | round={next_round} | vol={vol} | user={user}")
 
-    new_col = ws.col_count + 1
-    ensure_columns(ws, new_col)
+    new_col = prepare_round_columns(ws, rows)
     ws.update_cell(1, new_col, f"Round {next_round}")
-    new_letter = rowcol_to_a1(1, new_col)[0]
+    new_letter = column_letter(new_col)
 
     if next_round == 2:
         formula = ROUND_2_TEMPLATE.format(VOL=vol, VAL=value_col)
     else:
         prev_idx = header.index(f"Round {next_round - 1}") + 1
-        prev_letter = rowcol_to_a1(1, prev_idx)[0]
+        prev_letter = column_letter(prev_idx)
         formula = ROUND_3_PLUS_TEMPLATE.format(VOL=vol, VAL=value_col, PREV=prev_letter)
 
     ws.update(
@@ -467,15 +467,15 @@ async def fluxplayers(ctx, vol: int, rounds: int, *, players_raw: str):
         f"**{len(selected_rows)}** player(s): {matched_names}…"
     )
 
-    start_col = ws.col_count + 1
-    ensure_columns(ws, start_col + rounds - 1)
+    start_col = prepare_round_columns(ws, rows, rounds)
 
-    prev_letter = value_col  # what Round 2 (the first new round) moves off of
+    prev_letter = (value_col if next_round == 2 else
+                   column_letter(header.index(f'Round {next_round-1}')+1))
     for r_offset in range(rounds):
         this_round = next_round + r_offset
         new_col = start_col + r_offset
         ws.update_cell(1, new_col, f"Round {this_round}")
-        new_letter = rowcol_to_a1(1, new_col)[0]
+        new_letter = column_letter(new_col)
 
         if this_round == 2:
             flux_formula = ROUND_2_TEMPLATE.format(VOL=vol, VAL=value_col)

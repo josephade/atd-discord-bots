@@ -14,8 +14,9 @@ class ThemeClocks:
         self.messages = {}
         self.signatures = {}
         self.errors = set()
+        self.silent_channels = set()
 
-    async def fetch(self, session, token=None, action=None, actor_id=None, request_id=None):
+    async def fetch(self, session, token=None, action=None, actor_id=None, request_id=None, notice=None):
         key = os.getenv('THEME_BRIDGE_KEY', '')
         if not key:
             raise ValueError('The Theme Bot connection is not configured.')
@@ -29,6 +30,8 @@ class ThemeClocks:
         payload = {'token': token} if token else None
         if action:
             payload = dict(token=token, action=action, actor_id=actor_id, request_id=request_id)
+            if notice is not None:
+                payload["notice"] = notice
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), trust_env=False) as client:
             async with client.request('POST' if token or action else 'GET', path, params=params,
                                       headers=headers, json=payload) as response:
@@ -49,33 +52,31 @@ class ThemeClocks:
         return await self.fetch(session, token=data['current']['token'], action='skip', actor_id=actor_id, request_id=request_id)
 
     def embed(self, data):
-        current = data.get('current')
-        if data.get('finished'):
-            text = 'All picks and makeups are finished. The commissioner can reveal the draft.'
-        elif data.get('waiting_for_flux'):
-            upcoming = data['waiting_for_flux']
-            text = (f'**Round {upcoming - 1} finished.**\n\n'
-                    'Waiting for a commissioner to run **ATD Flux Bot** (`!flux 3`, `!flux 4` or `!flux 5`).\n'
-                    f'Round {upcoming} will open after Flux completes. **No team is on the clock.**')
-        elif data['status'] != 'active':
-            text = f'Draft **{data["status"]}**. Waiting for Theme Bot.'
-        elif data.get('transitioning'):
-            text = 'Preparing the next team’s turn.'
-        elif not current:
-            text = 'Scheduled turns finished. Waiting for outstanding makeup picks.'
-        else:
-            pick_note = f' · Pick {current["pick"]}' if current.get('pick') else ''
-            text = (f'{current["logo"]} **is on the clock!**\n\n**Round {current["round"]} of {data["rounds"]}{pick_note}**\n'
-                    f'Turn expires <t:{int(current["deadline"])}:R>.\n'
-                    'Submit your pick/list privately to ATD Draft Theme Bot.')
-        return discord.Embed(title='Anonymous Partner Draft' if data['mode'] == 'partner' else 'Anonymous Budget Draft',
-                             description=text, color=0x3498DB)
+        from clock_card import clock_embed
+        return clock_embed(data)
 
-    async def render(self, session, data):
+    async def render(self, session, data, force=False):
+        if data.get('presenter') == 'theme':
+            if session.channel_id not in self.silent_channels:
+                old = self.messages.pop(session.channel_id, None)
+                try:
+                    if old:
+                        await old.delete()
+                    elif hasattr(session.channel, 'history'):
+                        async for message in session.channel.history(limit=30):
+                            if message.author.id == self.bot.user.id and any(
+                                    e.title == 'Anonymous Budget Draft' for e in message.embeds):
+                                await message.delete()
+                                break
+                except discord.HTTPException:
+                    pass
+                self.silent_channels.add(session.channel_id)
+                self.signatures.pop(session.channel_id, None)
+            return
         current = data.get('current')
         signature = (data['status'], data.get('finished'), str(current),
-                     data.get('waiting_for_flux'), data.get('announcement_revision', 0))
-        if self.signatures.get(session.channel_id) == signature:
+                     data.get('waiting_for_flux'), data.get('announcement_revision', 0), data.get('timers_off'), data.get('window_closed'), str(data.get('window_notice')))
+        if not force and self.signatures.get(session.channel_id) == signature:
             return
         kwargs = {'embed': self.embed(data), 'allowed_mentions': discord.AllowedMentions.none()}
         old = self.messages.get(session.channel_id)
@@ -96,7 +97,24 @@ class ThemeClocks:
                 data = await self.fetch(session, clock['token'])
         if data.get('transitioning'):
             return
-        await self.render(session, data)
+        if data.get('presenter') == 'theme':
+            await self.render(session, data)
+            return
+        info = data.get('window_notice')
+        if info and info['key'] != data.get('window_delivery_complete'):
+            delivery = await self.fetch(session, action='window-notice')
+            await self.render(session, data, force=not delivery.get('public', True))
+            sent = []
+            for uid in delivery.get('pending_users', []):
+                try:
+                    user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                    await user.send(embed=self.embed(data), allowed_mentions=discord.AllowedMentions.none())
+                    sent.append(uid)
+                except discord.HTTPException:
+                    pass
+            await self.fetch(session, action='window-notice', notice=dict(key=delivery.get('key'), users=sent, public=True))
+        else:
+            await self.render(session, data)
 
     def start(self):
         if self.task and not self.task.done():

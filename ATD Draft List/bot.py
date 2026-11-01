@@ -894,31 +894,25 @@ async def cmd_fluxpick(ctx, *, text: str = ''):
     if _flux_in_progress or not await _normal_flux_window(uid, record['round']):
         await ctx.send('Finish your team’s current-round pick before setting a Flux pick for the next round. Flux rules must be submitted before Flux starts.')
         return
-    existing = _data[uid]['picks']
-    tokens = []
-    for pick in additions:
-        token = json.dumps([_data[uid].get('flux_draft_start'), pick['player'].casefold(), source, pick['flux_target_round']], sort_keys=True)
-        if any(p['player'].casefold() == pick['player'].casefold() for p in existing) or token in _data[uid].get('flux_rule_attempts', []):
-            await ctx.send(f"You already submitted {pick['player']} for the upcoming Flux. No new rules were saved.")
-            return
-        tokens.append(token)
-    if len(existing)+len(additions) > 100:
-        await ctx.send('Your list can contain up to 100 players. No new rules were saved.')
-        return
+    submission_id = getattr(getattr(ctx, 'message', None), 'id', 0)
     try:
         available = await asyncio.to_thread(_fetch_availability, force=True)
         rosters = await asyncio.to_thread(_fetch_roster_names, force=True)
+        kept, removed = [], []
         for pick in additions:
-            if not _player_available(pick['player'], available, rosters):
-                await ctx.send(f"{pick['player']} has already been drafted. No new rules were saved.")
-                return
+            (kept if _player_available(pick['player'], available, rosters) else removed).append(pick)
     except Exception:
-        await ctx.send('Could not verify player availability. No Flux rule was saved; please try again.')
+        await ctx.send('Could not verify player availability. Your previous list was kept; please try again.')
         return
-    _data[uid].setdefault('flux_rule_attempts', []).extend(tokens)
-    existing.extend(additions)
+    if submission_id and submission_id < _data[uid].get('flux_submission_id', 0):
+        await ctx.send('Your newer Flux list is already saved; this older message was ignored.')
+        return
+    _data[uid].update(picks=kept, flux_submission_id=submission_id)
     _save_data(_data)
-    await ctx.send(saved_message(additions))
+    await ctx.send(saved_message(kept))
+    if removed:
+        await ctx.send('Already drafted and removed: '+', '.join(p['player'] for p in removed)+'.')
+
 
 
 def _resolve_emoji_input(raw: str) -> str:
