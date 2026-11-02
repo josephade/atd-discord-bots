@@ -1026,7 +1026,8 @@ async def cmd_anonpick(ctx, draft_ref: str = '', team_ref: str = '', *, text: st
     import owner_picks
     reply = await owner_picks.submit(bot, draft['id'], ctx.author.id, ctx.channel.id, ctx.guild.id,
                                      team_ref, text, ctx.message.id)
-    await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
+    await ctx.send(embed=discord.Embed(title='Owner pick', description=reply, color=0x3498DB),
+                   allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name='anonoverride')
@@ -1752,6 +1753,12 @@ async def cmd_teamlist(ctx):
 
 
 # ── DM commands (drafters) ──────────────────────────────────────────────────────
+@bot.command(name='steal')
+async def cmd_steal(ctx, *, draft_ref: str = ''):
+    import steal_report
+    await steal_report.show(ctx,draft_ref)
+
+
 @bot.command(name='nextpick')
 async def cmd_nextpick(ctx):
     if not _dm_only(ctx):
@@ -1813,6 +1820,10 @@ async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
     status = result['status']
     if status == 'replay':
         return
+    if status == 'ineligible':
+        await ctx.reply('That team is outside the 16-team playoff pool. **No guess was used; your remaining attempts are unchanged.**',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
     if status == 'target_limit':
         await ctx.reply('This team has already received **5 suspect guesses** and cannot be guessed again this draft. **No guess was used; your remaining attempts are unchanged.**',
                         mention_author=False, allowed_mentions=discord.AllowedMentions.none())
@@ -1822,7 +1833,7 @@ async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
                         mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         return
     if status == 'correct':
-        penalty = ('5 wins' if result['penalty_kind'] == 'wins' else '10% odds in your next matchup')
+        penalty = ('5 wins' if result['penalty_kind'] == 'wins' else '10 percentage points of odds in your next playoff matchup')
         # An embed keeps this announcement out of Team Sheet Bot's pick parser.
         embed = discord.Embed(description=f'{member.mention} You have been caught out being the GM of {result["logo"]}, you lose {penalty}',
                               color=discord.Color.orange())
@@ -1845,6 +1856,41 @@ async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
     await ctx.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
 
+@bot.command(name='suspectseeding')
+async def cmd_suspectseeding(ctx, draft_id: int, *, entries: str = ''):
+    """Owner private: !suspectseeding <draft ID> then 16 team emojis/lotto numbers."""
+    if ctx.author.id != OWNER_ID or not ctx.guild or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        return
+    if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        await ctx.send('Hide this channel from @everyone before releasing seeding.')
+        return
+    import suspects
+    try:
+        draft = await suspects.release_seeding(bot,draft_id,ctx.guild.id,ctx.author.id,entries)
+    except ValueError as exc:
+        await ctx.send(str(exc),allowed_mentions=discord.AllowedMentions.none())
+        return
+    await ctx.send(suspects.phase_summary(draft)+'\nAttempts and previous penalties are preserved. Apply all win deductions before publishing final seeds.',
+                   allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name='suspectstatus')
+async def cmd_suspectstatus(ctx, draft_id: int):
+    """Owner private phase/pool and penalty status."""
+    if ctx.author.id != OWNER_ID or not ctx.guild or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        return
+    if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        await ctx.send('Hide this channel from @everyone before viewing this report.')
+        return
+    import suspects
+    draft = db.get_draft(draft_id)
+    if not draft or draft['guild_id'] != ctx.guild.id or draft['theme'] not in suspects.ANON_THEMES:
+        await ctx.send('Choose an anonymous draft in this server.')
+        return
+    await ctx.send(suspects.phase_summary(draft),allowed_mentions=discord.AllowedMentions.none())
+    await cmd_suspects.callback(ctx,draft_ref=str(draft_id))
+
+
 @bot.command(name='suspects')
 async def cmd_suspects(ctx, *, draft_ref: str = ''):
     """Owner-only private penalty ledger: !suspects <draft ID>."""
@@ -1865,7 +1911,7 @@ async def cmd_suspects(ctx, *, draft_ref: str = ''):
     lines = [f'**Suspect penalties — {draft["name"]}**',
              'Recorded for commissioner application to this draft’s results or next matchup.']
     for row in catches:
-        penalty = '−5 wins' if row['penalty_kind'] == 'wins' else '−10% odds in next matchup'
+        penalty = '−5 wins' if row['penalty_kind'] == 'wins' else '−10 percentage points of odds in next playoff matchup'
         lines.append(f'<@{row["target_id"]}> · {row["logo"]} · {penalty} · caught by <@{row["guesser_id"]}>')
     if not catches:
         lines.append('No correct catches recorded.')
@@ -2303,8 +2349,8 @@ async def cmd_help(ctx):
     )
     embed.add_field(name='Anonymous identity guesses',
                     value='`!suspect @GM :emoji:` — only in <#1566394824288894976> or the owner’s private channel; one free attempt per team per anonymous draft, shared by partners. `!market` buys extras for 5 wins each. '
-                          'Correct catch: −5 wins during picking; −10% next-matchup odds after the final round. '
-                          'Guesses close at official reveal. `!suspects <draft ID>` — owner-only private penalty ledger.',
+                          'Correct catch: −5 wins before seeding; −10 percentage points of playoff odds after seeding. '
+                          '5-win penalties continue through voting; `!suspectseeding <draft ID>` switches to the 16-team playoff pool and 10-point odds penalties. Guesses close at official GM reveal. `!suspects <draft ID>` — owner-only private penalty ledger.',
                     inline=False)
     embed.add_field(
         name='Drafting',

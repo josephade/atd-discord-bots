@@ -12,6 +12,15 @@ def snapshot(picks=None, revision=1):
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_owner_steal_report_does_not_trigger_draft_list_sbl_reply(self):
+        self.client.owner=100
+        self.ctx.guild=object()
+        self.ctx.channel=SimpleNamespace(id=1533242104304631969)
+        self.ctx.command.name='steal'
+        self.assertFalse(await self.client.check(self.ctx))
+        self.ctx.send.assert_not_awaited()
+        self.client.request.assert_not_awaited()
+
     async def test_multiple_flux_rules_push_once_in_priority_order(self):
         self.data['100']['anon_draft_id'] = 24
         original = dict(player='Earlier', price=5)

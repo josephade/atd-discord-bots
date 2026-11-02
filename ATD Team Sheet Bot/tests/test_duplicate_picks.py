@@ -61,6 +61,17 @@ class Worksheet:
 
 
 class SkipNoticeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_pick_confirmation_and_status_embeds_never_reach_sheet_writer(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1]/'bot.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name=='on_message')
+        node.decorator_list=[]
+        manager = AsyncMock()
+        ns=dict(re=re, TIMER_BOT_ID=0, FLUX_BOT_ID=0, TRUSTED_BOT_IDS={99}, _get_manager_async=manager)
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'bot.py','exec'),ns)
+        for text in ('Recorded pick #31 for <:Wizards:123>: **Luka Doncic**.', ''):
+            await ns['on_message'](SimpleNamespace(author=SimpleNamespace(id=99,bot=True),content=text))
+        manager.assert_not_awaited()
+
     async def test_missing_mapped_tab_reports_trusted_pick_instead_of_silent_drop(self):
         tree = ast.parse((Path(__file__).resolve().parents[1]/'bot.py').read_text(encoding='utf-8'))
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'on_message')

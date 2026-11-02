@@ -320,7 +320,8 @@ async def flux(ctx, vol: int):
         return
     sh, ws = result
 
-    await ctx.send("⏳ **Flux is in progress…**")
+    ctx._flux_price_write_started = False
+    ctx._flux_progress_message = await ctx.send("⏳ **Flux is in progress…**")
 
     rows = ws.get_all_values()
     header = rows[0]
@@ -339,6 +340,7 @@ async def flux(ctx, vol: int):
 
     new_col = prepare_round_columns(ws, rows)
     ws.update_cell(1, new_col, f"Round {next_round}")
+    ctx._flux_price_write_started = True
     new_letter = column_letter(new_col)
 
     if next_round == 2:
@@ -462,7 +464,8 @@ async def fluxplayers(ctx, vol: int, rounds: int, *, players_raw: str):
         return
 
     matched_names = ", ".join(sorted(sheet_names[i] for i in selected_rows))
-    await ctx.send(
+    ctx._flux_price_write_started = False
+    ctx._flux_progress_message = await ctx.send(
         f"⏳ **Flux in progress** — rounds {next_round}–{next_round + rounds - 1} for "
         f"**{len(selected_rows)}** player(s): {matched_names}…"
     )
@@ -475,6 +478,7 @@ async def fluxplayers(ctx, vol: int, rounds: int, *, players_raw: str):
         this_round = next_round + r_offset
         new_col = start_col + r_offset
         ws.update_cell(1, new_col, f"Round {this_round}")
+        ctx._flux_price_write_started = True
         new_letter = column_letter(new_col)
 
         if this_round == 2:
@@ -657,8 +661,40 @@ async def fluxhelp(ctx):
 
     await ctx.send(embed=embed)
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    name = getattr(ctx.command, 'name', '')
+    if name not in ('flux', 'fluxplayers'):
+        log.error('Command %s failed: %s', name, error)
+        return
+    if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        usage = '`!flux 3` (also 4 or 5)' if name == 'flux' else '`!fluxplayers <3|4|5> <rounds> Player One, Player Two`'
+        await ctx.send('Usage: '+usage)
+        return
+    original = getattr(error, 'original', error)
+    log.error('Flux failed in channel %s: %s', ctx.channel.id, original,
+              exc_info=(type(original), original, original.__traceback__))
+    if getattr(ctx, '_flux_price_write_started', False):
+        text = ('**Flux failed before completion.** The price sheet may contain a partial round. '
+                'The commissioner must check it before running Flux again; no completion was announced.')
+    else:
+        text = ('**Flux failed before writing any new round prices.** '
+                'The sheet could not be prepared. Ask the owner to check the sheet, then retry the command.')
+    progress = getattr(ctx, '_flux_progress_message', None)
+    if progress:
+        try:
+            await progress.edit(content=text)
+            return
+        except discord.HTTPException:
+            pass
+    await ctx.send(text)
+
+
 # ==========================================================
 # RUN
 # ==========================================================
 
-bot.run(DISCORD_TOKEN)
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)

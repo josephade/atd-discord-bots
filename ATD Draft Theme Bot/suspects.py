@@ -63,6 +63,56 @@ def after_final_round(ctx):
     return themes.get_theme(ctx.draft['theme']).is_pick_phase_complete(ctx)
 
 
+def playoff_logos(draft):
+    return draft['state'].get('suspect_seeding', {}).get('playoff_logos', [])
+
+
+async def release_seeding(bot, draft_id, guild_id, owner_id, entries):
+    """Explicit one-way phase transition; guesses and release share the draft lock."""
+    async with draft_lock(draft_id):
+        ctx = DraftContext(bot, draft_id)
+        draft = ctx.draft
+        if not draft or draft['guild_id'] != guild_id or draft['theme'] not in ANON_THEMES or draft['status'] not in ('active','paused','complete'):
+            raise ValueError('Choose an anonymous draft in this server.')
+        if draft['state'].get('identities_revealed'):
+            raise ValueError('GM identities have already been revealed; suspect is closed.')
+        if not after_final_round(ctx):
+            raise ValueError('Finish the scheduled draft rounds before releasing seeding.')
+        assigned = teams(draft)
+        selections = [item.strip() for item in re.split(r'[,\n]+', entries) if item.strip()]
+        selected = []
+        for item in selections:
+            matches = ([assigned[int(item)-1]] if item.isdigit() and 1 <= int(item) <= len(assigned) else
+                       [team for team in assigned if logo_matches(item,team['logo'])])
+            if len(matches) != 1:
+                raise ValueError(f'Unknown or ambiguous team: {item}. Use team emojis or original lotto numbers, one per line.')
+            selected.append(matches[0]['logo'])
+        if len(selected) != 16 or len(set(selected)) != 16:
+            raise ValueError('Supply exactly 16 distinct playoff teams, one emoji or original lotto number per line.')
+        existing = draft['state'].get('suspect_seeding')
+        if existing:
+            if set(existing['playoff_logos']) == set(selected):
+                return draft
+            raise ValueError('Seeding has already been released. The saved playoff pool cannot be replaced with this command.')
+        from datetime import datetime, timezone
+        state = dict(draft['state'])
+        state['suspect_seeding'] = dict(playoff_logos=selected,released_by=owner_id,
+                                        released_at=datetime.now(timezone.utc).isoformat())
+        db.set_draft_state(draft_id,state)
+        return db.get_draft(draft_id)
+
+
+def phase_summary(draft):
+    seeding = draft['state'].get('suspect_seeding')
+    if seeding:
+        return ('**Seeding released - playoff phase**\n'
+                'Correct guess: **10 percentage points off next playoff matchup odds**.\n'
+                '**Eligible teams (16):** '+ ' '.join(seeding['playoff_logos']))
+    return ('**Before seeding - drafting/voting phase**\n'
+            'Correct guess: **5 wins deducted before final seeding**. All teams remain in the pool.\n'
+            'The end of Round 10 does not change this phase.')
+
+
 async def guess(bot, draft_id, message_id, user_id, target_id, emoji):
     async with draft_lock(draft_id):
         ctx = DraftContext(bot, draft_id)
@@ -89,20 +139,23 @@ async def guess(bot, draft_id, message_id, user_id, target_id, emoji):
         if len(matches) != 1:
             return {'status': 'invalid', 'message': 'Use one uniquely assigned team emoji from this draft.'}
         team = matches[0]
+        # Check only the publicly guessed logo; checking the GM's real team would leak ownership.
+        if draft['state'].get('suspect_seeding') and team['logo'] not in playoff_logos(draft):
+            return {'status': 'ineligible'}
         # Self/own-team/teammate guesses spend the shared life as wrong guesses.
         # Rejecting them for free would permit unlimited apparent guesses and
         # a distinguishable response could expose the anonymous relationship.
         own_guess = (user_id == target_id or guesser['id'] in team['member_ids']
                      or target is not None and target['id'] in own_teams[0]['member_ids'])
         correct = target is not None and not own_guess and target['id'] in team['member_ids']
-        phase = 'post_draft' if after_final_round(ctx) else 'draft'
+        phase = 'post_draft' if draft['state'].get('suspect_seeding') else 'draft'
         result = db.record_suspect(draft_id, message_id, user_id, target_id, team['logo'], correct,
                                    phase, draft['state'], CONSUME_WRONG_ATTEMPTS, ALLOW_REPEAT_CATCHES,
                                    attempt_user_ids=attempt_users, caught_user_ids=caught_users)
         result['logo'] = team['logo']
         if bot is not None and target is not None and target_id != user_id and result['status'] in ('correct', 'wrong'):
             if correct:
-                penalty = '5 wins' if result['penalty_kind'] == 'wins' else '10% odds in your next matchup'
+                penalty = '5 wins' if result['penalty_kind'] == 'wins' else '10 percentage points of odds in your next playoff matchup'
                 notice = f"You were correctly suspected of being the GM of {team['logo']}. You lose {penalty}."
             else:
                 notice = f"Someone suspected you of being the GM of {team['logo']}, but the guess was incorrect. No penalty applies."

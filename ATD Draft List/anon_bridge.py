@@ -225,6 +225,9 @@ class AnonymousLists:
 
     async def check(self, ctx):
         command = ctx.command.name
+        if (command == 'steal' and ctx.guild is not None and ctx.author.id == self.owner
+                and ctx.channel.id == int(os.getenv('OWNER_REPORT_CHANNEL_ID') or '1533242104304631969')):
+            return False  # Private owner report belongs to Theme Bot, not SBL picks.
         if command == 'draftmode' or not self.linked(ctx.author.id) or command not in self.HANDLED:
             return True
         if ctx.guild is not None:

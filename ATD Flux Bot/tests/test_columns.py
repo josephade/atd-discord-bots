@@ -8,7 +8,8 @@ from columns import prepare_round_columns, column_letter
 
 class FluxColumnTests(unittest.TestCase):
     def worksheet(self, columns=14):
-        return NS(col_count=columns, id=123, add_cols=Mock(), spreadsheet=NS(batch_update=Mock()))
+        return NS(col_count=columns, id=123, add_cols=Mock(), resize=Mock(), spreadsheet=NS(batch_update=Mock(),
+            fetch_sheet_metadata=Mock(return_value={'sheets':[{'properties':{'sheetId':123,'gridProperties':{'columnCount':columns}}}]})))
 
     def test_round_two_uses_e_despite_empty_allocated_grid(self):
         ws = self.worksheet(14)
@@ -36,9 +37,22 @@ class FluxColumnTests(unittest.TestCase):
     def test_grid_only_expands_when_needed_and_wide_letters_are_correct(self):
         ws = self.worksheet(4)
         self.assertEqual(prepare_round_columns(ws, [['Position', 'Player', 'ADP', 'Value']], 3), 5)
-        ws.add_cols.assert_called_once_with(3)
+        ws.resize.assert_called_once_with(cols=7)
         self.assertEqual(column_letter(27), 'AA')
         self.assertEqual(column_letter(15), 'O')
+
+    def test_deleted_columns_with_stale_cached_width_expand_to_e(self):
+        ws = self.worksheet(14)
+        ws.spreadsheet.fetch_sheet_metadata.return_value['sheets'][0]['properties']['gridProperties']['columnCount'] = 4
+        self.assertEqual(prepare_round_columns(ws, [['Position','Player','ADP','Value']]), 5)
+        ws.resize.assert_called_once_with(cols=5)
+        ws.add_cols.assert_not_called()
+
+    def test_stale_smaller_width_never_shrinks_the_live_grid(self):
+        ws = self.worksheet(4)
+        ws.spreadsheet.fetch_sheet_metadata.return_value['sheets'][0]['properties']['gridProperties']['columnCount'] = 14
+        prepare_round_columns(ws, [['Position','Player','ADP','Value']])
+        ws.resize.assert_not_called()
 
     def test_old_widely_spaced_round_is_preserved_as_existing_history(self):
         ws = self.worksheet(26)
@@ -52,7 +66,8 @@ class FluxCommandTests(unittest.IsolatedAsyncioTestCase):
         nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
         for node in nodes:
             node.decorator_list = []
-        ws = NS(col_count=14, id=123, add_cols=Mock(), spreadsheet=NS(batch_update=Mock()),
+        ws = NS(col_count=14, id=123, add_cols=Mock(), resize=Mock(), spreadsheet=NS(batch_update=Mock(),
+                fetch_sheet_metadata=Mock(return_value={'sheets':[{'properties':{'sheetId':123,'gridProperties':{'columnCount':14}}}]})),
                 get_all_values=Mock(return_value=rows), update_cell=Mock(), update=Mock())
         ns = dict(discord=NS(Member=NS), has_commish_role=lambda user: True, get_ws=lambda channel: (None, ws),
                   log=Mock(), prepare_round_columns=prepare_round_columns, column_letter=column_letter,

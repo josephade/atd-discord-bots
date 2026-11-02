@@ -204,14 +204,75 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertTrue(all(not row['correct'] and row['penalty_amount'] == 0 for row in rows))
 
-    async def test_after_final_scheduled_round_uses_odds_even_with_makeups(self):
+    async def test_after_final_scheduled_round_still_uses_wins_with_makeups(self):
         self.change_state(scheduled_turns_finished=True, live_pick_number=None)
         result = await self.guess()
-        self.assertEqual((result['penalty_kind'], result['penalty_amount']), ('odds_percent', 10))
+        self.assertEqual((result['penalty_kind'], result['penalty_amount']), ('wins', 5))
 
-    async def test_complete_but_not_revealed_uses_odds(self):
+    async def test_complete_but_not_seeded_still_uses_wins(self):
         db.set_draft_status(self.draft_id, 'complete')
-        self.assertEqual((await self.guess())['penalty_kind'], 'odds_percent')
+        self.assertEqual((await self.guess())['penalty_kind'], 'wins')
+
+    def playoff_fixture(self):
+        draft = db.create_draft(1,10,'anon_budget_draft','Playoffs',{'rounds':10})
+        members = [db.add_drafter(draft,1000+i,f'GM{i}') for i in range(17)]
+        db.set_draft_state(draft,{'teams':[{'logo':f':Team{i}:','member_ids':[m]} for i,m in enumerate(members)],
+                                  'scheduled_turns_finished':True})
+        db.set_draft_status(draft,'complete')
+        return draft
+
+    async def test_explicit_release_selects_exactly_16_and_preserves_history(self):
+        draft=self.playoff_fixture()
+        first=await suspects.guess(None,draft,7000,1000,1001,':Team1:')
+        self.assertEqual(first['penalty_kind'],'wins')
+        original=db.suspect_attempts(draft)
+        entries='\n'.join(str(i) for i in range(1,17))
+        for bad in ('1,2',entries+',16',entries.replace('16','99')):
+            with self.assertRaises(ValueError): await suspects.release_seeding(None,draft,1,999,bad)
+            self.assertNotIn('suspect_seeding',db.get_draft(draft)['state'])
+        await suspects.release_seeding(None,draft,1,999,entries)
+        await suspects.release_seeding(None,draft,1,999,entries)
+        db.init_db()
+        self.assertEqual(len(suspects.playoff_logos(db.get_draft(draft))),16)
+        self.assertEqual(db.suspect_attempts(draft),original)
+        result=await suspects.guess(None,draft,7001,1002,1003,':Team3:')
+        self.assertEqual((result['penalty_kind'],result['penalty_amount']),('odds_percent',10))
+        self.assertEqual((await suspects.guess(None,draft,7002,1004,1001,':Team1:'))['status'],'caught')
+        # Invalid public team does not spend an attempt; an eligible wrong guess does.
+        self.assertEqual((await suspects.guess(None,draft,7003,1005,1006,':Team16:'))['status'],'ineligible')
+        self.assertEqual((await suspects.guess(None,draft,7004,1005,1016,':Team6:'))['remaining'],0)
+        with self.assertRaises(ValueError):
+            await suspects.release_seeding(None,draft,1,999,','.join(str(i) for i in range(2,18)))
+
+    async def test_admin_commands_are_private_owner_only_and_ineligible_reply_is_free(self):
+        tree=ast.parse((ROOT/'bot.py').read_text(encoding='utf-8'))
+        nodes=[n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name in ('cmd_suspectseeding','cmd_suspectstatus','cmd_suspect')]
+        for node in nodes:node.decorator_list=[]
+        ns={'bot':None,'discord':discord,'OWNER_ID':999,'OWNER_REPORT_CHANNEL_ID':77,'db':db}
+        exec(compile(ast.Module(body=nodes,type_ignores=[]),'bot.py','exec'),ns)
+        ctx=types.SimpleNamespace(author=types.SimpleNamespace(id=999),guild=types.SimpleNamespace(id=1,default_role=None),
+            channel=types.SimpleNamespace(id=78,permissions_for=lambda role:types.SimpleNamespace(view_channel=False)),send=AsyncMock())
+        with patch.object(suspects,'release_seeding',new_callable=AsyncMock) as release:
+            await ns['cmd_suspectseeding'](ctx,self.draft_id,entries='1')
+            await ns['cmd_suspectstatus'](ctx,self.draft_id)
+            ctx.channel.id=77;ctx.author.id=100
+            await ns['cmd_suspectseeding'](ctx,self.draft_id,entries='1')
+            release.assert_not_awaited();ctx.send.assert_not_awaited()
+        ctx.author.id=100;ctx.channel.id=1566394824288894976
+        ctx.message=types.SimpleNamespace(id=777);ctx.reply=AsyncMock()
+        with patch.object(suspects,'guess',new_callable=AsyncMock,return_value={'status':'ineligible'}):
+            await ns['cmd_suspect'](ctx,types.SimpleNamespace(id=101),emoji=':Lakers:')
+        self.assertIn('No guess was used',ctx.reply.call_args.args[0])
+        self.assertNotIn('GM',ctx.reply.call_args.args[0])
+
+    async def test_release_rejects_early_wrong_guild_and_revealed_drafts(self):
+        with self.assertRaises(ValueError):
+            await suspects.release_seeding(None,self.draft_id,1,999,'1,2')
+        draft=self.playoff_fixture()
+        entries=','.join(str(i) for i in range(1,17))
+        with self.assertRaises(ValueError):await suspects.release_seeding(None,draft,999,999,entries)
+        state=db.get_draft(draft)['state'];state['identities_revealed']=True;db.set_draft_state(draft,state)
+        with self.assertRaises(ValueError):await suspects.release_seeding(None,draft,1,999,entries)
 
     async def test_reveal_closes_guesses_without_using_attempt(self):
         self.change_state(identities_revealed=True)
@@ -291,12 +352,12 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.guess(draft_id=partner, user=104, target=103))['status'], 'correct')
         self.assertEqual((await self.guess(draft_id=partner, user=106, target=102))['status'], 'caught')
 
-    async def test_partner_final_turns_finished_uses_odds(self):
+    async def test_partner_final_turns_finished_still_uses_wins(self):
         partner, _ = self.make_draft(mode='partner_draft')
         state = db.get_draft(partner)['state']
         state['turn_index'] = len(state['turns'])
         db.set_draft_state(partner, state)
-        self.assertEqual((await self.guess(draft_id=partner, target=102))['penalty_kind'], 'odds_percent')
+        self.assertEqual((await self.guess(draft_id=partner, target=102))['penalty_kind'], 'wins')
 
     async def test_channel_and_server_resolution_do_not_choose_wrong_draft(self):
         other, _ = self.make_draft(channel=20)
@@ -362,7 +423,7 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         ctx.author.id = 103
         target.id, target.mention = 102, '<@102>'
         await ns['cmd_suspect'](ctx, target, emoji='🦅')
-        self.assertIn('you lose 10% odds in your next matchup', ctx.reply.call_args.kwargs['embed'].description)
+        self.assertIn('you lose 5 wins', ctx.reply.call_args.kwargs['embed'].description)
 
     async def test_command_only_runs_in_suspect_and_private_channel_with_shared_attempts(self):
         tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))

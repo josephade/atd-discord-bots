@@ -167,6 +167,24 @@ def load_flux_rule_rows(source):
     return _client().open_by_key(source['sheet']).worksheet(source['tab']).get_all_values(value_render_option='FORMATTED_VALUE')
 
 
+def load_flux_report_data(source):
+    """Read prices and player-cell fills, scoped to the configured price tab."""
+    ws = _client().open_by_key(source['sheet']).worksheet(source['tab'])
+    rows = ws.get_all_values(value_render_option='FORMATTED_VALUE')
+    # Only Player-cell formatting matters: ADP heatmap colors do not mean taken.
+    player_col = next((i for i, value in enumerate(rows[0], 1)
+                       if str(value).strip().lower() in ('player', 'player name')), None) if rows else None
+    if player_col is None:
+        raise ValueError('The Flux sheet has no Player column.')
+    col = gspread.utils.rowcol_to_a1(1, player_col).rstrip('1')
+    tab = source['tab'].replace("'", "''")
+    metadata = ws.spreadsheet.fetch_sheet_metadata(params={
+        'ranges': [f"'{tab}'!{col}:{col}"],
+        'fields': 'sheets(data(rowData(values(formattedValue,effectiveFormat.backgroundColor))))',
+    })
+    return rows, metadata
+
+
 _ROUND_COL_RE = re.compile(r'^round\s+(\d+)$', re.IGNORECASE)
 
 

@@ -146,6 +146,7 @@ def _persist_channel_map():
 def _set_channel_sheet(channel_id: int, tab: str, spreadsheet_id: str = None):
     _channel_sheet_map[channel_id] = {
         "tab": tab,
+        "linked_at": datetime.utcnow().isoformat(),
         "sheet_id": spreadsheet_id or SPREADSHEET_ID,
     }
     _channel_managers.pop(channel_id, None)
@@ -1219,6 +1220,9 @@ async def on_ready():
         ch = bot.get_channel(ch_id)
         ch_name = f"#{ch.name}" if ch else str(ch_id)
         print(f"📋 {ch_name} → '{entry['tab']}' (sheet: {entry['sheet_id']}) — will connect on first use")
+    import restart_recovery
+    recovered = await restart_recovery.recover_recent(bot, _channel_sheet_map, _get_manager_async, parse_message, _log_audit, _SILENT_PICK_ERROR_CHANNELS, require_price=PRICE_REQUIRED)
+    print(f'[Recovery] Confirmed {recovered} recent Theme picks after reconnect.')
 
 
 def _ensure_private_admin_sheet():
@@ -1340,6 +1344,11 @@ async def on_message(message):
     _from_trusted_bot = message.author.id in TRUSTED_BOT_IDS
     if message.author.bot and not _from_trusted_bot:
         return
+    # Private owner confirmations are status messages, never another pick.
+    # Only the separate numbered public announcement should write the roster.
+    if _from_trusted_bot and (not message.content.strip() or
+            re.match(r'^\s*Recorded\s+pick\s*#\d+\s+for\b', message.content, re.I)):
+        return
     if _from_trusted_bot and re.fullmatch(r'\s*\d+\.\s+.+?\s+skipped\s*', message.content, re.I):
         return
 
@@ -1440,6 +1449,7 @@ async def on_message(message):
         _log_audit({
             "timestamp": datetime.utcnow().isoformat(),
             "channel_id": message.channel.id,
+            "source_message_id": message.id,
             "user_id": message.author.id,
             "user_name": message.author.display_name,
             "player": data['player'],
