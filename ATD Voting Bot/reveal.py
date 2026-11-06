@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from votes import normalize, resolve_member
 
 
-def standings(rows):
+def standings(rows, allow_negative_wins=False):
     tables = []
     for index, row in enumerate(rows):
         for col, value in enumerate(row):
@@ -25,8 +25,10 @@ def standings(rows):
             w, l = Decimal(wins), Decimal(losses)
         except InvalidOperation:
             raise ValueError(f'Final standings for {team or "an unnamed team"} have missing or invalid wins/losses.') from None
-        if not team or not w.is_finite() or not l.is_finite() or w < 0 or l < 0:
+        if not team or not w.is_finite() or not l.is_finite() or l < 0 or (w < 0 and not allow_negative_wins):
             raise ValueError('Final standings contain an invalid team or record.')
+        if w < 0 and w + l != 82:
+            raise ValueError(f'{team}: negative wins must retain an 82-game season total in the sheet.')
         if normalize(team) in seen:
             raise ValueError(f'Duplicate standings entry for {team}.')
         seen.add(normalize(team))
@@ -41,7 +43,7 @@ def standings(rows):
 def record_text(row):
     # Keep displayed records consistent with the formula's season total.
     wins, losses = Decimal(row['wins']), Decimal(row['losses'])
-    w = int(wins.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+    w = max(0, int(wins.quantize(Decimal('1'), rounding=ROUND_HALF_UP)))
     total = wins+losses
     l = int(total)-w if total == total.to_integral_value() else int(losses.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
     return f'{w}-{l}'
@@ -72,7 +74,7 @@ def gm_ids(row, members, aliases, explicit=()):
 
 
 def comparison(current, previous, user_id):
-    delta = Decimal(current['wins'])-Decimal(previous['wins'])
+    delta = max(Decimal(0), Decimal(current['wins']))-max(Decimal(0), Decimal(previous['wins']))
     amount = format(abs(delta).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP), 'f').removesuffix('.0')
     change = f'improved by {amount}' if delta > 0 else f'decreased by {amount}' if delta < 0 else 'unchanged at the same number of'
     return f"<@{user_id}>: {change} wins compared with ATD {previous['draft']} (formula values)."

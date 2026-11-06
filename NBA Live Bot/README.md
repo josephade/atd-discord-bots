@@ -12,7 +12,9 @@ npm.cmd ci
 Copy-Item .env.example .env
 ```
 
-Set `DISCORD_TOKEN` in `.env` to the token for a new Discord application/bot. Enable **Message Content Intent** in the Discord Developer Portal. Invite it with **View Channels**, **Send Messages**, **Read Message History**, and **Attach Files** permissions. Optionally set `GUILD_ID` and `ALLOWED_CHANNEL_IDS` to limit access. Then:
+Set `DISCORD_TOKEN` in `.env` to the token for a new Discord application/bot. Enable **Message Content Intent** in the Discord Developer Portal. Under **Installation > Guild Install**, select the `bot` and `applications.commands` scopes with **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**, and **Send Messages in Threads** permissions. Selecting only `applications.commands` will not add this prefix-command bot to a server. The bot supports public server installs by default. `GUILD_ID` identifies your home server; `ALLOWED_CHANNEL_IDS` limits channels there (including their threads). Set `RESTRICT_TO_GUILD=true` explicitly to disable other servers. Without `GUILD_ID`, the channel allowlist applies globally.
+
+[NBA Live Bot server invite](https://discord.com/oauth2/authorize?client_id=1562215914831749161&scope=bot%20applications.commands&permissions=274878024704&integration_type=0). The installer needs Manage Server permission. Then:
 
 ```powershell
 npm.cmd start
@@ -31,7 +33,7 @@ npm.cmd start
 | `!nba picks Lakers` | 2027-2030 draft ownership, both rounds, protections and swaps |
 | `!nba pick :lakers:` | Same report; typed/custom team emojis, names and ESPN abbreviations work |
 | `!nba boxscores 2026-10-26` | Game selector for a specific NBA date; short dates such as `26/Oct/2026` also work |
-| `!nba Paul George` | Current NBA slate, or latest played game if his team has no game on that slate |
+| `!nba Paul George` | Live or finished game on the current NBA slate; otherwise the latest played game until tip-off |
 | `!nba Paul George 2025-10-22` | Game on a specific NBA date |
 | `!nba Jalen Duren 26/Dec` | Game on the most recent 26 December |
 | `!nba Jalen Duren 26/Dec/2025` | Game on 26 December 2025 |
@@ -48,7 +50,7 @@ Misspellings such as `!nba Ty Jermone` offer a **Did you mean Ty Jerome?** confi
 
 Dates accept `YYYY-MM-DD`, `26/Dec`, and `26/Dec/2025` (month abbreviations ignore case). Without a year, the date resolves to its most recent occurrence using the NBA's New York calendar date. The resolved full date appears on the card or suggestion. Invalid dates are rejected.
 
-If the player has no recorded appearance on the requested date (including DNP), the bot searches their available season game logs for the closest recorded appearance. Equal distances prefer the earlier game. It asks whether to show that box score with **Yes** / **No thanks** buttons. Only the requester can choose; the buttons expire after 60 seconds. No alternative card loads until Yes is clicked. All-Star exhibitions are excluded from suggestions. Missing provider data is reported as a feed error rather than treated as a DNP. Without a date, the bot uses the current slate; if the team has no game there, it shows the latest recorded appearance (including before a trade), labelled with the actual game date and “Latest played game”. Future appearances are excluded from this fallback.
+If the player has no recorded appearance on the requested date (including DNP), the bot searches their available season game logs for the closest recorded appearance. Equal distances prefer the earlier game. It asks whether to show that box score with **Yes** / **No thanks** buttons. Only the requester can choose; the buttons expire after 60 seconds. No alternative card loads until Yes is clicked. All-Star exhibitions are excluded from suggestions. Missing provider data is reported as a feed error rather than treated as a DNP. Without a date, the bot prefers a live or finished team game on the current slate. Until the next game goes live, it shows the latest recorded appearance (including before a trade), labelled with the actual game date and “Latest played game”. Future appearances are excluded from this fallback.
 
 One watch per user per channel, with 20 total by default. Starting another replaces the previous watch. Watches stay attached to their original game across midnight, end after final/cancellation or eight hours, and clear on restart. A failed refresh marks the existing message as delayed; five failures stop it. `REFRESH_SECONDS` has a minimum of 30. Large numbers of watched cards can take longer than one refresh interval because image rendering is queued.
 
@@ -125,3 +127,7 @@ fly status --app nba-live-bot
 ```
 
 Keep only one bot instance running. Stop your local `npm.cmd start` process with Ctrl+C when using the Fly deployment, to prevent duplicate replies. Watches are held in memory and clear on redeployment or restart. This bot does not require a persistent volume.
+
+Upcoming games in `!nba games`, `!nba boxscores`, and `!nba schedule <team>` include Discord countdown timestamps beside the image. They update automatically in Discord; hover on desktop or tap on mobile for tip-off in your local timezone. Delayed games and games awaiting tip-off do not show a misleading countdown.
+
+Countdown matchups include all 30 NBA team logos as application-owned emojis. `team_emojis.json` stores their public Discord IDs; `artifacts/seed-nba-team-emojis.py` can safely reuse existing emoji names when refreshing the registry.

@@ -18,6 +18,72 @@ def option(name, price=5, year=''):
 
 
 class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_duo_proposal_creates_main_clock_before_returning(self):
+        import timer_bridge
+        db.set_draft_status(self.draft,'active')
+        state = db.get_draft(self.draft)['state']
+        state['teams'][0].update(member_ids=[self.a,self.b],open_picks=[],timer_pick_number=None,timer_deadline=None)
+        db.set_draft_state(self.draft,state)
+        db.update_drafter_state(self.a,{'queued_pick':dict(player='Michael Jordan',year='91',price=5)})
+        ctx = DraftContext(self.bot,self.draft)
+        await self.theme._open_pick_for_team(ctx,0,1)
+        team = ctx.state['teams'][0]
+        self.assertEqual(team['timer_pick_number'],1)
+        self.assertIsNotNone(team['timer_deadline'])
+        entry = team['open_picks'][0]
+        self.assertEqual(entry['proposal']['player'],'Michael Jordan')
+        self.assertLessEqual(entry['proposal_deadline'],team['timer_deadline'])
+        current = timer_bridge.snapshot(db.get_draft(self.draft))['current']
+        self.assertEqual(current['pick'],1)
+        self.assertIsNotNone(current['deadline'])
+
+    async def test_restart_repairs_orphaned_duo_proposal_without_resetting_agreement_time(self):
+        import time
+        db.set_draft_status(self.draft,'active')
+        state = db.get_draft(self.draft)['state']
+        deadline = time.time()+300
+        state['teams'][0].update(member_ids=[self.a,self.b],timer_pick_number=None,timer_deadline=None)
+        entry = state['teams'][0]['open_picks'][0]
+        entry.update(proposal=dict(player='Michael Jordan',year='91',price=5,by=self.a),pending_from=[self.b],proposal_deadline=deadline)
+        db.set_draft_state(self.draft,state)
+        ctx = DraftContext(self.bot,self.draft)
+        await self.theme.resume_timers(ctx)
+        team = ctx.state['teams'][0]
+        self.assertEqual(team['timer_pick_number'],1)
+        # Five minutes of the 60-minute first-round clock have already elapsed.
+        self.assertAlmostEqual(team['timer_deadline']-time.time(),55*60,delta=1)
+        self.assertAlmostEqual(team['open_picks'][0]['proposal_deadline'],deadline,delta=1)
+        self.assertEqual(team['open_picks'][0]['proposal']['player'],'Michael Jordan')
+
+    async def test_verified_negative_pick_credits_budget_and_rejects_wrong_price(self):
+        self.price_patch.stop()
+        state = db.get_draft(self.draft)['state']
+        state['teams'][0]['budget_spent'] = 0
+        state['flux_price_source'] = dict(sheet='test-sheet-id',tab='Prices')
+        db.set_draft_state(self.draft,state)
+        db.set_draft_status(self.draft,'active')
+        ctx = DraftContext(self.bot,self.draft)
+        with patch.object(anon_lists.sheets,'load_flux_rule_rows',create=True,return_value=[['Player','Value'],['Nene',-1]]):
+            self.assertIn('costs $-1',await self.theme.on_pick(ctx,db.get_drafter(self.a),'Nene $-2'))
+            self.assertEqual(ctx.state['teams'][0]['budget_spent'],0)
+            await self.theme.on_pick(ctx,db.get_drafter(self.a),'Nene $-1')
+        self.assertEqual(ctx.state['teams'][0]['budget_spent'],-1)
+        self.assertEqual(db.get_picks(self.draft,self.a),['Nene'])
+        self.assertIn('$-1',self.channel.send.call_args.args[0])
+        self.assertEqual(anon_lists.validate([option('Nene',-1)])[0]['price'],-1)
+
+    async def test_three_skip_penalties_immediately_skip_round_seven_without_starting_a_clock(self):
+        state = db.get_draft(self.draft)['state']
+        state.update(live_pick_number=7,flux_ready_round=7,timers_off=True)
+        state['teams'][0].update(skip_count=3, open_picks=[], timer_pick_number=None)
+        db.set_draft_state(self.draft,state)
+        with patch.object(self.theme,'_skip_locked',new_callable=AsyncMock) as skip, patch.object(self.theme,'_start_team_timer') as start:
+            await self.theme._open_pick_for_team(DraftContext(self.bot,self.draft),0,7)
+        skip.assert_awaited_once()
+        self.assertIn('no time',skip.call_args.args[-1])
+        start.assert_not_called()
+        self.bot.get_user.assert_not_called()
+
     async def test_theme_publishes_exact_clock_card_once_then_reposts_changed_turn(self):
         import clock_presenter
         self.channel.get_partial_message = Mock(return_value=SimpleNamespace(delete=AsyncMock()))
@@ -389,10 +455,10 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Lotto number: **1**', dm.call_args_list[0].args[1])
         self.assertIn('SECOND-IN-DB-FIRST-IN-LOTTO', dm.call_args_list[0].args[1])
         self.assertIn('Lotto number: **2**', dm.call_args_list[1].args[1])
-    async def test_partner_response_window_is_twenty_minutes_without_extending_pick_clock(self):
+    async def test_partner_response_window_is_ten_minutes_without_extending_pick_clock(self):
         import time
         ctx = DraftContext(self.bot, self.draft)
-        for remaining, expected in ((1800, 20), (180, 3)):
+        for remaining, expected in ((1800, 10), (180, 3)):
             with self.subTest(remaining=remaining):
                 state = ctx.state
                 state['teams'][0].update(member_ids=[self.a, self.b], timer_deadline=time.time()+remaining)
@@ -400,7 +466,7 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
                 ctx.save_state(state)
                 with patch.object(_proposal_timer, 'start') as start:
                     reply = await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Michael Jordan $5')
-                self.assertIn('up to 20 min', reply)
+                self.assertIn('up to 10 min', reply)
                 self.assertIn('original pick clock keeps running', reply)
                 self.assertAlmostEqual(start.call_args.args[1], expected, delta=0.05)
                 self.assertEqual(ctx.state['teams'][0]['timer_deadline'], deadline)
@@ -433,7 +499,7 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
         ctx.save_state(state)
         with patch.object(_proposal_timer, 'start') as start:
             await self.theme.on_pick(ctx, db.get_drafter(self.a), 'Michael Jordan $5')
-        self.assertAlmostEqual(start.call_args.args[1], 20, delta=0.05)
+        self.assertAlmostEqual(start.call_args.args[1], 10, delta=0.05)
         state = ctx.state
         state['teams'][0]['open_picks'][0]['proposal_deadline'] = time.time()-1
         ctx.save_state(state)
@@ -504,6 +570,9 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
         state = db.get_draft(self.draft)['state']; state['teams'][0]['member_ids'] = [self.a, self.b]
         db.set_draft_state(self.draft, state)
         roster = await anon_lists.roster(self.draft, config.OWNER_ID, 10, action='enable')
+        self.assertEqual(roster['draft']['id'],self.draft)
+        self.assertEqual(roster['members'][0]['logo'],db.get_draft(self.draft)['state']['teams'][0]['logo'])
+        self.assertIn('display_name',roster['members'][0])
         self.assertEqual([m['user_id'] for m in roster['members']], ['100', '101'])
         with self.assertRaises(ValueError): await anon_lists.roster(self.draft, -1, 10, action='enable')
 
@@ -718,6 +787,46 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(anon_lists.sheets, 'load_flux_rule_rows', create=True, return_value=rows):
                 self.assertIn('could not verify', await self.theme.validate_round_price(ctx, 'LeBron James', 50, entry=entry))
 
+    async def test_round_three_makeup_after_flux_uses_round_one_peak(self):
+        self.price_patch.stop()
+        state = db.get_draft(self.draft)['state']
+        count = len(state['teams'])
+        state.update(live_pick_number=3*count+1, flux_price_source=dict(sheet='test-sheet-id', tab='Prices'))
+        entry = dict(pick_number=2*count+1, skipped=True)
+        db.set_draft_state(self.draft, state)
+        ctx = DraftContext(self.bot, self.draft)
+        rows = [['Player', 'Value', 'Round 2', 'Round 3', 'Round 4', 'Round 5'],
+                ['LeBron James', 10, 7, 5, 5, 99]]
+        with patch.object(anon_lists.sheets, 'load_flux_rule_rows', create=True, return_value=rows):
+            self.assertIsNone(await self.theme.validate_round_price(ctx, 'LeBron James', 10, entry=entry))
+            error = await self.theme.validate_round_price(ctx, 'LeBron James', 5, entry=entry)
+            self.assertIn('costs $10 in Rounds 1', error)
+            # A normal Round 4 turn still uses the current $5 price.
+            self.assertIsNone(await self.theme.validate_round_price(ctx, 'LeBron James', 5))
+            # Before Round 4 Flux, making up Round 3 still costs Round 3's $5.
+            state['flux_wait'] = {'round': 4}
+            db.set_draft_state(self.draft, state)
+            self.assertIsNone(await self.theme.validate_round_price(ctx, 'LeBron James', 5, entry=entry))
+        state.pop('flux_wait')
+        db.set_draft_state(self.draft, state)
+        with patch.object(anon_lists.sheets, 'load_flux_rule_rows', create=True,
+                          return_value=[['Player', 'Round 2', 'Round 3', 'Round 4'], ['LeBron James', 7, 5, 5]]):
+            self.assertIn('could not verify', await self.theme.validate_round_price(ctx, 'LeBron James', 5, entry=entry))
+
+    async def test_off_adp_pick_records_zero_without_spending_budget(self):
+        self.price_patch.stop()
+        state = db.get_draft(self.draft)['state']
+        state['flux_price_source'] = dict(sheet='test-sheet-id', tab='Prices')
+        db.set_draft_state(self.draft, state)
+        db.set_draft_status(self.draft, 'active')
+        with patch.object(anon_lists.sheets, 'load_flux_rule_rows', create=True,
+                          return_value=[['Player', 'Value'], ['Michael Jordan', 44]]):
+            await self.theme.on_pick(DraftContext(self.bot, self.draft), db.get_drafter(self.a),
+                                     'Unlisted Player $0')
+        self.assertEqual(db.get_draft(self.draft)['state']['teams'][0]['budget_spent'], 90)
+        self.assertIn('Unlisted Player', db.get_picks(self.draft, self.a))
+        self.assertIn('Unlisted Player $0', self.channel.send.call_args.args[0])
+
     async def test_ordinary_round_pick_uses_current_price_and_running_flux_blocks_makeup(self):
         self.price_patch.stop()
         state = db.get_draft(self.draft)['state']
@@ -764,7 +873,7 @@ class AnonymousListTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_lists_do_not_replace_previous_list(self):
         original = await self.upload([option('Safe')])
-        for bad in (None, -1, float('nan'), float('inf')):
+        for bad in (None, float('nan'), float('inf')):
             with self.assertRaises(ValueError):
                 await self.upload([option('Bad', bad)], version='bad', revision=original['revision'])
         self.assertEqual(db.get_drafter(self.a)['state']['draftlist_queue']['picks'][0]['player'], 'Safe')

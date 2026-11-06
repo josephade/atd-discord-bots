@@ -11,10 +11,13 @@ def key(value):
 
 def amount(value):
     try:
-        number = Decimal(str(value).strip().replace('$', '').replace(',', ''))
+        text = str(value).strip().replace('\u2212', '-').replace('\uff0d', '-').replace('$', '').replace(',', '')
+        if text.startswith('(') and text.endswith(')'):
+            text = '-' + text[1:-1]
+        number = Decimal(text)
     except InvalidOperation:
         return None
-    return number if number.is_finite() and number >= 0 else None
+    return number if number.is_finite() else None
 
 
 def parse_prices(rows, round_number=None):
@@ -71,7 +74,7 @@ def find_player(book, name):
 
 def threshold(value):
     result = amount(value)
-    if result is None:
+    if result is None or result < 0:
         raise ValueError('Drop amount must be a finite, non-negative number. Example: !fluxpick Devin Booker 3')
     return float(result)
 
@@ -87,7 +90,7 @@ def qualify(pick, book):
     if pick.get('flux_target_round') is not None and record['round'] != pick['flux_target_round']:
         return None
     drop = amount(pick['flux_drop'])
-    if current is None or previous is None or drop is None or previous-current < drop:
+    if current is None or previous is None or drop is None or drop < 0 or previous-current < drop:
         return None
     price = int(current) if current == current.to_integral_value() else float(current)
     return dict(pick, player=record['player'], price=price)

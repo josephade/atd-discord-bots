@@ -10,6 +10,7 @@
 !games.js
 !games_layout.js
 !boxscores.js
+!boxscore_overview.js
 !injuries.js
 !render.js
 !suggestions.js

@@ -25,6 +25,13 @@ def namespace():
 
 
 class DefaultYearTests(unittest.TestCase):
+    def test_signed_currency_prices_keep_names_years_and_fractional_amounts(self):
+        for price in ('$-1', '-$1', '\u2212$1'):
+            pick = namespace()['_parse_pick_line']('Nene '+price)
+            self.assertEqual(pick['player'],'Nene')
+            self.assertEqual(pick['price'],-1)
+        self.assertEqual(namespace()['_parse_pick_line']('Nene $-0.75')['price'],-.75)
+
     def setUp(self):
         self.ns = namespace()
 

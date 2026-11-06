@@ -12,6 +12,37 @@ def snapshot(picks=None, revision=1):
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_alllists_uses_live_current_draft_teams_without_mutating_saved_lists(self):
+        self.client.owner=100
+        self.data['100']['anon_draft_id']=30
+        before=copy.deepcopy(self.data)
+        self.client.request.return_value={'draft':{'id':30,'name':'ATD 114 - Anon Budget'},'members':[
+            dict(user_id='100',display_name='Current GM',logo=':CurrentTeam:',**snapshot([dict(player='Live player',price=12)]))]}
+        self.assertTrue(await self.client.alllists(self.ctx))
+        self.client.request.assert_awaited_once_with(100,30,endpoint='picklist-members')
+        embed=self.ctx.send.call_args.kwargs['embeds'][0]
+        payload=str(embed.to_dict())
+        self.assertIn('CurrentTeam',payload);self.assertIn('Live player',payload);self.assertIn('ATD 114',payload)
+        self.assertNotIn('OLD',payload);self.assertNotIn('Old normal pick',payload)
+        self.assertEqual(self.data,before);self.save.assert_not_called()
+
+    async def test_alllists_keeps_anonymous_reports_in_owner_dm_or_private_channel(self):
+        self.client.owner=100;self.data['100']['anon_draft_id']=30
+        self.ctx.author.id=999
+        self.assertTrue(await self.client.alllists(self.ctx))
+        self.ctx.send.assert_not_awaited();self.client.request.assert_not_awaited()
+        self.ctx.author.id=100;self.ctx.guild=SimpleNamespace(default_role=object())
+        self.ctx.channel=SimpleNamespace(id=934052158532378634)
+        self.assertTrue(await self.client.alllists(self.ctx))
+        self.client.request.assert_not_awaited()
+        self.assertNotIn('embeds',self.ctx.send.call_args.kwargs)
+
+    async def test_alllists_fails_closed_without_current_metadata(self):
+        self.client.owner=100;self.data['100']['anon_draft_id']=30
+        self.client.request.return_value={'members':[dict(user_id='100',**snapshot())]}
+        with self.assertRaises(BridgeError):await self.client.alllists(self.ctx)
+        self.ctx.send.assert_not_awaited()
+
     async def test_private_owner_steal_report_does_not_trigger_draft_list_sbl_reply(self):
         self.client.owner=100
         self.ctx.guild=object()

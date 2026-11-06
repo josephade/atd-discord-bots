@@ -173,9 +173,13 @@ are checked again every five minutes. Closed DMs require an explicit retry.
   Revealed GMs receive a ping; roles and everyone mentions remain disabled.
   The channel's DM reminder is deleted after a choice or cancellation.
 - Both reveal modes add an NBA historical comparison using the displayed
-  rounded record: a roast below 30 wins, encouragement around .500, and elite
+  rounded record: a challenge for losing teams, encouragement around .500, and elite
   praise at 50+ wins. Exact win-loss matches take priority. Unmatched records
   explicitly say "Closest historical comparison" and show the real NBA record.
+  Historical team-seasons and reactions are distinct across the draft. Assignments
+  use all standings for consistent individual and bulk reveals; if unused exact
+  matches run out, the nearest unused season is clearly labelled. Corrected
+  standings can change the assignments on a subsequent reveal.
   Historical links are included. The bundled `nba_records.json` uses completed
   82-game regular seasons from ESPN standings and NBA historical sources;
   shortened seasons are excluded. Comparisons require no runtime network call.

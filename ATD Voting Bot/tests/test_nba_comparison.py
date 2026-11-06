@@ -1,9 +1,45 @@
 import unittest
 
-from nba_comparison import historical_comparison, RECORDS
+from nba_comparison import historical_comparison, comparisons_for_standings, record_reaction, RECORDS
 
 
 class HistoricalComparisonTests(unittest.TestCase):
+    def test_reactions_describe_the_actual_record_and_seed(self):
+        for wins in (0, 22, 40, 41, 46, 50, 73):
+            row = dict(self.row(wins), seed=19)
+            for index in range(8):
+                text = record_reaction(row, index)
+                self.assertIn('19th seed', text)
+                self.assertTrue(str(wins) in text or f'{abs(2*wins-82)} more' in text)
+                self.assertNotIn('motivation for the next draft', text)
+                self.assertNotIn('uncomfortable questions', text)
+        losing = record_reaction(dict(self.row(22), seed=29))
+        self.assertIn('22-60', losing)
+        self.assertIn('19 more wins', losing)
+        winning = record_reaction(dict(self.row(46), seed=11))
+        self.assertIn('4 wins short of 50', winning)
+
+    def test_full_draft_has_unique_historical_seasons_and_reactions(self):
+        import re
+        rows = [dict(self.row(53), seed=i, team=f'Team {i}') for i in range(1, 33)]
+        notes = comparisons_for_standings(rows)
+        self.assertEqual(len(set(notes.values())), 32)
+        self.assertEqual(len({re.search(r'\[([^]]+)\]', n)[1] for n in notes.values()}), 32)
+        self.assertEqual(len({n.split('). ', 1)[1] for n in notes.values()}), 32)
+        for note in notes.values():
+            if 'Same record' in note:
+                self.assertIn('(53-29)', note)
+        self.assertEqual(notes, comparisons_for_standings(list(reversed(rows))))
+
+    def test_rare_records_do_not_repeat_or_claim_false_exact_match(self):
+        rows = [dict(self.row(9), seed=i, team=f'Team {i}') for i in range(1, 4)]
+        notes = comparisons_for_standings(rows)
+        self.assertIn('Same record', notes[1])
+        self.assertIn('(9-73)', notes[1])
+        self.assertIn('Closest historical comparison', notes[2])
+        self.assertNotIn('Same record', notes[2])
+        self.assertEqual(len(set(notes.values())), 3)
+
     def row(self, wins, losses=None):
         return dict(wins=str(wins), losses=str(82-wins if losses is None else losses))
 

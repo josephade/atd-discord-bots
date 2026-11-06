@@ -15,6 +15,8 @@ _runner = None
 
 def snapshot(draft):
     state = draft['state']
+    now=time.time()
+    settings = themes.get_theme(draft['theme'])._settings(DraftContext(None, draft['id']))
     mode = MODES[draft['theme']]
     clocks = []
     current = None
@@ -38,25 +40,26 @@ def snapshot(draft):
                 clock = {'token': f'a:{i}:{pick}', 'deadline': deadline,
                          'round': (pick - 1) // max(1, len(state['teams'])) + 1,
                          'pick': pick, 'logo': team['logo']}
+                clock['timer_minutes']=anon_clock.minutes(settings,pick,len(state['teams']),team.get('skip_count',0))
+                clock.update(anon_clock.clock_details(deadline,settings,now))
                 if deadline is not None:
                     clocks.append(clock)
                 if pick == state.get('live_pick_number'):
                     current = clock
         rounds = draft['settings'].get('rounds', 10)
     waiting = state.get('flux_wait', {}).get('round')
-    settings = themes.get_theme(draft['theme'])._settings(DraftContext(None, draft['id']))
-    clock_running = (anon_clock.running(state, settings, time.time()) if mode == 'anon' else True)
+    clock_running = (anon_clock.running(state, settings, now) if mode == 'anon' else True)
     finished = themes.get_theme(draft['theme']).is_pick_phase_complete(DraftContext(None, draft['id']))
     scheduled_remaining = (state.get('turn_index', 0) < len(state.get('turns', [])) if mode == 'partner'
                            else state.get('live_pick_number') is not None)
     return {'draft_id': draft['id'], 'mode': mode, 'status': draft['status'],
             'presenter': 'theme' if mode == 'anon' else 'timer',
             'rounds': rounds, 'current': None if waiting else current,
-            'window_notice': anon_clock.window_info(draft),
+            'window_notice': anon_clock.window_info(draft,now),
             'window_delivery_complete': state.get('theme_window_delivery', {}).get('key') if state.get('theme_window_delivery', {}).get('complete') else None,
             'waiting_for_flux': waiting,
             'timers_off': bool(state.get('timers_off')),
-            'window_closed': mode == 'anon' and settings.get('timer_window_et', True) and not anon_clock.in_window(time.time()),
+            'window_closed': mode == 'anon' and settings.get('timer_window_et', True) and not anon_clock.in_window(now),
             'announcement_revision': state.get('announcement_revision', 0),
             'transitioning': bool(draft['status'] == 'active' and scheduled_remaining and not current and not waiting and not finished),
             'clocks': clocks if draft['status'] == 'active' and not waiting and clock_running else [],
@@ -200,6 +203,8 @@ def create_app(bot, key):
 
 async def start(bot):
     global _runner
+    import voting_ledger
+    await voting_ledger.start()
     key = os.getenv('THEME_BRIDGE_KEY', '')
     if _runner or not key:
         return

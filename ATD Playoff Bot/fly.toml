@@ -1,0 +1,21 @@
+app = "atd-playoff-bot"
+primary_region = "ewr"
+
+[deploy]
+  strategy = "immediate"
+
+[env]
+  STATE_DIR = "/data"
+  OWNER_ID = "681833601830354944"
+  PRIVATE_CHANNEL_ID = "1533242104304631969"
+  BACKUP_ADMIN_CHANNEL_ID = "939947875805302784"
+  PUBLIC_CHANNEL_IDS = "934054991965077564"
+
+[[mounts]]
+  source = "atd_playoff_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

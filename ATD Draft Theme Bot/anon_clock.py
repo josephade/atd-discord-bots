@@ -40,9 +40,37 @@ def minutes(settings, pick, team_count, skips):
     round_number = (pick-1)//max(1, team_count)+1
     base = settings['base_timer_minutes']
     if settings.get('round_timer_schedule', True):
-        base = 60 if round_number <= 2 else 45 if round_number <= 8 else 30
+        base = 60 if round_number <= 2 else 45 if round_number <= 6 else 30
     deduction = 10 if settings.get('round_timer_schedule', True) else settings['decay_minutes']
     return max(settings.get('floor_minutes', 0), base-deduction*skips)
+
+
+def migrate_round_seven_clock(ctx, timestamp):
+    """Apply the new allowance once, subtracting the reduction from remaining time."""
+    state = ctx.state
+    settings = ctx.draft['settings']
+    if state.get('late_round_clock_policy') == 2 or not settings.get('round_timer_schedule', True):
+        return
+    teams = state.get('teams', [])
+    live = state.get('live_pick_number')
+    round_number = (live-1)//max(1, len(teams))+1 if live else 0
+    if round_number in (7, 8):
+        for team in teams:
+            if team.get('timer_pick_number') != live:
+                continue
+            skips = team.get('skip_count', 0)
+            old_allowance = max(settings.get('floor_minutes', 0), 45-10*skips)
+            reduction = max(0, old_allowance-minutes(settings, live, len(teams), skips))*60
+            if team.get('timer_deadline') is not None:
+                left = max(0, remaining(team['timer_deadline'], timestamp, settings)-reduction)
+                team['timer_deadline'] = deadline(timestamp, left, settings)
+            elif 'paused_timer_seconds' in team:
+                team['paused_timer_seconds'] = max(0, team['paused_timer_seconds']-reduction)
+            for entry in team.get('open_picks', []):
+                if entry.get('pick_number') == live and entry.get('proposal_deadline') is not None and team.get('timer_deadline') is not None:
+                    entry['proposal_deadline'] = min(entry['proposal_deadline'], team['timer_deadline'])
+    state['late_round_clock_policy'] = 2
+    ctx.save_state(state)
 
 
 def deadline(timestamp, seconds, settings):
@@ -51,6 +79,30 @@ def deadline(timestamp, seconds, settings):
 
 def remaining(deadline_value, timestamp, settings):
     return seconds_left(deadline_value, timestamp) if settings.get('timer_window_et', True) else max(0, deadline_value-timestamp)
+
+
+def et_text(timestamp):
+    local=datetime.fromtimestamp(timestamp,ET)
+    return (f"{local.strftime('%a')} {local.day} {local.strftime('%b')}, "
+            f"{local.hour%12 or 12}:{local.minute:02d} {'AM' if local.hour<12 else 'PM'} {local.tzname()}")
+
+
+def clock_details(deadline_value,settings,timestamp):
+    """Separate active clock time from an overnight wall-clock deadline.
+
+    All returned fields stay stable within a window, so the presenter does
+    not repost a card every second just because time is passing.
+    """
+    if deadline_value is None or not settings.get('timer_window_et',True):
+        return {}
+    local=datetime.fromtimestamp(timestamp,ET)
+    closing=datetime.combine(local.date()+timedelta(days=1),time(),ET).timestamp()
+    result={'deadline_et':et_text(deadline_value)}
+    if not in_window(timestamp):
+        result['paused_seconds']=remaining(deadline_value,timestamp,settings)
+    elif deadline_value>closing:
+        result['overnight_pause']=True
+    return result
 
 
 def running(state, settings, timestamp):
@@ -141,7 +193,7 @@ def window_info(draft, timestamp=None):
     elif manual:
         text = '**Timer hours are OPEN - 10:00 AM ET**\nTimers remain OFF until the commissioner enables them. You can still pick.'
     else:
-        text = ('**Timers are back ON - 10:00 AM ET**\nCountdowns resume with saved remaining time.\n'
+        text = ('**Timer hours are OPEN: 10:00 AM to midnight ET**\n'
                 f'Next closure: **midnight ET** (<t:{closing}:F>).')
     return dict(key=key, text=text, opened=opened)
 

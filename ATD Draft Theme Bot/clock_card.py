@@ -1,5 +1,11 @@
 """Anonymous clock card shared by the presenter bots."""
 import discord
+import math
+
+
+def active_duration(seconds):
+    minutes,seconds=divmod(max(0,math.ceil(seconds)),60)
+    return f'{minutes}m {seconds}s'
 
 
 def clock_embed(data):
@@ -23,6 +29,14 @@ def clock_embed(data):
                   'Timer hours are closed. Countdown resumes at **10am ET**; picks can still be submitted.' if data.get('window_closed') else
                   'Restoring the current clock.' if current.get('deadline') is None else
                   f'Turn expires <t:{int(current["deadline"])}:R>.')
+        if not data.get('timers_off') and current.get('deadline') is not None:
+            if data.get('window_closed') and 'paused_seconds' in current:
+                timing=(f"Timer paused until **10:00 AM ET**. **Active time saved: {active_duration(current['paused_seconds'])}.**\n"
+                        f"Pick deadline: **{current['deadline_et']}**.")
+            elif current.get('overnight_pause'):
+                timing=(f"**Active timer allowance: {current['timer_minutes']:g} minutes.**\n"
+                        '**Overnight pause: midnight to 10:00 AM ET** (no timer time used).\n'
+                        f"Pick deadline after the pause: **{current['deadline_et']}**.")
         text = (f'{current["logo"]} **is on the clock!**\n\n**Round {current["round"]} of {data["rounds"]}{pick_note}**\n'
                 f'{timing}\n'
                 'Submit your pick/list privately to ATD Draft Theme Bot.')

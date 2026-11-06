@@ -83,3 +83,37 @@ async def execute(ctx, bot, text, replace=False):
         await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
     except ValueError as exc:
         await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
+
+
+async def remove(ctx, text):
+    if ctx.author.id != OWNER_ID:
+        return
+    if not ctx.guild or ctx.channel.id != OWNER_REPORT_CHANNEL_ID:
+        await ctx.send(f'Use this command only in <#{OWNER_REPORT_CHANNEL_ID}>.')
+        return
+    if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        await ctx.send('Hide this channel from @everyone before editing secret GM assignments.')
+        return
+    try:
+        parts = text.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            raise ValueError('Usage: `!anonremovegm <draft ID> @LeavingGM`. The team must have another GM.')
+        draft_id, leaving = int(parts[0]), user_id(parts[1])
+        async with draft_lock(draft_id):
+            draft = db.get_draft(draft_id)
+            if not draft or draft['guild_id'] != ctx.guild.id:
+                raise ValueError('Choose a draft in this server.')
+            result = db.remove_anonymous_member(draft_id, draft['state'], leaving, ctx.author.id)
+            if result['cleared_proposal']:
+                from themes.anon_draft import _proposal_timer
+                _proposal_timer.cancel((draft_id, result['team_index']))
+        team = db.get_draft(draft_id)['state']['teams'][result['team_index']]
+        remaining = ' / '.join(f"<@{db.get_drafter(mid)['user_id']}>" for mid in team['member_ids'])
+        reply = f"Removed <@{leaving}> from {team['logo']}. Remaining GM(s): {remaining}. Roster, budget, clock, and all suspect/market history are preserved."
+        if result['cleared_proposal']:
+            reply += ' Pending teammate approval cleared; submit a fresh pick if needed.'
+        if draft['state'].get('draftlist_enabled'):
+            reply += f' Run `!draftmode anon {draft_id}` in Draft List Bot to sync membership.'
+        await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
+    except ValueError as exc:
+        await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())

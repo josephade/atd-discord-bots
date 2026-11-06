@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, Mock
 from draft_history import player_key
+from roster_prices import read_prices
 
 
 @asynccontextmanager
@@ -55,10 +56,10 @@ class DeveloperSwapTests(unittest.IsolatedAsyncioTestCase):
         source = (Path(__file__).resolve().parents[1] / 'bot.py').read_text(encoding='utf8')
         nodes = [n for n in ast.parse(source).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in ('_swap_roster', '_find_roster_slot')]
         rows = [['Houston Rockets', 'Year', 'Price'], ['Michael Porter Jr', '2025-26', '3'], ['Gus Johnson', '1969-70', '4']] + [['', '', ''] for _ in range(8)]
-        manager = NS(_call=Mock(side_effect=lambda method, *args: rows if method == 'get_all_values' else None),
+        manager = NS(_call=Mock(side_effect=lambda method, *args, **kwargs: rows if method == 'get_all_values' else [[[3]], [[4]]] if method == 'batch_get' else None),
                      _find_team_cell=Mock(return_value=(1, 1)), _tab_has_price_column=lambda rows: True)
         get_manager = Mock(return_value=manager)
-        ns = {'player_key': player_key, '_get_manager': get_manager, '_channel_sheet_map': {1: {}, 2: {}},
+        ns = {'player_key': player_key, 'read_prices': read_prices, '_get_manager': get_manager, '_channel_sheet_map': {1: {}, 2: {}},
               'gspread': NS(utils=NS(rowcol_to_a1=lambda r, c: f'R{r}C{c}')),
               'discord': NS(Embed=lambda **kw: NS(set_footer=lambda **kw: None), Color=NS(green=lambda: 1)),
               '_friendly_sheet_error': lambda exc: str(exc)}
@@ -68,7 +69,10 @@ class DeveloperSwapTests(unittest.IsolatedAsyncioTestCase):
         await ns['_swap_roster'](self.ctx, 'Michael Porter Jr. / Gus Johnson', 'Houston Rockets', current_sheet_only=True)
         updates = manager._call.call_args.args
         self.assertEqual(updates[0], 'batch_update')
-        self.assertEqual([u['values'][0][0] for u in updates[1]], ['Gus Johnson', '1969-70', 'Michael Porter Jr', '2025-26', '4', '3'])
+        self.assertEqual([u['values'][0][0] for u in updates[1]], ['Gus Johnson', '1969-70', 'Michael Porter Jr', '2025-26', 4.0, 3.0])
+        formats = next(c.args[1] for c in manager._call.call_args_list if c.args[0] == 'batch_format')
+        self.assertEqual([f['range'] for f in formats], ['R2C3', 'R3C3'])
+        self.assertTrue(all(f['format'] == {'numberFormat': {'type': 'CURRENCY', 'pattern': '"$"0'}} for f in formats))
         get_manager.assert_called_once_with(1)
         get_manager.reset_mock(); get_manager.return_value = None; manager._call.reset_mock()
         await ns['_swap_roster'](self.ctx, 'Michael Porter Jr. / 8', 'Houston Rockets', current_sheet_only=True)

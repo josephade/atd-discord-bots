@@ -1,5 +1,6 @@
 """Anonymous GM guesses, bounded attempts, and a persisted penalty ledger."""
 import re
+import json
 
 import db
 import themes
@@ -20,6 +21,48 @@ def teams(draft):
         return [{'logo': p.get('logo', f'🏀 Team {i + 1}'), 'member_ids': [p['a'], p['b']]}
                 for i, p in enumerate(state.get('pairs', []))]
     return state.get('teams', [])
+
+
+def guessers_with_attempts(draft):
+    """Return individual GMs only; never expose team or shared-account details."""
+    if draft['theme'] not in ANON_THEMES or draft['state'].get('identities_revealed'):
+        return []
+    members = {d['id']: d for d in db.list_drafters(draft['id'])}
+    eligible = {}
+    for team in teams(draft):
+        assigned = [members[mid] for mid in team['member_ids'] if mid in members]
+        if db.suspect_remaining(draft['id'], [d['user_id'] for d in assigned]) > 0:
+            for member in assigned:
+                eligible[member['user_id']] = {'user_id': member['user_id'],
+                                              'display_name': member['display_name']}
+    return list(eligible.values())
+
+
+def win_deduction_summary(draft):
+    """One combined win deduction per current team, with no team logos."""
+    ownership = {}
+    for team in teams(draft):
+        members = tuple(sorted(db.get_drafter(mid)['user_id'] for mid in team['member_ids']))
+        for user_id in db.anonymous_ledger_users(draft['id'], members):
+            ownership[user_id] = members
+    totals = {}
+
+    def bucket(users):
+        members = next((ownership[uid] for uid in users if uid in ownership), tuple(sorted(users)))
+        return totals.setdefault(members, dict(member_ids=members, caught_wins=0,
+                                               market_wins=0, bought_guesses=0, total_wins=0))
+
+    for attempt in db.suspect_attempts(draft['id']):
+        if attempt['correct'] and attempt['penalty_kind'] == 'wins' and attempt['penalty_amount'] > 0:
+            bucket([attempt['target_id']])['caught_wins'] += attempt['penalty_amount']
+    for purchase in db.suspect_purchases(draft['id']):
+        if purchase['status'] == 'confirmed' and purchase['cost'] > 0:
+            entry = bucket(json.loads(purchase['team_users']) or [purchase['buyer_id']])
+            entry['market_wins'] += purchase['cost']
+            entry['bought_guesses'] += purchase['quantity']
+    for entry in totals.values():
+        entry['total_wins'] = entry['caught_wins'] + entry['market_wins']
+    return sorted(totals.values(), key=lambda item: (-item['total_wins'], item['member_ids']))
 
 
 def _emoji_name(raw):

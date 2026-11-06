@@ -8,5 +8,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN python -m unittest discover -s tests -q
 
 CMD ["python", "discord_sheet_highlighter.py"]

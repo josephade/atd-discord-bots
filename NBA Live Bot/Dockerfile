@@ -10,11 +10,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY access.js help.js ./
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY bot.js commands.js data.js render.js suggestions.js preview.js breakdown.js cards.js games.js games_layout.js schedule_layout.js salary.js picks.js last10_layout.js compare_layout.js standings.js boxscores.js injuries.js ./
 COPY tests ./tests
-COPY future_picks.json ./
+COPY future_picks.json team_emojis.json ./
 RUN npm test \
     && node --check bot.js \
     && node preview.js --demo \

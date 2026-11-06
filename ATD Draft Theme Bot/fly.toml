@@ -17,6 +17,15 @@ primary_region = "ewr"
   STATE_DIR = "/data"
   OWNER_REPORT_CHANNEL_ID = "1533242104304631969"
 
+# Only the read-only voting ledger is reachable here. The existing private
+# timer/list bridge on 8081 remains internal.
+[http_service]
+  internal_port = 8082
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
 [[mounts]]
   source      = "atd_draft_theme_data"
   destination = "/data"

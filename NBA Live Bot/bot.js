@@ -11,13 +11,15 @@ const { Injuries } = require('./injuries');
 const { Salaries } = require('./salary');
 const { Standings } = require('./standings');
 const { Picks } = require('./picks');
+const { createAccess } = require('./access');
+const { helpPayload, HELP_ID } = require('./help');
 const prefix = process.env.PREFIX || '!';
-const allowed = new Set((process.env.ALLOWED_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean));
+const canUse = createAccess();
 const seconds = Math.max(30, Number(process.env.REFRESH_SECONDS) || 30);
 const maxWatches = Math.max(1, Number(process.env.MAX_WATCHES) || 20);
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const data = new NBAData(), renderer = new Renderer(), watches = new Map(), busy = new Set();
-const help = `**NBA player stats**\n\`${prefix}nba picks Lakers\` - 2027-2030 pick ownership, protections and swaps (also: pick)\n\`${prefix}nba injury\` - injury report, team filters and expected returns\n\`${prefix}nba boxscores\` - choose a game; Previous/Next Day and Refresh (also: boxscore)\n\`${prefix}nba games\` - live and upcoming games tonight\n\`${prefix}nba standings\` - conference standings; West / East buttons\n\`${prefix}nba schedule Lakers\` - a team's upcoming games and last results\n\`${prefix}nba salary Lakers\` - team payroll vs the cap, tax and aprons; buttons for later seasons\n\`${prefix}nba Paul George\` — current game card\n\`${prefix}nba Paul George 2025-10-22\` — dated game\n\`${prefix}watch Paul George\` — refresh one message every ${seconds}s through the final buzzer\n\`${prefix}unwatch\` — stop your watch in this channel\n\`${prefix}season Paul George\` — current regular-season averages\n\`${prefix}nba compare LeBron James vs Stephen Curry\` — season averages and team record side by side\n\`${prefix}recent Paul George\` — statline for each of the last 10 games played, plus averages\n\`${prefix}season LeBron James 2025-26 playoffs\` — selected season/playoffs\nGame data: ESPN; draft picks: dated RealGM ownership snapshot. Feeds may be delayed. Watches expire after 8 hours and clear on restart. Full names or ESPN player IDs work.`;
+
 const payload = (model, png, watching = false) => ({
   content: `**${model.player.displayName}** · ${model.matchup} · ${model.status}${watching ? `\n↻ Refreshing every ${seconds}s · ${prefix}unwatch to stop` : ''}`,
   files: [new AttachmentBuilder(png, { name: 'nba-stats.png', description: `${model.player.displayName} NBA statistics` })],
@@ -30,6 +32,11 @@ const salaries = new Salaries({ data, renderer });
 const standings = new Standings({ data, renderer, timeZone: process.env.GAMES_TIME_ZONE || 'Europe/Dublin' });
 const picks = new Picks({ data, renderer });
 client.on('interactionCreate', async interaction => {
+  if (!canUse({ guildId: interaction.guildId, channelId: interaction.channelId, parentId: interaction.channel?.parentId })) return;
+  if (interaction.isButton() && interaction.customId.startsWith(HELP_ID)) {
+    await interaction.update(helpPayload({ page: interaction.customId.slice(HELP_ID.length), prefix, seconds, avatar: client.user.displayAvatarURL() })).catch(console.error);
+    return;
+  }
   if ((interaction.isStringSelectMenu() || interaction.isButton()) && injuries.owns(interaction.customId)) {
     try { await injuries.handle(interaction); }
     catch (error) { console.error('Injury interaction:', error.message); }
@@ -62,8 +69,7 @@ client.once('clientReady', () => {
 });
 client.on('messageCreate', async message => {
   if (message.author.bot || !message.guild || !message.content.startsWith(prefix)) return;
-  if (process.env.GUILD_ID && message.guildId !== process.env.GUILD_ID) return;
-  if (allowed.size && !allowed.has(message.channelId)) return;
+  if (!canUse({ guildId: message.guildId, channelId: message.channelId, parentId: message.channel.parentId })) return;
   const key = `${message.channelId}:${message.author.id}`;
   let command;
   try { command = parse(message.content.slice(prefix.length)); }
@@ -170,7 +176,7 @@ client.on('messageCreate', async message => {
     } finally { busy.delete(key); }
     return;
   }
-  if (command.command === 'nbahelp') { await message.reply(`${help}\n\`${prefix}nba Jalen Duren 26/Dec\` — most recent 26 December\n\`${prefix}nba Jalen Duren 26/Dec/2025\` — explicit year\nIf the player did not appear, choose Yes/No to view their closest recorded game. Confirmation expires after 60 seconds.`).catch(console.error); return; }
+  if (command.command === 'nbahelp') { await message.reply(helpPayload({ prefix, seconds, avatar: client.user.displayAvatarURL() })).catch(console.error); return; }
   if (command.command === 'unwatch') {
     const watch = watches.get(key);
     watches.delete(key);
@@ -220,7 +226,7 @@ client.on('messageCreate', async message => {
         files: [new AttachmentBuilder(await renderer.render(recent), { name: 'nba-last10.png', description: `${player.displayName} last ${recent.games.length} games` })] });
       return;
     }
-    const model = command.command === 'season' ? await data.season(player, command.year, command.playoffs) : await data.game(player, command.date);
+    const model = command.command === 'season' ? await data.season(player, command.year, command.playoffs) : await data.game(player, command.date, undefined, { includeUpcoming: command.command === 'watch' });
     const watching = command.command === 'watch' && ['pre', 'in'].includes(model.state);
     const body = await cards.show(reply, model, watching);
     if (command.command === 'watch') {

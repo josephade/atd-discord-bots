@@ -38,6 +38,36 @@ class MemberAdminTests(unittest.IsolatedAsyncioTestCase):
         return db.edit_anonymous_member(self.draft, db.get_draft(self.draft)['state'], 0,
                                         new_user, 'New GM', OWNER_ID, replace)
 
+    async def test_remove_after_completion_revokes_access_preserves_roster_and_penalties(self):
+        self.edit(200)
+        order = db.create_suspect_purchase(self.draft, 800, 100, [100, 200], 2)
+        db.finish_suspect_purchase(order['id'], 100, [100, 200])
+        await suspects.guess(None, self.draft, 901, 101, 100, ':Nets:')
+        before = suspects.win_deduction_summary(db.get_draft(self.draft))[0]
+        db.set_draft_status(self.draft, 'complete')
+        await member_admin.remove(self.ctx, f'{self.draft} <@100>')
+        self.assertIsNone(db.get_drafter_by_user(self.draft, 100))
+        self.assertEqual(db.get_drafters_for_user(100, ('complete',)), [])
+        draft = db.get_draft(self.draft)
+        team = draft['state']['teams'][0]
+        self.assertEqual(len(team['member_ids']), 1)
+        self.assertEqual(db.get_picks(self.draft, team['member_ids'][0]), ['Michael Jordan'])
+        self.assertEqual((team['budget_spent'], team['timer_deadline'], team['skip_count']), (44,123456,2))
+        after = suspects.win_deduction_summary(draft)[0]
+        self.assertEqual((after['market_wins'],after['caught_wins']), (before['market_wins'],before['caught_wins']))
+        self.assertEqual(db.anonymous_ledger_users(self.draft, [200]), [100,200])
+        self.assertIn('Remaining GM(s): <@200>', self.ctx.send.call_args.args[0])
+
+    async def test_remove_last_gm_and_public_channel_do_not_change_membership(self):
+        original = db.get_draft(self.draft)['state']
+        await member_admin.remove(self.ctx, f'{self.draft} <@100>')
+        self.assertIn('last GM', self.ctx.send.call_args.args[0])
+        self.assertEqual(db.get_draft(self.draft)['state'], original)
+        self.edit(200)
+        self.ctx.channel.id = 934052158532378634
+        await member_admin.remove(self.ctx, f'{self.draft} <@100>')
+        self.assertIsNotNone(db.get_drafter_by_user(self.draft,100))
+
     async def test_add_cogm_backfills_roster_and_preserves_team_clock_budget_and_order(self):
         result = self.edit(200)
         team = db.get_draft(self.draft)['state']['teams'][0]

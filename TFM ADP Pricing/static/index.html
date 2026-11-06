@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0f14">
+<title>TFM ADP Player Pricing</title>
+<link rel="icon" href="/static/ball.svg" type="image/svg+xml">
+<script src="/static/vote-theme.js"></script>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<button id="theme-toggle" class="secondary theme-toggle" type="button" aria-label="Switch colour theme">Light mode</button>
+<noscript><p class="noscript">This site needs JavaScript to record your votes.</p></noscript>
+
+<section id="welcome" class="screen welcome" hidden>
+  <div class="landing-brand"><img src="/static/ball.svg" width="30" height="30" alt=""> TFM <span>ADP PLAYER PRICING</span></div>
+  <div class="arena" aria-hidden="true">
+    <div class="spot spot-left"></div>
+    <div class="spot spot-right"></div>
+    <svg class="court" viewBox="0 0 800 700" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <radialGradient id="ballFill" cx="36%" cy="30%" r="75%">
+          <stop offset="0" stop-color="#ffb066"/>
+          <stop offset=".55" stop-color="#f26a1b"/>
+          <stop offset="1" stop-color="#a83c07"/>
+        </radialGradient>
+        <linearGradient id="floorFill" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#3a2415"/>
+          <stop offset="1" stop-color="#120c08"/>
+        </linearGradient>
+      </defs>
+
+      <rect x="-3000" y="620" width="7000" height="3000" fill="url(#floorFill)"/>
+      <rect x="-3000" y="620" width="7000" height="3" fill="#ff8a3d" opacity=".55"/>
+      <ellipse cx="400" cy="682" rx="250" ry="28" fill="none" stroke="#ff8a3d" stroke-opacity=".22" stroke-width="3"/>
+
+      <g class="hoop-back">
+        <rect x="602" y="190" width="16" height="430" fill="#20242e"/>
+        <rect x="500" y="84" width="220" height="134" rx="6" fill="#171a22" fill-opacity=".85" stroke="#e8ecf4" stroke-width="4"/>
+        <rect x="570" y="130" width="80" height="60" fill="none" stroke="#ff8a3d" stroke-width="4"/>
+        <path d="M542 232 A68 14 0 0 1 678 232" fill="none" stroke="#c9480f" stroke-width="7"/>
+      </g>
+
+      <ellipse class="ball-shadow" cx="0" cy="622" rx="44" ry="8" fill="#000"/>
+
+      <g class="ball-x">
+        <g class="ball-y">
+          <g class="ball-spin">
+            <circle r="34" fill="url(#ballFill)"/>
+            <g fill="none" stroke="#3d1602" stroke-width="2.6">
+              <path d="M-34 0 H34"/>
+              <path d="M0 -34 V34"/>
+              <path d="M-24 -24 C-10 -10 -10 10 -24 24"/>
+              <path d="M24 -24 C10 -10 10 10 24 24"/>
+            </g>
+          </g>
+        </g>
+      </g>
+
+      <g class="net">
+        <g fill="none" stroke="#f3f5fa" stroke-width="2" stroke-opacity=".9">
+          <path d="M544 234 L566 320"/>
+          <path d="M566 243 L580 320"/>
+          <path d="M588 247 L598 320"/>
+          <path d="M610 248 L610 320"/>
+          <path d="M632 247 L622 320"/>
+          <path d="M654 243 L640 320"/>
+          <path d="M676 234 L654 320"/>
+          <path d="M676 234 L622 320"/>
+          <path d="M654 243 L598 320"/>
+          <path d="M632 247 L580 320"/>
+          <path d="M544 234 L598 320"/>
+          <path d="M566 243 L622 320"/>
+          <path d="M588 247 L640 320"/>
+          <path d="M551 262 Q610 282 669 262"/>
+          <path d="M558 292 Q610 308 662 292"/>
+          <path d="M566 320 Q610 332 654 320"/>
+        </g>
+      </g>
+      <path class="rim-front" d="M542 232 A68 14 0 0 0 678 232" fill="none" stroke="#ff5a14" stroke-width="7"/>
+
+      <g class="burst" transform="translate(610 262)">
+        <circle class="ring ring-one" r="60" fill="none" stroke="#ffb066" stroke-width="4"/>
+        <circle class="ring ring-two" r="60" fill="none" stroke="#ffffff" stroke-width="2"/>
+        <g id="sparks"></g>
+      </g>
+    </svg>
+  </div>
+
+  <div class="welcome-title">
+    <p class="welcome-kicker">THE COMMUNITY HAS THE FLOOR</p>
+    <h1 class="welcome-name">You know ball.<br><span>Name your price.</span></h1>
+    <p class="welcome-sub">Overpriced? Underrated? Have your say on what players should cost in a $100 draft.</p>
+    <div class="landing-facts"><span><strong>313</strong> players</span><span><strong>$100</strong> team budget</span><span><strong>Your</strong> call</span></div>
+    <button id="enter-voting" class="primary landing-enter" type="button">Start voting <span aria-hidden="true">↗</span></button>
+    <p class="landing-note">Vote on a few or all 313. Save your spot and come back anytime.</p>
+  </div>
+
+  <div class="court-caption" aria-hidden="true"><span class="live-dot"></span> YOUR NEXT DRAFT STARTS HERE</div>
+  <button id="replay-intro" class="ghost replay-intro" type="button">Replay the shot ↻</button>
+  <button id="skip" class="skip" type="button">Skip intro</button>
+</section>
+
+<section id="username" class="screen panel-screen" hidden>
+  <div class="draft-room-copy">
+    <div class="draft-room-brand"><img src="/static/ball.svg" width="32" height="32" alt=""> TFM / THE DRAFT ROOM</div>
+    <p class="draft-room-kicker">SCOUT IT. PRICE IT. LOCK IT IN.</p>
+    <h1>You're up,<br><span>GM.</span></h1>
+    <p>The names you know. The prices you'd pay.<br>Help shape the next ADP, one player at a time.</p>
+    <div class="draft-room-stats"><span><strong>313</strong> PLAYERS</span><span><strong>$100</strong> TEAM BUDGET</span><span><strong>YOU</strong> MAKE THE CALL</span></div>
+  </div>
+  <form id="username-form" class="panel">
+    <p class="seat-label">YOUR SEAT AT THE TABLE</p>
+    <h2>Enter the draft room.</h2>
+    <p>Tell us your Discord username so your votes have a name.</p>
+    <p id="link-notice" class="notice" hidden>That resume link isn't valid. Enter your username to start a new vote.</p>
+    <label for="username-input">Discord username</label>
+    <input id="username-input" name="username" placeholder="Your Discord username" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="40" required>
+    <p id="username-error" class="error" role="alert" hidden></p>
+    <button class="primary" type="submit">Take my seat ↗</button>
+    <p class="draft-room-footnote">No Discord password needed. Every saved vote counts, even if you don't finish.</p>
+  </form>
+</section>
+
+<section id="vote" class="screen vote-screen" hidden>
+  <header class="vote-top">
+    <div class="vote-brand"><img src="/static/ball.svg" alt="" width="24" height="24"> TFM <span>Pricing studio</span></div>
+    <div id="counter" class="counter" aria-live="polite"></div>
+    <div class="progress" role="progressbar" aria-label="Voting progress" id="progress"><div id="progress-fill" class="progress-fill"></div></div>
+  </header>
+
+  <main class="vote-main">
+    <div class="card-eyebrow"><span>COMMUNITY PLAYER PRICING</span><span id="player-position"></span></div>
+    <div class="player-head">
+      <figure class="photo-frame">
+        <span class="photo-card-mark" aria-hidden="true">TFM</span>
+        <img id="player-photo" class="player-photo" alt="" hidden>
+        <img id="photo-fallback" class="photo-fallback" src="/static/ball.svg" alt="" width="72" height="72">
+        <a id="photo-credit" class="photo-credit" target="_blank" rel="noopener noreferrer" hidden>Photo credit</a>
+      </figure>
+      <div class="player-title">
+        <p class="player-kicker">ON THE BOARD / YOUR VALUATION</p>
+        <h1 id="player-name" class="player-name"></h1>
+        <p class="question">What should he cost?</p>
+        <p class="pricing-context">Price him for a $100 team budget, before Flux.</p>
+        <div class="player-edition"><span>TFM ADP</span><span>COMMUNITY EDITION</span></div>
+      </div>
+    </div>
+
+    <div class="answer-heading"><span>Choose your price</span><span>Whole dollars</span></div>
+    <div id="options" class="options" role="group" aria-label="Choose a player price"></div>
+    <p id="save-status" class="save-status" role="status" aria-live="polite">Choose a price to save and continue.</p>
+
+    <form id="other-form" class="other-form" novalidate hidden>
+      <label for="other-input">Your price, in whole dollars</label>
+      <div class="other-row">
+        <span class="dollar" aria-hidden="true">$</span>
+        <input id="other-input" type="number" inputmode="numeric" min="1" step="1">
+        <button class="primary" type="submit">Save</button>
+      </div>
+    </form>
+
+    <p id="vote-error" class="error" role="alert" hidden></p>
+    <button id="retry" class="secondary" type="button" hidden>Retry</button>
+    <p id="milestone" class="milestone" aria-live="polite" hidden></p>
+
+    <button id="dont-know" class="secondary dont-know" type="button">Not familiar with this player? Skip</button>
+
+    <nav class="vote-actions">
+      <button id="back" class="ghost" type="button">Back</button>
+      <button id="resume-voting" class="ghost" type="button" hidden>Next unanswered</button>
+      <button id="copy-link" class="ghost" type="button">Copy my resume link</button>
+      <button id="continue-later" class="ghost" type="button">Continue Later</button>
+    </nav>
+    <p id="copy-status" class="copy-status" aria-live="polite" hidden></p>
+  </main>
+</section>
+
+<section id="later" class="screen panel-screen" hidden>
+  <div class="panel">
+    <h1>Continue Later</h1>
+    <p>Your votes are already saved and counted. Use this link to pick up where you left off.</p>
+    <label for="later-link">Your resume link</label>
+    <div class="link-row">
+      <input id="later-link" readonly>
+      <button id="later-copy" class="primary" type="button">Copy</button>
+    </div>
+    <p class="fine">Don't share it. Anyone with this link can vote as you.</p>
+    <p id="later-copy-status" class="copy-status" aria-live="polite" hidden></p>
+
+    <form id="email-form" class="email-form">
+      <label for="email-input">Or email it to yourself (optional)</label>
+      <div class="link-row">
+        <input id="email-input" type="email" autocomplete="email" maxlength="254" required>
+        <button class="secondary" type="submit">Send</button>
+      </div>
+      <p class="fine">We only use your address to send this link, and we don't keep it.</p>
+    </form>
+    <p id="email-status" class="notice" aria-live="polite" hidden></p>
+
+    <button id="later-back" class="ghost" type="button">Back to voting</button>
+  </div>
+</section>
+
+<section id="done" class="screen panel-screen" hidden>
+  <div class="panel">
+    <img class="panel-ball" src="/static/ball.svg" alt="" width="52" height="52">
+    <h1>Thank you!</h1>
+    <p>You've answered all <span id="done-total"></span> players. Your votes are saved.</p>
+    <button id="review" class="primary" type="button">Review my answers</button>
+  </div>
+</section>
+
+<section id="closed" class="screen panel-screen" hidden>
+  <div class="panel">
+    <img class="panel-ball" src="/static/ball.svg" alt="" width="52" height="52">
+    <h1>Voting is closed</h1>
+    <p>TFM ADP Player Pricing isn't taking votes right now. Any votes you already saved are safe.</p>
+  </div>
+</section>
+
+<div id="connection" class="panel-screen connection" hidden>
+  <div class="panel">
+    <h1>Can't connect</h1>
+    <p>Check your connection, then try again.</p>
+    <button id="connection-retry" class="primary" type="button">Try again</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

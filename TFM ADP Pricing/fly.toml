@@ -1,0 +1,36 @@
+app = "tfm-adp-pricing"
+primary_region = "ewr"
+
+[deploy]
+  strategy = "immediate"
+
+[build]
+
+[env]
+  DB_PATH = "/data/tfm_adp_pricing.sqlite3"
+  PUBLIC_BASE_URL = "https://tfm-adp-pricing.fly.dev"
+  TRUST_FLY_CLIENT_IP = "1"
+  PORT = "8080"
+
+[mounts]
+  source = "tfm_pricing_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

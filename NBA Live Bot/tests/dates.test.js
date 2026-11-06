@@ -74,6 +74,38 @@ test('current live game remains preferred over latest-game fallback', async () =
   data.latestGame = async () => { throw Error('Should not use fallback'); };
   assert.equal((await data.game({ id: 'p', team: { id: '20' } })).eventId, 'live');
 });
+
+test('default card keeps the last played game until tip-off, then switches to live', async () => {
+  const data = new NBAData();
+  const player = { id: 'p', team: { id: '20' } };
+  let state = 'pre';
+  const fetched = [];
+  data.json = async url => {
+    fetched.push(url);
+    return url.includes('scoreboard')
+      ? { events: [{ id: 'tonight', status: { type: { state } }, competitions: [{ competitors: [{ team: { id: '20' } }] }] }] }
+      : { header: { id: 'tonight', competitions: [{ status: { type: { state } } }] } };
+  };
+  data.latestGame = async () => ({ eventId: 'last-played', state: 'post' });
+  assert.equal((await data.game(player)).eventId, 'last-played');
+  assert.equal(fetched.some(url => url.includes('summary')), false);
+  state = 'in';
+  assert.equal((await data.game(player)).eventId, 'tonight');
+  state = 'post';
+  assert.equal((await data.game(player)).eventId, 'tonight');
+});
+
+test('explicit dates, pinned events and watches can still load an upcoming game', async () => {
+  const data = new NBAData();
+  const player = { id: 'p', team: { id: '20' } };
+  data.json = async url => url.includes('scoreboard')
+    ? { events: [{ id: 'tonight', status: { type: { state: 'pre' } }, competitions: [{ competitors: [{ team: { id: '20' } }] }] }] }
+    : { header: { id: 'tonight', competitions: [{ status: { type: { state: 'pre' } } }] } };
+  data.latestGame = async () => { throw Error('Explicit lookup must not fall back'); };
+  assert.equal((await data.game(player, '2026-11-02')).eventId, 'tonight');
+  assert.equal((await data.game(player, null, 'tonight')).eventId, 'tonight');
+  assert.equal((await data.game(player, null, undefined, { includeUpcoming: true })).eventId, 'tonight');
+});
 function confirmation(customId) {
   const edits = [], calls = [];
   return { edits, calls, options: {

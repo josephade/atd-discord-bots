@@ -10,6 +10,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY boxscore_overview.js ./
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY bot.js commands.js data.js render.js suggestions.js preview.js drives.js cards.js games.js games_layout.js boxscores.js injuries.js ./

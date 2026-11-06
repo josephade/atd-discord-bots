@@ -46,6 +46,7 @@ def command_namespace():
         '_CASE_SENSITIVE_NAME_OVERRIDES': {'CEO': 'CEOOfKobeFans'},
         'bot': NS(command=lambda **kw: lambda fn: fn),
         '_in_channel': lambda ctx: True,
+        '_load_profiles': lambda: {},
         '_err': lambda msg: Embed(description=msg),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'bot.py', 'exec'), ns)

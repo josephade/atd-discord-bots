@@ -391,7 +391,7 @@ def create_bot():
         try:
             async with lock:
                 rows = await asyncio.to_thread(sheets.read, track['sheet'], track['gid'])
-            team = match_team(team_query, [r['team'] for r in standings(rows)])
+            team = match_team(team_query, [r['team'] for r in standings(rows, allow_negative_wins=store.penalty_link(draft) is not None)])
         except ValueError as exc:
             await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
             return
@@ -409,7 +409,7 @@ def create_bot():
         try:
             async with lock:
                 rows = await asyncio.to_thread(sheets.read, track['sheet'], track['gid'])
-            results = standings(rows)
+            results = standings(rows, allow_negative_wins=store.penalty_link(draft) is not None)
         except ValueError as exc:
             await ctx.send(str(exc), allowed_mentions=discord.AllowedMentions.none())
             return
@@ -427,6 +427,25 @@ def create_bot():
 
     @bot.command()
     @commissioner()
+    async def revealpenalties(ctx, draft: str = '', theme_draft_id: int = 0):
+        if ctx.channel.id != 1533242104304631969 or ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+            await ctx.send('Use the private admin channel to link suspect deductions.')
+            return
+        if not draft.isdigit() or theme_draft_id <= 0:
+            await ctx.send('Use `!revealpenalties <ATD number> <Theme draft ID>`. Example: `!revealpenalties 114 30`.')
+            return
+        from penalties import fetch_ledger
+        try:
+            await fetch_ledger(theme_draft_id, ctx.guild.id)
+        except Exception:
+            log.exception('Could not link suspect ledger')
+            await ctx.send('Could not verify that Theme draft. No link was changed.')
+            return
+        store.set_penalty_link(draft, theme_draft_id)
+        await ctx.send(f'ATD {draft} is linked to Theme draft {theme_draft_id}. Reveals keep the official sheet record and add comparisons without suspect/market deductions.')
+
+    @bot.command()
+    @commissioner()
     async def revealall(ctx, draft: str = ''):
         await start_reveal(ctx, draft, all_seeds=True)
 
@@ -434,7 +453,7 @@ def create_bot():
 
     async def start_reveal(ctx, query, all_seeds=False):
         from reveal import standings, record_text, gm_ids, comparison, ordinal
-        from nba_comparison import historical_comparison
+        from nba_comparison import comparisons_for_standings
         from team_report import report_from_rows, team_emoji_candidates
         from report_image import render_team_report, nba_logo
         parts = query.split()
@@ -451,7 +470,8 @@ def create_bot():
         try:
             async with lock:
                 rows = await asyncio.to_thread(sheets.read, track['sheet'], track['gid'])
-            results = standings(rows)
+            results = standings(rows, allow_negative_wins=store.penalty_link(draft) is not None)
+            historical_notes = comparisons_for_standings(results)
             if not all_seeds and not 1 <= seed <= len(results):
                 await ctx.send(f'ATD {draft} has {len(results)} teams. Choose a seed from 1 to {len(results)}.')
                 return
@@ -467,7 +487,7 @@ def create_bot():
             log.exception('Could not prepare reveal for ATD %s', draft)
             await ctx.send('Could not read the live voting sheet. Nothing was revealed. Try again shortly.')
             return
-        async def post_result(result, report, show_gm):
+        async def post_result(result, report, show_gm, penalty_notes=()):
             seed = result['seed']
             logo, emoji_text = None, result['team']
             for emoji in team_emoji_candidates(result['team'], getattr(ctx.guild, 'emojis', ())):
@@ -485,7 +505,9 @@ def create_bot():
                 for uid in result['gm_ids']:
                     previous = store.previous_reveal(draft, uid)
                     text += '\n' + (comparison(result, previous, uid) if previous else f'<@{uid}>: no unambiguous earlier saved ATD result available for comparison.')
-            text += '\n\n' + historical_comparison(result)
+            if penalty_notes:
+                text += '\n\n' + '\n'.join(penalty_notes)
+            text += '\n\n' + historical_notes[seed]
             png = await asyncio.to_thread(render_team_report, draft, report, logo, anonymous=not show_gm)
             await ctx.send(text, file=discord.File(io.BytesIO(png), filename=f'ATD-{draft}-seed-{seed}-votes.png'),
                            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
@@ -525,12 +547,23 @@ def create_bot():
                 try:
                     await interaction.response.edit_message(content='Posting your reveals from last seed to first…' if all_seeds else 'Posting your reveal…', view=self)
                     self.stop()
+                    penalty_notes = {}
+                    linked = store.penalty_link(draft)
+                    if linked is not None:
+                        from penalties import fetch_ledger, comparison_lines, carryover_details
+                        ledger = await fetch_ledger(linked, ctx.guild.id)
+                        penalty_notes = {row['seed']: comparison_lines(row, ledger, draft=draft) for row, _ in pending}
+                        for row, _ in pending:
+                            row.update(carryover_details(row, draft))
                     await remove_notice()
                     for index, (result, report) in enumerate(pending):
                         if index:
                             await asyncio.sleep(1.5)
-                        await post_result(result, report, show_gm)
+                        await post_result(result, report, show_gm, penalty_notes.get(result['seed'], ()))
                         posted += 1
+                except ValueError as exc:
+                    await interaction.edit_original_response(content=f'Reveal stopped after {posted} posts. {exc}', view=self)
+                    return
                 except Exception:
                     log.exception('Reveal post failed')
                     await interaction.edit_original_response(content=f'Reveal stopped after {posted} confirmed posts. Check the channel before retrying; nothing will be retried automatically.', view=self)
@@ -577,6 +610,7 @@ def create_bot():
                        'Commissioners: `!votetrack <draft> <response-sheet-url> [tiers]`, '
                        '`!reveal [ATD] <seed>` (private GM choice), `!revealsync <ATD>`, `!revealgm <ATD> <team> @GM [@coGM]`, '
                        '`!revealall [ATD]` (last seed to first, one private GM choice), '
+                       '`!revealpenalties <ATD> <Theme draft ID>` (private admin link), '
                        '`!votealias @member <form name>`, `!votestatus`, `!voteretry <draft>`, '
                        '`!votematches <draft>`, `!voteissues <draft>`, `!votepause <draft>`, `!voteresume <draft>`.')
 

@@ -155,6 +155,7 @@ function extractBoxscore(summary) {
     return { name: competitor.team?.displayName || group?.team?.displayName || 'Team',
       abbreviation: competitor.team?.abbreviation, logo: competitor.team?.logo || competitor.team?.logos?.[0]?.href,
       score: competitor.score ?? '—', side: competitor.homeAway, totals,
+      record: competitor.record?.find(r => r.type === 'total')?.summary || '',
       players: [...players.values()].sort((a, b) => Number(b.starter) - Number(a.starter)) };
   });
   return { type: 'boxscore', eventId: summary.header.id, date: game.date,
@@ -345,11 +346,13 @@ class NBAData {
     if (matches.length > 1) throw new Error(`More than one match: ${matches.slice(0, 8).map(p => p.displayName).join(', ')}. Use the full name.`);
     return matches[0];
   }
-  async game(player, date, eventId) {
+  async game(player, date, eventId, { includeUpcoming = false } = {}) {
+    const latestUntilLive = !date && !eventId && !includeUpcoming;
     if (!eventId) {
       // ESPN's no-date scoreboard chooses its active NBA slate, including games after midnight.
       const board = await this.json(`${SITE}/scoreboard${date ? `?dates=${date.replaceAll('-', '')}` : ''}`);
-      const events = (board.events || []).filter(e => e.competitions?.[0]?.competitors?.some(c => String(c.team.id) === String(player.team.id)));
+      const events = (board.events || []).filter(e => e.competitions?.[0]?.competitors?.some(c => String(c.team.id) === String(player.team.id)))
+        .filter(e => !latestUntilLive || ['in', 'post'].includes(e.status?.type?.state));
       events.sort((a, b) => ({ in: 0, pre: 1, post: 2 }[a.status?.type?.state] ?? 3) - ({ in: 0, pre: 1, post: 2 }[b.status?.type?.state] ?? 3));
       if (!events.length) {
         if (!date) return this.latestGame(player);
@@ -357,7 +360,9 @@ class NBAData {
       }
       eventId = events[0].id;
     }
-    return extractGame(await this.json(`${SITE}/summary?event=${eventId}`), player);
+    const model = extractGame(await this.json(`${SITE}/summary?event=${eventId}`), player);
+    if (latestUntilLive && model.state === 'pre') return this.latestGame(player);
+    return model;
   }
   async datedGame(player, date) {
     // Scan the whole slate: a historical appearance may be for a former team.

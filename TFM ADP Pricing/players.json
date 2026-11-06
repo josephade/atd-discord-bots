@@ -1,0 +1,2193 @@
+[
+ {
+  "sheet_row": 2,
+  "name": "Michael Jordan",
+  "position": "Guard/Wing",
+  "adp": 1.5,
+  "current_price": 44
+ },
+ {
+  "sheet_row": 3,
+  "name": "LeBron James",
+  "position": "Forward",
+  "adp": 1.6,
+  "current_price": 43
+ },
+ {
+  "sheet_row": 4,
+  "name": "Kevin Garnett",
+  "position": "Forward/Big",
+  "adp": 3.95,
+  "current_price": 38
+ },
+ {
+  "sheet_row": 5,
+  "name": "Stephen Curry",
+  "position": "Guard",
+  "adp": 4.05,
+  "current_price": 38
+ },
+ {
+  "sheet_row": 6,
+  "name": "Shaquille O'Neal",
+  "position": "Big",
+  "adp": 4.25,
+  "current_price": 38
+ },
+ {
+  "sheet_row": 7,
+  "name": "Magic Johnson",
+  "position": "Guard/Forward",
+  "adp": 6.5,
+  "current_price": 37
+ },
+ {
+  "sheet_row": 8,
+  "name": "Larry Bird",
+  "position": "Forward",
+  "adp": 6.95,
+  "current_price": 36
+ },
+ {
+  "sheet_row": 9,
+  "name": "Kareem Abdul-Jabbar",
+  "position": "Big",
+  "adp": 8.0,
+  "current_price": 36
+ },
+ {
+  "sheet_row": 10,
+  "name": "Hakeem Olajuwon",
+  "position": "Big",
+  "adp": 9.5,
+  "current_price": 36
+ },
+ {
+  "sheet_row": 11,
+  "name": "Kevin Durant",
+  "position": "Forward",
+  "adp": 10.2,
+  "current_price": 35
+ },
+ {
+  "sheet_row": 12,
+  "name": "Jerry West",
+  "position": "Guard",
+  "adp": 12.0,
+  "current_price": 34
+ },
+ {
+  "sheet_row": 13,
+  "name": "Tim Duncan",
+  "position": "Big",
+  "adp": 12.0,
+  "current_price": 34
+ },
+ {
+  "sheet_row": 14,
+  "name": "Kobe Bryant",
+  "position": "Guard/Wing",
+  "adp": 12.15,
+  "current_price": 34
+ },
+ {
+  "sheet_row": 15,
+  "name": "Dwyane Wade",
+  "position": "Guard",
+  "adp": 15.55,
+  "current_price": 33
+ },
+ {
+  "sheet_row": 16,
+  "name": "Kawhi Leonard",
+  "position": "Wing/Forward",
+  "adp": 15.55,
+  "current_price": 33
+ },
+ {
+  "sheet_row": 17,
+  "name": "Shai Gilgeous-Alexander",
+  "position": "Guard",
+  "adp": 16.5,
+  "current_price": 32
+ },
+ {
+  "sheet_row": 18,
+  "name": "Nikola Jokic",
+  "position": "Big",
+  "adp": 16.5,
+  "current_price": 32
+ },
+ {
+  "sheet_row": 19,
+  "name": "Chris Paul",
+  "position": "Guard",
+  "adp": 18.55,
+  "current_price": 32
+ },
+ {
+  "sheet_row": 20,
+  "name": "David Robinson",
+  "position": "Big",
+  "adp": 18.75,
+  "current_price": 32
+ },
+ {
+  "sheet_row": 21,
+  "name": "Victor Wembanyama",
+  "position": "Big",
+  "adp": 19.56,
+  "current_price": 32
+ },
+ {
+  "sheet_row": 22,
+  "name": "Steve Nash",
+  "position": "Guard",
+  "adp": 19.75,
+  "current_price": 32
+ },
+ {
+  "sheet_row": 23,
+  "name": "Tracy McGrady",
+  "position": "Wing/Forward",
+  "adp": 22.25,
+  "current_price": 31
+ },
+ {
+  "sheet_row": 24,
+  "name": "Oscar Robertson",
+  "position": "Guard",
+  "adp": 22.6,
+  "current_price": 30
+ },
+ {
+  "sheet_row": 25,
+  "name": "Bill Walton",
+  "position": "Big",
+  "adp": 23.65,
+  "current_price": 30
+ },
+ {
+  "sheet_row": 26,
+  "name": "Giannis Antetokounmpo",
+  "position": "Forward/Big",
+  "adp": 24.55,
+  "current_price": 30
+ },
+ {
+  "sheet_row": 27,
+  "name": "Wilt Chamberlain",
+  "position": "Big",
+  "adp": 24.95,
+  "current_price": 30
+ },
+ {
+  "sheet_row": 28,
+  "name": "Anthony Davis",
+  "position": "Forward/Big",
+  "adp": 26.05,
+  "current_price": 29
+ },
+ {
+  "sheet_row": 29,
+  "name": "Julius Erving",
+  "position": "Forward",
+  "adp": 28.5,
+  "current_price": 29
+ },
+ {
+  "sheet_row": 30,
+  "name": "Joel Embiid",
+  "position": "Big",
+  "adp": 28.8,
+  "current_price": 28
+ },
+ {
+  "sheet_row": 31,
+  "name": "Bill Russell",
+  "position": "Big",
+  "adp": 30.6,
+  "current_price": 28
+ },
+ {
+  "sheet_row": 32,
+  "name": "Luka Doncic",
+  "position": "Guard",
+  "adp": 32.65,
+  "current_price": 27
+ },
+ {
+  "sheet_row": 33,
+  "name": "James Harden",
+  "position": "Guard",
+  "adp": 32.7,
+  "current_price": 27
+ },
+ {
+  "sheet_row": 34,
+  "name": "Dirk Nowitzki",
+  "position": "Big",
+  "adp": 32.7,
+  "current_price": 27
+ },
+ {
+  "sheet_row": 35,
+  "name": "Karl Malone",
+  "position": "Forward / Big",
+  "adp": 33.45,
+  "current_price": 27
+ },
+ {
+  "sheet_row": 36,
+  "name": "Jayson Tatum",
+  "position": "Forward",
+  "adp": 33.7,
+  "current_price": 27
+ },
+ {
+  "sheet_row": 37,
+  "name": "Grant Hill",
+  "position": "Wing/Forward",
+  "adp": 33.95,
+  "current_price": 27
+ },
+ {
+  "sheet_row": 38,
+  "name": "Scottie Pippen",
+  "position": "Wing/Forward",
+  "adp": 36.35,
+  "current_price": 26
+ },
+ {
+  "sheet_row": 39,
+  "name": "Reggie Miller",
+  "position": "Wing",
+  "adp": 38.1,
+  "current_price": 25
+ },
+ {
+  "sheet_row": 40,
+  "name": "Paul George",
+  "position": "Wing/Forward",
+  "adp": 38.95,
+  "current_price": 25
+ },
+ {
+  "sheet_row": 41,
+  "name": "Penny Hardaway",
+  "position": "Guard",
+  "adp": 39.05,
+  "current_price": 25
+ },
+ {
+  "sheet_row": 42,
+  "name": "Charles Barkley",
+  "position": "Forward",
+  "adp": 39.5,
+  "current_price": 25
+ },
+ {
+  "sheet_row": 43,
+  "name": "Draymond Green",
+  "position": "Forward/Big",
+  "adp": 40.55,
+  "current_price": 25
+ },
+ {
+  "sheet_row": 44,
+  "name": "Manu Ginobili",
+  "position": "Guard/Wing",
+  "adp": 43.1,
+  "current_price": 24
+ },
+ {
+  "sheet_row": 45,
+  "name": "Walt Frazier",
+  "position": "Guard",
+  "adp": 45.25,
+  "current_price": 23
+ },
+ {
+  "sheet_row": 46,
+  "name": "Jimmy Butler",
+  "position": "Wing/Forward",
+  "adp": 45.25,
+  "current_price": 23
+ },
+ {
+  "sheet_row": 47,
+  "name": "Bob McAdoo",
+  "position": "Forward/Big",
+  "adp": 45.35,
+  "current_price": 23
+ },
+ {
+  "sheet_row": 48,
+  "name": "Clyde Drexler",
+  "position": "Wing/Forward",
+  "adp": 46.55,
+  "current_price": 23
+ },
+ {
+  "sheet_row": 49,
+  "name": "Ray Allen",
+  "position": "Wing",
+  "adp": 46.85,
+  "current_price": 23
+ },
+ {
+  "sheet_row": 50,
+  "name": "Paul Pierce",
+  "position": "Wing",
+  "adp": 49.15,
+  "current_price": 22
+ },
+ {
+  "sheet_row": 51,
+  "name": "Dwight Howard",
+  "position": "Big",
+  "adp": 51.55,
+  "current_price": 22
+ },
+ {
+  "sheet_row": 52,
+  "name": "Damian Lillard",
+  "position": "Guard",
+  "adp": 52.25,
+  "current_price": 22
+ },
+ {
+  "sheet_row": 53,
+  "name": "John Havlicek",
+  "position": "Wing",
+  "adp": 54.5,
+  "current_price": 21
+ },
+ {
+  "sheet_row": 54,
+  "name": "Chris Mullin",
+  "position": "Wing",
+  "adp": 54.8,
+  "current_price": 21
+ },
+ {
+  "sheet_row": 55,
+  "name": "Rick Barry",
+  "position": "Wing",
+  "adp": 55.6,
+  "current_price": 21
+ },
+ {
+  "sheet_row": 56,
+  "name": "Vince Carter",
+  "position": "Wing",
+  "adp": 56.35,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 57,
+  "name": "Sidney Moncrief",
+  "position": "Guard",
+  "adp": 57.25,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 58,
+  "name": "Moses Malone",
+  "position": "Big",
+  "adp": 57.7,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 59,
+  "name": "Mark Price",
+  "position": "Guard",
+  "adp": 57.8,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 60,
+  "name": "Patrick Ewing",
+  "position": "Big",
+  "adp": 59.45,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 61,
+  "name": "Willis Reed",
+  "position": "Forward/Big",
+  "adp": 61.25,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 62,
+  "name": "Jason Kidd",
+  "position": "Guard",
+  "adp": 61.95,
+  "current_price": 20
+ },
+ {
+  "sheet_row": 63,
+  "name": "Anthony Edwards",
+  "position": "Guard/Wing",
+  "adp": 62.15,
+  "current_price": 19
+ },
+ {
+  "sheet_row": 64,
+  "name": "Russell Westbrook",
+  "position": "Guard",
+  "adp": 63.45,
+  "current_price": 19
+ },
+ {
+  "sheet_row": 65,
+  "name": "Klay Thompson",
+  "position": "Wing",
+  "adp": 64.3,
+  "current_price": 19
+ },
+ {
+  "sheet_row": 66,
+  "name": "Shawn Kemp",
+  "position": "Forward/Big",
+  "adp": 65.3,
+  "current_price": 18
+ },
+ {
+  "sheet_row": 67,
+  "name": "Tyrese Haliburton",
+  "position": "Guard",
+  "adp": 65.55,
+  "current_price": 18
+ },
+ {
+  "sheet_row": 68,
+  "name": "Rasheed Wallace",
+  "position": "Forward/Big",
+  "adp": 67.2,
+  "current_price": 18
+ },
+ {
+  "sheet_row": 69,
+  "name": "Chauncey Billups",
+  "position": "Guard",
+  "adp": 68.6,
+  "current_price": 18
+ },
+ {
+  "sheet_row": 70,
+  "name": "Terry Porter",
+  "position": "Guard",
+  "adp": 72.25,
+  "current_price": 17
+ },
+ {
+  "sheet_row": 71,
+  "name": "Marques Johnson",
+  "position": "Wing/Forward",
+  "adp": 72.35,
+  "current_price": 17
+ },
+ {
+  "sheet_row": 72,
+  "name": "Kyle Lowry",
+  "position": "Guard",
+  "adp": 72.45,
+  "current_price": 17
+ },
+ {
+  "sheet_row": 73,
+  "name": "Rashard Lewis",
+  "position": "Forward",
+  "adp": 72.6,
+  "current_price": 17
+ },
+ {
+  "sheet_row": 74,
+  "name": "Eddie Jones",
+  "position": "Guard/Wing",
+  "adp": 73.4,
+  "current_price": 17
+ },
+ {
+  "sheet_row": 75,
+  "name": "Deron Williams",
+  "position": "Guard",
+  "adp": 73.7,
+  "current_price": 17
+ },
+ {
+  "sheet_row": 76,
+  "name": "Devin Booker",
+  "position": "Guard",
+  "adp": 74.25,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 77,
+  "name": "Brandon Roy",
+  "position": "Guard",
+  "adp": 76.6,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 78,
+  "name": "Karl-Anthony Towns",
+  "position": "Forward/Big",
+  "adp": 78.56,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 79,
+  "name": "Larry Nance Sr.",
+  "position": "Forward/Big",
+  "adp": 78.9,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 80,
+  "name": "Alonzo Mourning",
+  "position": "Big",
+  "adp": 79.05,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 81,
+  "name": "Gary Payton",
+  "position": "Guard",
+  "adp": 79.6,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 82,
+  "name": "Peja Stojakovic",
+  "position": "Forward",
+  "adp": 80.95,
+  "current_price": 16
+ },
+ {
+  "sheet_row": 83,
+  "name": "Evan Mobley",
+  "position": "Forward",
+  "adp": 81.3,
+  "current_price": 15
+ },
+ {
+  "sheet_row": 84,
+  "name": "Shawn Marion",
+  "position": "Forward",
+  "adp": 82.25,
+  "current_price": 15
+ },
+ {
+  "sheet_row": 85,
+  "name": "Andrei Kirilenko",
+  "position": "Forward",
+  "adp": 83.45,
+  "current_price": 15
+ },
+ {
+  "sheet_row": 86,
+  "name": "John Stockton",
+  "position": "Guard",
+  "adp": 84.0,
+  "current_price": 15
+ },
+ {
+  "sheet_row": 87,
+  "name": "Kevin Johnson",
+  "position": "Guard",
+  "adp": 84.6,
+  "current_price": 15
+ },
+ {
+  "sheet_row": 88,
+  "name": "George Gervin",
+  "position": "Wing",
+  "adp": 87.35,
+  "current_price": 14
+ },
+ {
+  "sheet_row": 89,
+  "name": "Marc Gasol",
+  "position": "Big",
+  "adp": 87.5,
+  "current_price": 14
+ },
+ {
+  "sheet_row": 90,
+  "name": "Dave Cowens",
+  "position": "Forward/Big",
+  "adp": 90.1,
+  "current_price": 14
+ },
+ {
+  "sheet_row": 91,
+  "name": "Joe Dumars",
+  "position": "Guard",
+  "adp": 90.45,
+  "current_price": 14
+ },
+ {
+  "sheet_row": 92,
+  "name": "Victor Oladipo",
+  "position": "Guard/Wing",
+  "adp": 90.65,
+  "current_price": 14
+ },
+ {
+  "sheet_row": 93,
+  "name": "Bobby Jones",
+  "position": "Foward",
+  "adp": 90.65,
+  "current_price": 14
+ },
+ {
+  "sheet_row": 94,
+  "name": "Isiah Thomas",
+  "position": "Guard",
+  "adp": 92.2,
+  "current_price": 13
+ },
+ {
+  "sheet_row": 95,
+  "name": "Pau Gasol",
+  "position": "Forward/Big",
+  "adp": 92.6,
+  "current_price": 13
+ },
+ {
+  "sheet_row": 96,
+  "name": "Chet Holmgren",
+  "position": "Forward/Big",
+  "adp": 98.4,
+  "current_price": 13
+ },
+ {
+  "sheet_row": 97,
+  "name": "James Worthy",
+  "position": "Foward",
+  "adp": 98.55,
+  "current_price": 13
+ },
+ {
+  "sheet_row": 98,
+  "name": "Khris Middleton",
+  "position": "Wing",
+  "adp": 100.3,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 99,
+  "name": "Bob Lanier",
+  "position": "Big",
+  "adp": 100.45,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 100,
+  "name": "Andre Iguodala",
+  "position": "Wing/Foward",
+  "adp": 101.0,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 101,
+  "name": "Mitch Richmond",
+  "position": "Wing",
+  "adp": 101.2,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 102,
+  "name": "Kyrie Irving",
+  "position": "Guard",
+  "adp": 101.3,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 103,
+  "name": "Jalen Williams",
+  "position": "Wing",
+  "adp": 101.35,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 104,
+  "name": "Dan Majerle",
+  "position": "Wing",
+  "adp": 101.75,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 105,
+  "name": "Jrue Holiday",
+  "position": "Guard",
+  "adp": 105.9,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 106,
+  "name": "Mike Conley",
+  "position": "Guard",
+  "adp": 106.45,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 107,
+  "name": "Jalen Brunson",
+  "position": "Guard",
+  "adp": 106.7,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 108,
+  "name": "Pascal Siakam",
+  "position": "Forward",
+  "adp": 106.75,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 109,
+  "name": "Rudy Gobert",
+  "position": "Big",
+  "adp": 107.9,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 110,
+  "name": "Jaylen Brown",
+  "position": "Wing",
+  "adp": 108.0,
+  "current_price": 12
+ },
+ {
+  "sheet_row": 111,
+  "name": "Chris Bosh",
+  "position": "Forward/Big",
+  "adp": 111.25,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 112,
+  "name": "Al Horford",
+  "position": "Big",
+  "adp": 112.25,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 113,
+  "name": "Derek Harper",
+  "position": "Guard",
+  "adp": 113.75,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 114,
+  "name": "Cade Cunningham",
+  "position": "Guard",
+  "adp": 114.6,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 115,
+  "name": "Bam Adebayo",
+  "position": "Big",
+  "adp": 115.55,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 116,
+  "name": "Alex English",
+  "position": "Wing/Forward",
+  "adp": 116.1,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 117,
+  "name": "Scottie Barnes",
+  "position": "Forward",
+  "adp": 116.8,
+  "current_price": 11
+ },
+ {
+  "sheet_row": 118,
+  "name": "Mikal Bridges",
+  "position": "Wing",
+  "adp": 117.6,
+  "current_price": 10
+ },
+ {
+  "sheet_row": 119,
+  "name": "Derrick White",
+  "position": "Guard",
+  "adp": 118.35,
+  "current_price": 10
+ },
+ {
+  "sheet_row": 120,
+  "name": "Jaren Jackson Jr.",
+  "position": "Forward",
+  "adp": 118.7,
+  "current_price": 10
+ },
+ {
+  "sheet_row": 121,
+  "name": "Michael Cooper",
+  "position": "Wing",
+  "adp": 121.2,
+  "current_price": 10
+ },
+ {
+  "sheet_row": 122,
+  "name": "Shane Battier",
+  "position": "Forward",
+  "adp": 123.9,
+  "current_price": 10
+ },
+ {
+  "sheet_row": 123,
+  "name": "LaMelo Ball",
+  "position": "Guard",
+  "adp": 124.1,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 124,
+  "name": "Paul Millsap",
+  "position": "Foward",
+  "adp": 124.15,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 125,
+  "name": "Bradley Beal",
+  "position": "Guard",
+  "adp": 124.4,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 126,
+  "name": "Jeff Hornacek",
+  "position": "Guard",
+  "adp": 125.85,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 127,
+  "name": "Doug Christie",
+  "position": "Wing",
+  "adp": 127.05,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 128,
+  "name": "OG Anunoby",
+  "position": "Wing/Foward",
+  "adp": 128.1,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 129,
+  "name": "Derrick Rose",
+  "position": "Guard",
+  "adp": 128.85,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 130,
+  "name": "Zion Williamson",
+  "position": "Forward",
+  "adp": 130.0,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 131,
+  "name": "Danny Granger",
+  "position": "Forward",
+  "adp": 130.8,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 132,
+  "name": "Gordon Hayward",
+  "position": "Wing",
+  "adp": 132.1,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 133,
+  "name": "Danny Green",
+  "position": "Wing",
+  "adp": 132.1,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 134,
+  "name": "Horace Grant",
+  "position": "Forward/Big",
+  "adp": 132.65,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 135,
+  "name": "Jack Sikma",
+  "position": "Big",
+  "adp": 132.8,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 136,
+  "name": "Elgin Baylor",
+  "position": "Forward",
+  "adp": 133.2,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 137,
+  "name": "Allen Iverson",
+  "position": "Guard",
+  "adp": 133.35,
+  "current_price": 9
+ },
+ {
+  "sheet_row": 138,
+  "name": "Donovan Mitchell",
+  "position": "Guard",
+  "adp": 135.35,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 139,
+  "name": "Paul Pressey",
+  "position": "Guard/Wing",
+  "adp": 136.2,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 140,
+  "name": "Bob Dandridge",
+  "position": "Wing/Forward",
+  "adp": 136.85,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 141,
+  "name": "Lamar Odom",
+  "position": "Forward",
+  "adp": 137.45,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 142,
+  "name": "Lauri Markkanen",
+  "position": "Forward",
+  "adp": 138.0,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 143,
+  "name": "Desmond Bane",
+  "position": "Guard/Wing",
+  "adp": 138.35,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 144,
+  "name": "Kevin Love",
+  "position": "Foward/Big",
+  "adp": 141.35,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 145,
+  "name": "Hersey Hawkins",
+  "position": "Guard/Wing",
+  "adp": 141.55,
+  "current_price": 8
+ },
+ {
+  "sheet_row": 146,
+  "name": "Ron Artest",
+  "position": "Forward",
+  "adp": 145.55,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 147,
+  "name": "Kevin McHale",
+  "position": "Forward",
+  "adp": 146.05,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 148,
+  "name": "Gilbert Arenas",
+  "position": "Guard",
+  "adp": 146.3,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 149,
+  "name": "Artis Gilmore",
+  "position": "Big",
+  "adp": 147.1,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 150,
+  "name": "Baron Davis",
+  "position": "Guard",
+  "adp": 147.15,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 151,
+  "name": "Lou Hudson",
+  "position": "Wing",
+  "adp": 151.1,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 152,
+  "name": "Michael Finley",
+  "position": "Wing/Forward",
+  "adp": 152.0,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 153,
+  "name": "Sam Jones",
+  "position": "Guard",
+  "adp": 152.3,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 154,
+  "name": "Joe Johnson",
+  "position": "Wing",
+  "adp": 154.2,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 155,
+  "name": "Chris Webber",
+  "position": "Forward",
+  "adp": 154.35,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 156,
+  "name": "Blake Griffin",
+  "position": "Forward",
+  "adp": 154.5,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 157,
+  "name": "Dennis Rodman",
+  "position": "Forward",
+  "adp": 155.9,
+  "current_price": 7
+ },
+ {
+  "sheet_row": 158,
+  "name": "Chet Walker",
+  "position": "Wing/Forward",
+  "adp": 157.85,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 159,
+  "name": "Walter Davis",
+  "position": "Wing",
+  "adp": 158.3,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 160,
+  "name": "Darius Garland",
+  "position": "Guard",
+  "adp": 158.8,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 161,
+  "name": "Connie Hawkins",
+  "position": "Forward",
+  "adp": 159.6,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 162,
+  "name": "David Thompson",
+  "position": "Wing",
+  "adp": 159.8,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 163,
+  "name": "Richard Hamilton",
+  "position": "Wing",
+  "adp": 164.3,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 164,
+  "name": "Joakim Noah",
+  "position": "Big",
+  "adp": 165.6,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 165,
+  "name": "Dominique Wilkins",
+  "position": "Forward",
+  "adp": 166.6,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 166,
+  "name": "Tyson Chandler",
+  "position": "Big",
+  "adp": 167.75,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 167,
+  "name": "Tayshaun Prince",
+  "position": "Forward",
+  "adp": 168.15,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 168,
+  "name": "Tim Hardaway Sr.",
+  "position": "Guard",
+  "adp": 168.65,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 169,
+  "name": "Reggie Lewis",
+  "position": "Wing",
+  "adp": 168.7,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 170,
+  "name": "Latrell Sprewell",
+  "position": "Wing",
+  "adp": 168.95,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 171,
+  "name": "Hedo Turkoglu",
+  "position": "Forward",
+  "adp": 169.1,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 172,
+  "name": "Jamal Murray",
+  "position": "Guard",
+  "adp": 170.95,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 173,
+  "name": "Tyrese Maxey",
+  "position": "Guard",
+  "adp": 172.15,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 174,
+  "name": "Steve Smith",
+  "position": "Wing",
+  "adp": 173.85,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 175,
+  "name": "Ron Harper",
+  "position": "Wing",
+  "adp": 173.9,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 176,
+  "name": "Dennis Johnson",
+  "position": "Guard",
+  "adp": 174.05,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 177,
+  "name": "Luol Deng",
+  "position": "Wing/Forward",
+  "adp": 175.2,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 178,
+  "name": "Kiki VanDeWeghe",
+  "position": "Foward",
+  "adp": 175.55,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 179,
+  "name": "Ja Morant",
+  "position": "Guard",
+  "adp": 175.9,
+  "current_price": 6
+ },
+ {
+  "sheet_row": 180,
+  "name": "Sam Perkins",
+  "position": "Forward",
+  "adp": 179.35,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 181,
+  "name": "Dikembe Mutombo",
+  "position": "Big",
+  "adp": 180.7,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 182,
+  "name": "Gus Johnson",
+  "position": "Forward",
+  "adp": 180.85,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 183,
+  "name": "Nicolas Batum",
+  "position": "Wing/Forward",
+  "adp": 180.9,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 184,
+  "name": "Goran Dragic",
+  "position": "Guard",
+  "adp": 181.1,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 185,
+  "name": "Robert Horry",
+  "position": "Forward",
+  "adp": 181.6,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 186,
+  "name": "Elton Brand",
+  "position": "Forward",
+  "adp": 183.15,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 187,
+  "name": "David West",
+  "position": "Forward",
+  "adp": 184.0,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 188,
+  "name": "Wesley Matthews",
+  "position": "Guard",
+  "adp": 184.7,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 189,
+  "name": "Ben Wallace",
+  "position": "Big",
+  "adp": 187.5,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 190,
+  "name": "Michael Redd",
+  "position": "Wing",
+  "adp": 188.2,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 191,
+  "name": "Paul Westphal",
+  "position": "Guard",
+  "adp": 188.95,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 192,
+  "name": "Billy Cunningham",
+  "position": "Wing",
+  "adp": 190.05,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 193,
+  "name": "George Hill",
+  "position": "Guard",
+  "adp": 190.7,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 194,
+  "name": "Bernard King",
+  "position": "Wing/Forward",
+  "adp": 191.0,
+  "current_price": 5
+ },
+ {
+  "sheet_row": 195,
+  "name": "Alvan Adams",
+  "position": "Big",
+  "adp": 192.35,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 196,
+  "name": "Kyle Korver",
+  "position": "Wing",
+  "adp": 195.2,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 197,
+  "name": "Antonio McDyess",
+  "position": "Forward/Big",
+  "adp": 197.75,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 198,
+  "name": "Nate Thurmond",
+  "position": "Big",
+  "adp": 198.05,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 199,
+  "name": "Ivica Zubac",
+  "position": "Big",
+  "adp": 200.65,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 200,
+  "name": "Gus Williams",
+  "position": "Guard",
+  "adp": 200.85,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 201,
+  "name": "Robert Covington",
+  "position": "Foward",
+  "adp": 201.05,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 202,
+  "name": "Andrew Bogut",
+  "position": "Big",
+  "adp": 202.5,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 203,
+  "name": "Glen Rice",
+  "position": "Wing",
+  "adp": 204.0,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 204,
+  "name": "Franz Wagner",
+  "position": "Forward",
+  "adp": 204.9,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 205,
+  "name": "Amar'e Stoudemire",
+  "position": "Forward/Big",
+  "adp": 205.1,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 206,
+  "name": "Bob Pettit",
+  "position": "Forward",
+  "adp": 205.65,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 207,
+  "name": "Robert Parish",
+  "position": "Big",
+  "adp": 206.45,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 208,
+  "name": "Carmelo Anthony",
+  "position": "Wing/Forward",
+  "adp": 206.45,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 209,
+  "name": "John Wall",
+  "position": "Guard",
+  "adp": 207.15,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 210,
+  "name": "Scott Wedman",
+  "position": "Wing/Forward",
+  "adp": 208.85,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 211,
+  "name": "Boris Diaw",
+  "position": "Forward",
+  "adp": 209.15,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 212,
+  "name": "Andrew Wiggins",
+  "position": "Wing",
+  "adp": 209.6,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 213,
+  "name": "Dick Van Arsdale",
+  "position": "Wing",
+  "adp": 210.4,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 214,
+  "name": "Terrell Brandon",
+  "position": "Guard",
+  "adp": 210.75,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 215,
+  "name": "Josh Howard",
+  "position": "Forward",
+  "adp": 211.1,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 216,
+  "name": "Bobby Phills",
+  "position": "Guard/Wing",
+  "adp": 212.85,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 217,
+  "name": "Kristaps Porzingis",
+  "position": "BIg",
+  "adp": 213.15,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 218,
+  "name": "Tony Parker",
+  "position": "Guard",
+  "adp": 214.85,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 219,
+  "name": "Trae Young",
+  "position": "Guard",
+  "adp": 215.05,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 220,
+  "name": "Kirk Hinrich",
+  "position": "Guard",
+  "adp": 216.15,
+  "current_price": 4
+ },
+ {
+  "sheet_row": 221,
+  "name": "Lonzo Ball",
+  "position": "Guard",
+  "adp": 219.6,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 222,
+  "name": "Kemba Walker",
+  "position": "Guard",
+  "adp": 220.2,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 223,
+  "name": "Jamaal Wilkes",
+  "position": "Wing/Forward",
+  "adp": 220.55,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 224,
+  "name": "Gerald Wallace",
+  "position": "Forward",
+  "adp": 221.15,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 225,
+  "name": "Josh Smith",
+  "position": "Forward",
+  "adp": 221.2,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 226,
+  "name": "Jarrett Allen",
+  "position": "Big",
+  "adp": 221.55,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 227,
+  "name": "Brad Daugherty",
+  "position": "BIg",
+  "adp": 222.65,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 228,
+  "name": "Aaron Gordon",
+  "position": "Forward",
+  "adp": 222.8,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 229,
+  "name": "Jermaine O'Neal",
+  "position": "Forward/Big",
+  "adp": 223.3,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 230,
+  "name": "Arvydas Sabonis",
+  "position": "Big",
+  "adp": 225.15,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 231,
+  "name": "Hal Greer",
+  "position": "Guard",
+  "adp": 225.4,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 232,
+  "name": "Sleepy Floyd",
+  "position": "Guard",
+  "adp": 226.65,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 233,
+  "name": "Clifford Robinson",
+  "position": "Forward",
+  "adp": 228.4,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 234,
+  "name": "Detlef Schrempf",
+  "position": "Forward",
+  "adp": 229.9,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 235,
+  "name": "Maurice Cheeks",
+  "position": "Guard",
+  "adp": 232.95,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 236,
+  "name": "Fat Lever",
+  "position": "Guard",
+  "adp": 233.35,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 237,
+  "name": "Sam Cassell",
+  "position": "Guard",
+  "adp": 235.05,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 238,
+  "name": "Sam Lacey",
+  "position": "BIg",
+  "adp": 237.8,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 239,
+  "name": "Tiny Archibald",
+  "position": "Guard",
+  "adp": 240.7,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 240,
+  "name": "Byron Scott",
+  "position": "Guard",
+  "adp": 240.95,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 241,
+  "name": "Brent Barry",
+  "position": "Wing",
+  "adp": 242.1,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 242,
+  "name": "Brook Lopez",
+  "position": "Big",
+  "adp": 242.15,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 243,
+  "name": "Jamal Mashburn",
+  "position": "Wing",
+  "adp": 242.85,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 244,
+  "name": "Fred VanVleet",
+  "position": "Guard",
+  "adp": 243.2,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 245,
+  "name": "Otto Porter Jr.",
+  "position": "Forward",
+  "adp": 244.55,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 246,
+  "name": "Jason Terry",
+  "position": "Guard",
+  "adp": 245.15,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 247,
+  "name": "Dale Ellis",
+  "position": "Wing",
+  "adp": 246.45,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 248,
+  "name": "Isaiah Thomas",
+  "position": "Guard",
+  "adp": 247.55,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 249,
+  "name": "Rolando Blackman",
+  "position": "Wing",
+  "adp": 247.8,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 250,
+  "name": "Yao Ming",
+  "position": "Big",
+  "adp": 249.95,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 251,
+  "name": "Brad Miller",
+  "position": "Forward/Big",
+  "adp": 250.3,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 252,
+  "name": "Vlade Divac",
+  "position": "Big",
+  "adp": 250.35,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 253,
+  "name": "Danny Ainge",
+  "position": "Guard",
+  "adp": 251.15,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 254,
+  "name": "Anthony Mason",
+  "position": "Forward",
+  "adp": 251.3,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 255,
+  "name": "Michael Porter Jr.",
+  "position": "Wing/Forward",
+  "adp": 251.4,
+  "current_price": 3
+ },
+ {
+  "sheet_row": 256,
+  "name": "Cooper Flagg",
+  "position": "Forward",
+  "adp": 254.5,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 257,
+  "name": "Alex Caruso",
+  "position": "Guard/Wing",
+  "adp": 254.55,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 258,
+  "name": "Elvin Hayes",
+  "position": "Forward/Big",
+  "adp": 254.8,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 259,
+  "name": "Toni Kukoc",
+  "position": "Forward",
+  "adp": 257.3,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 260,
+  "name": "Kon Knueppel",
+  "position": "Wing",
+  "adp": 258.7,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 261,
+  "name": "Isaiah Hartenstein",
+  "position": "Forward/Big",
+  "adp": 259.25,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 262,
+  "name": "Amen Thompson",
+  "position": "Wing/Forward",
+  "adp": 260.15,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 263,
+  "name": "Bob Love",
+  "position": "Forward",
+  "adp": 261.05,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 264,
+  "name": "Derrick Coleman",
+  "position": "Forward",
+  "adp": 262.0,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 265,
+  "name": "Trevor Ariza",
+  "position": "Wing",
+  "adp": 262.05,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 266,
+  "name": "De'Aaron Fox",
+  "position": "Guard",
+  "adp": 268.25,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 267,
+  "name": "Nene Hilario",
+  "position": "Big",
+  "adp": 268.9,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 268,
+  "name": "Marcus Smart",
+  "position": "Guard/Wing",
+  "adp": 269.1,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 269,
+  "name": "Caron Butler",
+  "position": "Wing",
+  "adp": 269.8,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 270,
+  "name": "Wes Unseld",
+  "position": "Big",
+  "adp": 273.7,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 271,
+  "name": "Zach LaVine",
+  "position": "Wing",
+  "adp": 274.75,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 272,
+  "name": "Dave DeBusschere",
+  "position": "Forward",
+  "adp": 274.9,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 273,
+  "name": "Phil Smith",
+  "position": "Guard",
+  "adp": 275.25,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 274,
+  "name": "Brian Taylor",
+  "position": "Guard",
+  "adp": 275.55,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 275,
+  "name": "Wesley Person",
+  "position": "Guard",
+  "adp": 275.95,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 276,
+  "name": "Roger Brown",
+  "position": "Wing",
+  "adp": 276.2,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 277,
+  "name": "Steve Francis",
+  "position": "Guard",
+  "adp": 276.55,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 278,
+  "name": "Don Buse",
+  "position": "Ass",
+  "adp": 277.8,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 279,
+  "name": "PJ Brown",
+  "position": "Forward",
+  "adp": 279.25,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 280,
+  "name": "Bill Laimbeer",
+  "position": "Big",
+  "adp": 280.4,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 281,
+  "name": "Mookie Blaylock",
+  "position": "Guard",
+  "adp": 281.2,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 282,
+  "name": "Dan Roundfield",
+  "position": "Forward",
+  "adp": 282.65,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 283,
+  "name": "Gary Harris",
+  "position": "Guard",
+  "adp": 283.8,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 284,
+  "name": "Mike Miller",
+  "position": "Wing",
+  "adp": 285.4,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 285,
+  "name": "Brandon Ingram",
+  "position": "Wing/Forward",
+  "adp": 286.1,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 286,
+  "name": "Nate McMillan",
+  "position": "Wing",
+  "adp": 287.59,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 287,
+  "name": "Jon McGlocklin",
+  "position": "Guard",
+  "adp": 287.7,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 288,
+  "name": "Raja Bell",
+  "position": "Wing",
+  "adp": 289.06,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 289,
+  "name": "Robert Williams",
+  "position": "Big",
+  "adp": 289.4,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 290,
+  "name": "Jaden McDaniels",
+  "position": "Wing/Forward",
+  "adp": 290.1,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 291,
+  "name": "Fred Brown",
+  "position": "Guard",
+  "adp": 290.55,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 292,
+  "name": "Danilo Gallinari",
+  "position": "Forward",
+  "adp": 290.8,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 293,
+  "name": "Jalen Duren",
+  "position": "Big",
+  "adp": 290.9,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 294,
+  "name": "Ralph Sampson",
+  "position": "BIg",
+  "adp": 292.05,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 295,
+  "name": "Richard Jefferson",
+  "position": "Wing",
+  "adp": 292.4,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 296,
+  "name": "Phil Chenier",
+  "position": "Guard",
+  "adp": 292.55,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 297,
+  "name": "Austin Reaves",
+  "position": "Guard",
+  "adp": 293.11,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 298,
+  "name": "Malcolm Brogdon",
+  "position": "Guard",
+  "adp": 294.35,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 299,
+  "name": "Herb Jones",
+  "position": "Forward",
+  "adp": 296.3,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 300,
+  "name": "Serge Ibaka",
+  "position": "Forward/Big",
+  "adp": 296.46,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 301,
+  "name": "Larry Johnson",
+  "position": "Forward",
+  "adp": 297.05,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 302,
+  "name": "Marcus Camby",
+  "position": "BIg",
+  "adp": 297.1,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 303,
+  "name": "Rod Strickland",
+  "position": "Guard",
+  "adp": 297.95,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 304,
+  "name": "Theo Ratliff",
+  "position": "BIg",
+  "adp": 298.69,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 305,
+  "name": "Ausar Thompson",
+  "position": "Wing/Forward",
+  "adp": 298.9,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 306,
+  "name": "Kerry Kittles",
+  "position": "Wing",
+  "adp": 299.25,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 307,
+  "name": "JJ Redick",
+  "position": "Guard",
+  "adp": 299.36,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 308,
+  "name": "Dylan Harper",
+  "position": "Wing",
+  "adp": 300.0,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 309,
+  "name": "Buck Williams",
+  "position": "Guard/Wing",
+  "adp": 300.2,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 310,
+  "name": "Mike Bibby",
+  "position": "Guard",
+  "adp": 301.15,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 311,
+  "name": "Deni Avdija",
+  "position": "Forward",
+  "adp": 301.94,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 312,
+  "name": "LaMarcus Aldridge",
+  "position": "Forward/Big",
+  "adp": 302.05,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 313,
+  "name": "Jerome Kersey",
+  "position": "Forward",
+  "adp": 302.1,
+  "current_price": 2
+ },
+ {
+  "sheet_row": 314,
+  "name": "Ben Simmons",
+  "position": "Foward",
+  "adp": 302.6,
+  "current_price": 2
+ }
+]

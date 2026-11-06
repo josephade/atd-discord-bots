@@ -6,6 +6,15 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from flux_rules import parse_prices, qualify, threshold, saved_message, failure_message, failure_reports
+
+
+class NegativeFluxPrices(unittest.TestCase):
+    def test_drop_can_cross_zero_and_negative_thresholds_remain_invalid(self):
+        book = parse_prices([['Player','Value','Round 2'],['Nene',2,'-$1']])
+        self.assertEqual(qualify(dict(player='Nene',flux_drop=3),book)['price'],-1)
+        self.assertIsNone(qualify(dict(player='Nene',flux_drop=-1),book))
+        with self.assertRaises(ValueError):
+            threshold(-1)
 from test_autopick import namespace
 
 
@@ -50,7 +59,7 @@ class FluxRuleTests(unittest.TestCase):
         self.assertIsNone(qualify(dict(player='Booker', flux_drop=3.1), book))
 
     def test_invalid_or_missing_newest_cells_and_no_flux_do_not_fall_back(self):
-        for bad in ('', '#REF!', 'NaN', 'Infinity', -1):
+        for bad in ('', '#REF!', 'NaN', 'Infinity'):
             book = parse_prices([['Player', 'Value', 'Round 2', 'Round 3'], ['Booker', 30, 20, bad]])
             self.assertIsNone(qualify(dict(player='Booker', flux_drop=3), book))
         for header, row in [(['Player', 'Value'], ['Booker', 30]),

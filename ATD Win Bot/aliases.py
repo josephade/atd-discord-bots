@@ -3,6 +3,11 @@
 # Values are the canonical Win Sheet name (case preserved).
 # Add entries here whenever someone changes their name.
 DRAFTER_ALIASES = {
+    # Confirmed by the owner during the 2026-11-04 merchant identity audit.
+    "fan":                  "Esan",
+    "asoapz":               "Vishawn",
+    "dark rick":            "Rick",
+    "myst imo":             "Myst",
     "silver":               "Silveryo",
     "lebron d james r":     "Dogboy",
     "lucario":              "Element",

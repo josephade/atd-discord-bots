@@ -389,7 +389,7 @@ def _player_available(player_name: str, availability: dict, roster_names: set | 
 
 
 # ── Pick text helpers ─────────────────────────────────────────────────────────
-_PRICE_RE = re.compile(r"\$\s*(\d+(?:\.\d+)?)")
+_PRICE_RE = re.compile(r"(?:-\$\s*\d+(?:\.\d+)?|\$\s*-?\d+(?:\.\d+)?)")
 # Alternatives: 'YY (apostrophe) | YYYY-YY(YY) | bare YYYY | YY-YY (no apostrophe,
 # e.g. "22-23" — same short-form GMs use without thinking to add the apostrophe).
 _YEAR_RE  = re.compile(r"'(\d{2})\b|(\d{4})-(\d{2,4})\b|\b(\d{4})\b|\b(\d{2})-(\d{2})\b")
@@ -418,9 +418,11 @@ def _parse_pick_line(text: str) -> dict:
     # Strip leading "N." numbering
     text = re.sub(r"^\d+\.\s*", "", text.strip())
 
+    text = text.replace('\u2212', '-').replace('\uff0d', '-')
     pm = _PRICE_RE.search(text)
     if pm:
-        price = int(float(pm.group(1)))
+        price = float(pm.group(0).replace('$', '').replace(' ', ''))
+        price = int(price) if price.is_integer() else price
         text  = (text[: pm.start()] + text[pm.end() :]).strip()
 
     ym = _YEAR_RE.search(text)
@@ -1584,6 +1586,12 @@ async def cmd_synclotto(ctx):
 @bot.command(name="alllists")
 async def cmd_alllists(ctx):
     """!alllists — show every registered drafter's pick list (owner only)."""
+    try:
+        if await _anonymous_lists.alllists(ctx):
+            return
+    except BridgeError as exc:
+        await ctx.send(str(exc),allowed_mentions=discord.AllowedMentions.none())
+        return
     in_dm = isinstance(ctx.channel, discord.DMChannel)
     _ALLLISTS_AUTHORIZED = {OWNER_ID, 1174419581675249807}
     is_owner = ctx.author.id in _ALLLISTS_AUTHORIZED

@@ -1,0 +1,5 @@
+discord.py>=2.3.2,<3
+python-dotenv>=1.0,<2
+Pillow>=10.4,<13
+gspread>=5.12,<7
+nba_api>=1.5,<2

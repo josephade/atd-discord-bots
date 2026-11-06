@@ -4,6 +4,82 @@ const { parse } = require('../commands');
 const { NFLData, extractBoxscore } = require('../data');
 const { Boxscores, boxscoreHTML, SELECT_PREFIX, HOME_ID, PREV_ID, NEXT_ID, REFRESH_ID, shiftWeek } = require('../boxscores');
 const { gamesHTML } = require('../games_layout');
+const { boxscorePages, SECTION_ID } = require('../boxscores');
+const { leaders, overviewHTML } = require('../boxscore_overview');
+
+test('overview ranks game leaders from real stats and keeps quarter scores and team comparisons', () => {
+  const s = summary();
+  s.header.competitions[0].competitors[0].linescores = [7, 3, 0, 10, 3].map(value => ({ displayValue: String(value) }));
+  s.boxscore.teams = [{ team: { id: 'HOME' }, statistics: [{ name: 'totalYards', displayValue: '412' }] }];
+  const model = extractBoxscore(s);
+  assert.equal(model.teams[1].linescores[4], '3');
+  assert.equal(model.teams[1].teamStats.totalYards, '412');
+  const selected = leaders(model.teams[0]);
+  assert.equal(selected[0].name, 'Starter');
+  assert.match(selected[0].stats, /225 pass yds/);
+  assert.match(selected[0].stats, /2 TD/);
+  const markup = overviewHTML(model);
+  assert.match(markup, /STANDOUT PLAYERS/);
+  assert.match(markup, /SCORE BY QUARTER/);
+  assert.match(markup, /<th>OT<\/th>/);
+  assert.match(markup, /412/);
+  assert.doesNotMatch(markup, />Unavailable</);
+  assert.match(overviewHTML({ ...model, state: 'pre' }), /Kickoff pending/);
+  assert.doesNotMatch(overviewHTML({ ...model, state: 'pre' }), /225 pass yds/);
+  assert.doesNotMatch(overviewHTML({ ...model, state: 'in', teams: model.teams.map(t => ({ ...t, score: '—' })) }), /win by|lead by/);
+});
+
+test('box score shows each team overall record beside its name on every page and omits it when missing', () => {
+  const s = summary();
+  s.header.competitions[0].competitors[1].record = [{ type: 'road', summary: '4-0' }, { type: 'total', summary: '5-2-1' }];
+  const model = extractBoxscore(s);
+  assert.equal(model.teams[0].record, '5-2-1'); assert.equal(model.teams[1].record, '');
+  const overview = overviewHTML(model);
+  assert.match(overview, /<b>AWAY Team<em class="team-record">5-2-1<\/em><\/b>/);
+  assert.match(overview, /<b>HOME Team<\/b>/);
+  const markup = boxscoreHTML(model);
+  assert.match(markup, /<h2>AWAY Team<em class="team-record">5-2-1<\/em><\/h2>/);
+  assert.match(markup, /<h2>HOME Team<\/h2>/);
+});
+
+test('readable pages retain every category, player and total within a bounded table size', () => {
+  const categories = ['passing', 'rushing', 'receiving', 'fumbles', 'defensive', 'interceptions', 'kickReturns', 'puntReturns', 'kicking', 'punting'].map((key, i) => ({
+    key, label: key, labels: ['YDS'], totals: ['100'],
+    players: Array.from({ length: key === 'defensive' ? 37 : 4 }, (_, n) => ({ name: `${i}-${n}`, values: [String(n)] })),
+  }));
+  const model = { state: 'post', teams: ['CAR', 'GB'].map(abbreviation => ({ abbreviation, categories })) };
+  const pages = boxscorePages(model);
+  assert.equal(pages[0].sectionLabel, 'Game Overview');
+  assert.equal(pages[0].overview, true);
+  for (const page of pages.slice(1)) {
+    assert.equal(page.teams.length, 1);
+    assert.equal(page.scoreTeams.length, 2);
+    assert.ok(page.teams[0].categories.reduce((n, c) => n + c.players.length + 3, 0) <= 26);
+  }
+  for (const team of model.teams) {
+    const actual = pages.filter(p => !p.overview && p.teams[0].abbreviation === team.abbreviation).flatMap(p => p.teams[0].categories);
+    assert.deepEqual(actual.flatMap(c => c.players.map(p => p.name)).sort(), categories.flatMap(c => c.players.map(p => p.name)).sort());
+    assert.equal(actual.filter(c => c.totals).length, categories.length);
+  }
+  assert.ok(pages.some(p => /Defense 2/.test(p.sectionLabel)));
+  assert.match(boxscoreHTML(pages[0]), /PAGE 1/);
+});
+
+test('switching stats sections reuses the box score; Refresh reloads and preserves the section', async () => {
+  const f = fixture();
+  await f.controller.open(f.message, f.slate);
+  await f.controller.handle(f.interaction);
+  const before = f.calls.length;
+  await f.controller.handle({ ...f.interaction, customId: SECTION_ID, values: ['2'] });
+  assert.equal(f.calls.length, before);
+  assert.match(f.edits.at(-1).content, /HOME/);
+  await f.controller.handle({ ...f.interaction, customId: REFRESH_ID });
+  assert.equal(f.calls.length, before + 1);
+  assert.equal(f.controller.entries.get('menu').pageIndex, 2);
+  assert.ok(f.edits.at(-1).components.length <= 5);
+  await f.controller.handle({ ...f.interaction, customId: SECTION_ID, values: ['999'] });
+  assert.match(f.notices.at(-1).content, /choose a stats section/);
+});
 
 test('boxscores command supports the active slate or a validated date', () => {
   assert.deepEqual(parse('NFL BOXSCORES'), { command: 'boxscores', date: undefined });

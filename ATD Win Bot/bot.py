@@ -253,7 +253,7 @@ def _roster_player_names(entry: dict):
             yield key, name
 
 
-def _make_drafter_resolver(drafters: list):
+def _make_drafter_resolver(drafters: list, profiles: dict = None):
     """Resolve exact names, configured aliases and unique name variants.
 
     Do not let a reverse alias overwrite another GM's actual Win Sheet name.
@@ -264,6 +264,34 @@ def _make_drafter_resolver(drafters: list):
     for d in drafters:
         for variant in _all_name_variants(d['name']):
             variants.setdefault(variant.strip().casefold(), set()).add(d['name'])
+    profiles = _load_profiles() if profiles is None else profiles
+
+    def identity_key(label):
+        return re.sub(r'[^a-z0-9]', '', _fold(label).casefold())
+
+    normalized = {}
+    for label, names in variants.items():
+        key = identity_key(label)
+        if key:
+            normalized.setdefault(key, set()).update(names)
+    # Include approved aliases even when the alias target is itself an old
+    # handle. A collision remains ambiguous rather than choosing the first GM.
+    for label, target in DRAFTER_ALIASES.items():
+        seen = set()
+        while target.casefold() not in seen:
+            seen.add(target.casefold())
+            alias = DRAFTER_ALIASES.get(target.lower())
+            if not alias:
+                break
+            target = alias.strip()
+        names = ({exact[target.casefold()]} if target.casefold() in exact
+                 else variants.get(target.casefold(), set()))
+        key = identity_key(label)
+        if key:
+            normalized.setdefault(key, set()).update(names)
+    for label, target in _CASE_SENSITIVE_NAME_OVERRIDES.items():
+        if target.casefold() in exact:
+            normalized.setdefault(identity_key(label), set()).add(exact[target.casefold()])
     cache = {}
     unknown = {}
 
@@ -288,6 +316,43 @@ def _make_drafter_resolver(drafters: list):
                 match = next(iter(candidates))
         if not match:
             match = exact.get(raw.casefold())
+        if not match:
+            # Historical lotto owners can carry an old handle or title in
+            # parentheses. Resolve those parts through the same approved alias
+            # registry as plain names, but never guess between multiple GMs.
+            candidates = set()
+            for part in _name_variants(raw)[1:]:
+                part = _CASE_SENSITIVE_NAME_OVERRIDES.get(part, part)
+                seen = set()
+                while part.casefold() not in seen:
+                    seen.add(part.casefold())
+                    alias = DRAFTER_ALIASES.get(part.lower())
+                    if not alias:
+                        break
+                    part = alias.strip()
+                known = exact.get(part.casefold())
+                if known:
+                    candidates.add(known)
+                else:
+                    candidates.update(variants.get(part.casefold(), set()))
+            if len(candidates) == 1:
+                match = next(iter(candidates))
+        if not match:
+            candidates = set()
+            for part in _name_variants(raw):
+                candidates.update(normalized.get(identity_key(part), set()))
+            if len(candidates) == 1:
+                match = next(iter(candidates))
+        if not match:
+            # Older lotto parsing sometimes saved a mention's numeric tail.
+            # Only a verified linked profile can turn that ID into an owner.
+            mention = re.fullmatch(r'(?:<@!?)?(\d{17,20})>?', raw)
+            if mention:
+                linked = profiles.get(mention.group(1), {}).get('sheet_name', '').strip()
+                if linked and linked != raw and not re.fullmatch(r'(?:<@!?)?\d{17,20}>?', linked):
+                    linked_match = resolve(linked)
+                    if linked_match in exact.values():
+                        match = linked_match
         if not match:
             match = unknown.setdefault(target.casefold(), target)
         cache[raw] = match

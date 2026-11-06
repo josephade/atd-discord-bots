@@ -3,6 +3,8 @@
 !package.json
 !package-lock.json
 !bot.js
+!access.js
+!help.js
 !commands.js
 !data.js
 !breakdown.js
@@ -13,6 +15,7 @@
 !salary.js
 !picks.js
 !future_picks.json
+!team_emojis.json
 !last10_layout.js
 !compare_layout.js
 !standings.js

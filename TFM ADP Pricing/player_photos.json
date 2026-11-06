@@ -1,0 +1,974 @@
+{
+ "Michael Jordan": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/893.png"
+ },
+ "LeBron James": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2544.png"
+ },
+ "Kevin Garnett": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/708.png"
+ },
+ "Stephen Curry": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201939.png"
+ },
+ "Shaquille O'Neal": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/406.png"
+ },
+ "Magic Johnson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77142.png"
+ },
+ "Larry Bird": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1449.png"
+ },
+ "Kareem Abdul-Jabbar": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76003.png"
+ },
+ "Hakeem Olajuwon": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/165.png"
+ },
+ "Kevin Durant": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201142.png"
+ },
+ "Jerry West": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/78497.png"
+ },
+ "Tim Duncan": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1495.png"
+ },
+ "Kobe Bryant": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/977.png"
+ },
+ "Dwyane Wade": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2548.png"
+ },
+ "Kawhi Leonard": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202695.png"
+ },
+ "Shai Gilgeous-Alexander": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628983.png"
+ },
+ "Nikola Jokic": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203999.png"
+ },
+ "Chris Paul": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/101108.png"
+ },
+ "David Robinson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/764.png"
+ },
+ "Victor Wembanyama": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1641705.png"
+ },
+ "Steve Nash": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/959.png"
+ },
+ "Tracy McGrady": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1503.png"
+ },
+ "Oscar Robertson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/600015.png"
+ },
+ "Bill Walton": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/78450.png"
+ },
+ "Giannis Antetokounmpo": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203507.png"
+ },
+ "Wilt Chamberlain": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76375.png"
+ },
+ "Anthony Davis": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203076.png"
+ },
+ "Julius Erving": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76681.png"
+ },
+ "Joel Embiid": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203954.png"
+ },
+ "Bill Russell": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/78049.png"
+ },
+ "Luka Doncic": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629029.png"
+ },
+ "James Harden": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201935.png"
+ },
+ "Dirk Nowitzki": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1717.png"
+ },
+ "Karl Malone": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/252.png"
+ },
+ "Jayson Tatum": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628369.png"
+ },
+ "Grant Hill": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/255.png"
+ },
+ "Scottie Pippen": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/937.png"
+ },
+ "Reggie Miller": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/397.png"
+ },
+ "Paul George": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202331.png"
+ },
+ "Penny Hardaway": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/358.png"
+ },
+ "Charles Barkley": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/787.png"
+ },
+ "Draymond Green": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203110.png"
+ },
+ "Manu Ginobili": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1938.png"
+ },
+ "Walt Frazier": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76750.png"
+ },
+ "Jimmy Butler": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202710.png"
+ },
+ "Bob McAdoo": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77498.png"
+ },
+ "Clyde Drexler": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/17.png"
+ },
+ "Ray Allen": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/951.png"
+ },
+ "Paul Pierce": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1718.png"
+ },
+ "Dwight Howard": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2730.png"
+ },
+ "Damian Lillard": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203081.png"
+ },
+ "John Havlicek": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76970.png"
+ },
+ "Chris Mullin": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/904.png"
+ },
+ "Rick Barry": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/600013.png"
+ },
+ "Vince Carter": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1713.png"
+ },
+ "Sidney Moncrief": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/1/12/Sidney_Moncrief_2015.jpg/500px-Sidney_Moncrief_2015.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Sidney_Moncrief"
+ },
+ "Moses Malone": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77449.png"
+ },
+ "Mark Price": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Mark_Price_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Mark_Price"
+ },
+ "Patrick Ewing": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/05/Patrick_Ewing_2021_%28cropped%29.jpg/500px-Patrick_Ewing_2021_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Patrick_Ewing"
+ },
+ "Willis Reed": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77929.png"
+ },
+ "Jason Kidd": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/8/84/Jason_Kidd_Nets_coach_cropped.jpg/500px-Jason_Kidd_Nets_coach_cropped.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Jason_Kidd"
+ },
+ "Anthony Edwards": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630162.png"
+ },
+ "Russell Westbrook": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201566.png"
+ },
+ "Klay Thompson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202691.png"
+ },
+ "Shawn Kemp": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/431.png"
+ },
+ "Tyrese Haliburton": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630169.png"
+ },
+ "Rasheed Wallace": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/739.png"
+ },
+ "Chauncey Billups": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1497.png"
+ },
+ "Terry Porter": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/8/8a/Terry_Porter.jpg/500px-Terry_Porter.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Terry_Porter"
+ },
+ "Marques Johnson": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/f/f8/Marques_johnson_ucla.JPG",
+  "credit_url": "https://en.wikipedia.org/wiki/Marques_Johnson"
+ },
+ "Kyle Lowry": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/200768.png"
+ },
+ "Rashard Lewis": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c7/Rashard_Lewis_Wizards_2.jpg/500px-Rashard_Lewis_Wizards_2.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Rashard_Lewis"
+ },
+ "Eddie Jones": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/224.png"
+ },
+ "Deron Williams": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/101114.png"
+ },
+ "Devin Booker": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1626164.png"
+ },
+ "Brandon Roy": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/4/49/Brandon_Roy_pregame_%28cropped%29.jpg/500px-Brandon_Roy_pregame_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Brandon_Roy"
+ },
+ "Karl-Anthony Towns": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1626157.png"
+ },
+ "Larry Nance Sr.": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/2/26/Larry_Nance_-_Phoenix_Suns.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Larry_Nance"
+ },
+ "Alonzo Mourning": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/297.png"
+ },
+ "Gary Payton": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/56.png"
+ },
+ "Peja Stojakovic": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/978.png"
+ },
+ "Evan Mobley": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630596.png"
+ },
+ "Shawn Marion": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c5/Shawn_Marion_2013-03-27_%281%29.jpg/500px-Shawn_Marion_2013-03-27_%281%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Shawn_Marion"
+ },
+ "Andrei Kirilenko": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/00/Andrei_Kirilenko_in_2024.jpg/500px-Andrei_Kirilenko_in_2024.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Andrei_Kirilenko"
+ },
+ "John Stockton": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/304.png"
+ },
+ "Kevin Johnson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/134.png"
+ },
+ "George Gervin": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76804.png"
+ },
+ "Marc Gasol": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201188.png"
+ },
+ "Dave Cowens": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76462.png"
+ },
+ "Joe Dumars": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/247.png"
+ },
+ "Victor Oladipo": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203506.png"
+ },
+ "Bobby Jones": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/b/bd/BobbyJones2.jpg/500px-BobbyJones2.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Bobby_Jones_(basketball,_born_1951)"
+ },
+ "Isiah Thomas": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/78318.png"
+ },
+ "Pau Gasol": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2200.png"
+ },
+ "Chet Holmgren": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1631096.png"
+ },
+ "James Worthy": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1460.png"
+ },
+ "Khris Middleton": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203114.png"
+ },
+ "Bob Lanier": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/f/fd/BobLanier.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Bob_Lanier"
+ },
+ "Andre Iguodala": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2738.png"
+ },
+ "Mitch Richmond": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/782.png"
+ },
+ "Kyrie Irving": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202681.png"
+ },
+ "Jalen Williams": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1631114.png"
+ },
+ "Dan Majerle": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/105.png"
+ },
+ "Jrue Holiday": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201950.png"
+ },
+ "Mike Conley": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201144.png"
+ },
+ "Jalen Brunson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628973.png"
+ },
+ "Pascal Siakam": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627783.png"
+ },
+ "Rudy Gobert": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203497.png"
+ },
+ "Jaylen Brown": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627759.png"
+ },
+ "Chris Bosh": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2547.png"
+ },
+ "Al Horford": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201143.png"
+ },
+ "Derek Harper": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/2/27/Derek_Harper_%289HFbKlxj1Es%29_%28cropped%29.png",
+  "credit_url": "https://en.wikipedia.org/wiki/Derek_Harper"
+ },
+ "Cade Cunningham": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630595.png"
+ },
+ "Bam Adebayo": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628389.png"
+ },
+ "Alex English": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/9/9f/Alex_English.jpg/500px-Alex_English.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Alex_English"
+ },
+ "Scottie Barnes": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630567.png"
+ },
+ "Mikal Bridges": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628969.png"
+ },
+ "Derrick White": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628401.png"
+ },
+ "Jaren Jackson Jr.": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628991.png"
+ },
+ "Michael Cooper": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/3/3a/Michael_Cooper_%287834581%29_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Michael_Cooper"
+ },
+ "Shane Battier": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f2/Shane_Battier_June_2023_%28cropped%29.jpg/500px-Shane_Battier_June_2023_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Shane_Battier"
+ },
+ "LaMelo Ball": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630163.png"
+ },
+ "Paul Millsap": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/200794.png"
+ },
+ "Bradley Beal": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203078.png"
+ },
+ "Jeff Hornacek": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/204.png"
+ },
+ "Doug Christie": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/57.png"
+ },
+ "OG Anunoby": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628384.png"
+ },
+ "Derrick Rose": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201565.png"
+ },
+ "Zion Williamson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629627.png"
+ },
+ "Danny Granger": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/101122.png"
+ },
+ "Gordon Hayward": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202330.png"
+ },
+ "Danny Green": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201980.png"
+ },
+ "Horace Grant": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/64/Horace_Grant_2014_2.jpg/500px-Horace_Grant_2014_2.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Horace_Grant"
+ },
+ "Jack Sikma": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a7/Jack_Sikma_IWU.jpg/500px-Jack_Sikma_IWU.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Jack_Sikma"
+ },
+ "Elgin Baylor": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76127.png"
+ },
+ "Allen Iverson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/947.png"
+ },
+ "Donovan Mitchell": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628378.png"
+ },
+ "Paul Pressey": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/9/94/PresseyBanquet2016.jpg/500px-PresseyBanquet2016.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Paul_Pressey"
+ },
+ "Lamar Odom": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/5/5d/Lamar_Odom_2012_Shankbone.JPG/500px-Lamar_Odom_2012_Shankbone.JPG",
+  "credit_url": "https://en.wikipedia.org/wiki/Lamar_Odom"
+ },
+ "Lauri Markkanen": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628374.png"
+ },
+ "Desmond Bane": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630217.png"
+ },
+ "Kevin Love": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201567.png"
+ },
+ "Hersey Hawkins": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/765.png"
+ },
+ "Ron Artest": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1897.png"
+ },
+ "Kevin McHale": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1450.png"
+ },
+ "Gilbert Arenas": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2240.png"
+ },
+ "Artis Gilmore": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/600014.png"
+ },
+ "Baron Davis": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1884.png"
+ },
+ "Michael Finley": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/0c/Michael_Finley_042216_cropped.jpg/500px-Michael_Finley_042216_cropped.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Michael_Finley"
+ },
+ "Sam Jones": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77196.png"
+ },
+ "Joe Johnson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2207.png"
+ },
+ "Chris Webber": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/185.png"
+ },
+ "Blake Griffin": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201933.png"
+ },
+ "Dennis Rodman": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/23.png"
+ },
+ "Chet Walker": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/a/a8/Chet_Walker_1975.jpeg",
+  "credit_url": "https://en.wikipedia.org/wiki/Chet_Walker"
+ },
+ "Walter Davis": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Walter_Davis_-_Phoenix_Suns.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Walter_Davis_(basketball)"
+ },
+ "Darius Garland": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629636.png"
+ },
+ "Connie Hawkins": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76972.png"
+ },
+ "David Thompson": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/e0/David_Thompson_NC_State.jpg/500px-David_Thompson_NC_State.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/David_Thompson_(basketball)"
+ },
+ "Richard Hamilton": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/ca/Richard_Hamilton_180422-D-SW162-1588_%2827762040388%29_%28cropped%29.jpg/500px-Richard_Hamilton_180422-D-SW162-1588_%2827762040388%29_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Richard_Hamilton_(basketball)"
+ },
+ "Joakim Noah": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201149.png"
+ },
+ "Dominique Wilkins": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1122.png"
+ },
+ "Tyson Chandler": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2199.png"
+ },
+ "Tayshaun Prince": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2419.png"
+ },
+ "Tim Hardaway Sr.": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/2/2b/20150902_Quest_Multisport_clinic_Tim_Hardaway_%281%29.JPG/500px-20150902_Quest_Multisport_clinic_Tim_Hardaway_%281%29.JPG",
+  "credit_url": "https://en.wikipedia.org/wiki/Tim_Hardaway"
+ },
+ "Reggie Lewis": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/d/d5/Reggie_Lewis_with_Northeastern_Huskies.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Reggie_Lewis"
+ },
+ "Hedo Turkoglu": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2045.png"
+ },
+ "Jamal Murray": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627750.png"
+ },
+ "Tyrese Maxey": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630178.png"
+ },
+ "Steve Smith": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/9/90/Steve_Smith_Hornets.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Steve_Smith_(basketball)"
+ },
+ "Ron Harper": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/cd/Ron_Harper_2016.jpg/500px-Ron_Harper_2016.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Ron_Harper"
+ },
+ "Dennis Johnson": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/0/0d/Dennis_Johnson_Lipofsky.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Dennis_Johnson"
+ },
+ "Luol Deng": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2736.png"
+ },
+ "Kiki VanDeWeghe": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/0b/Kiki_Vandeweghe.jpg/500px-Kiki_Vandeweghe.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Kiki_VanDeWeghe"
+ },
+ "Ja Morant": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629630.png"
+ },
+ "Sam Perkins": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/1/12/Sam_Perkins_2016_%28cropped%29.jpg/500px-Sam_Perkins_2016_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Sam_Perkins"
+ },
+ "Dikembe Mutombo": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/87.png"
+ },
+ "Gus Johnson": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/2/2c/GusJohnsonABA.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Gus_Johnson_(basketball)"
+ },
+ "Nicolas Batum": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201587.png"
+ },
+ "Goran Dragic": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201609.png"
+ },
+ "Robert Horry": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/9/91/Robert_Horry_2012.jpg/500px-Robert_Horry_2012.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Robert_Horry"
+ },
+ "Elton Brand": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1882.png"
+ },
+ "David West": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2561.png"
+ },
+ "Wesley Matthews": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202083.png"
+ },
+ "Ben Wallace": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1112.png"
+ },
+ "Michael Redd": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/65/ReddBucks.jpg/500px-ReddBucks.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Michael_Redd"
+ },
+ "Paul Westphal": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/6/6f/Paul_Westphal_1975_press_photo.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Paul_Westphal"
+ },
+ "Billy Cunningham": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76487.png"
+ },
+ "George Hill": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201588.png"
+ },
+ "Bernard King": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77264.png"
+ },
+ "Alvan Adams": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/c/cf/Alvan_Adams_-_Phoenix_Suns.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Alvan_Adams"
+ },
+ "Kyle Korver": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2594.png"
+ },
+ "Antonio McDyess": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/686.png"
+ },
+ "Nate Thurmond": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/600001.png"
+ },
+ "Ivica Zubac": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627826.png"
+ },
+ "Gus Williams": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/2/20/Gus_Williams_1981.JPG",
+  "credit_url": "https://en.wikipedia.org/wiki/Gus_Williams_(basketball)"
+ },
+ "Robert Covington": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203496.png"
+ },
+ "Andrew Bogut": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/101106.png"
+ },
+ "Glen Rice": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/1/14/Glen_Rice_2010_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Glen_Rice"
+ },
+ "Franz Wagner": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630532.png"
+ },
+ "Amar'e Stoudemire": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2405.png"
+ },
+ "Bob Pettit": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/77847.png"
+ },
+ "Robert Parish": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/305.png"
+ },
+ "Carmelo Anthony": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2546.png"
+ },
+ "John Wall": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202322.png"
+ },
+ "Scott Wedman": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/6c/Scott_Wedman.jpeg/500px-Scott_Wedman.jpeg",
+  "credit_url": "https://en.wikipedia.org/wiki/Scott_Wedman"
+ },
+ "Boris Diaw": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2564.png"
+ },
+ "Andrew Wiggins": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203952.png"
+ },
+ "Dick Van Arsdale": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/8/83/Dick_Van_Arsdale_%284x5_cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Dick_Van_Arsdale"
+ },
+ "Terrell Brandon": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/210.png"
+ },
+ "Josh Howard": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2572.png"
+ },
+ "Kristaps Porzingis": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/204001.png"
+ },
+ "Tony Parker": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2225.png"
+ },
+ "Trae Young": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629027.png"
+ },
+ "Kirk Hinrich": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2550.png"
+ },
+ "Lonzo Ball": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628366.png"
+ },
+ "Kemba Walker": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202689.png"
+ },
+ "Jamaal Wilkes": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/e5/Jamaal_wilkes_ucla_team.jpg/500px-Jamaal_wilkes_ucla_team.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Jamaal_Wilkes"
+ },
+ "Gerald Wallace": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/2/24/WallaceNets.jpg/500px-WallaceNets.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Gerald_Wallace"
+ },
+ "Josh Smith": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2746.png"
+ },
+ "Jarrett Allen": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628386.png"
+ },
+ "Brad Daugherty": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/5/5d/Brad_Daugherty_NASCAR_Photography_By_Darryl_Moran_%28cropped%29.jpg/500px-Brad_Daugherty_NASCAR_Photography_By_Darryl_Moran_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Brad_Daugherty"
+ },
+ "Aaron Gordon": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203932.png"
+ },
+ "Jermaine O'Neal": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f1/Jermaine_O%27Neal_smiling.jpg/500px-Jermaine_O%27Neal_smiling.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Jermaine_O'Neal"
+ },
+ "Arvydas Sabonis": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/3/38/Arvydas_Sabonis.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Arvydas_Sabonis"
+ },
+ "Hal Greer": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76882.png"
+ },
+ "Detlef Schrempf": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/9/95/Detlef_Schrempf_at_NBA_All-Star_Center_Court_2016_%2824742228990%29.jpg/500px-Detlef_Schrempf_at_NBA_All-Star_Center_Court_2016_%2824742228990%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Detlef_Schrempf"
+ },
+ "Maurice Cheeks": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/d/da/Maurice_Cheeks.jpg/500px-Maurice_Cheeks.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Maurice_Cheeks"
+ },
+ "Fat Lever": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Fat_Lever.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Fat_Lever"
+ },
+ "Sam Cassell": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/208.png"
+ },
+ "Sam Lacey": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/0c/Sam_Lacey_1971.JPG/500px-Sam_Lacey_1971.JPG",
+  "credit_url": "https://en.wikipedia.org/wiki/Sam_Lacey"
+ },
+ "Tiny Archibald": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76054.png"
+ },
+ "Byron Scott": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/65/Byron_Scott_%28cropped%29.jpg/500px-Byron_Scott_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Byron_Scott"
+ },
+ "Brent Barry": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/699.png"
+ },
+ "Brook Lopez": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201572.png"
+ },
+ "Fred VanVleet": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627832.png"
+ },
+ "Otto Porter Jr.": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203490.png"
+ },
+ "Jason Terry": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1891.png"
+ },
+ "Dale Ellis": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/107.png"
+ },
+ "Isaiah Thomas": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/202738.png"
+ },
+ "Yao Ming": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2397.png"
+ },
+ "Brad Miller": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1802.png"
+ },
+ "Vlade Divac": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/124.png"
+ },
+ "Danny Ainge": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/8/80/Danny%2C_calm_as_always.jpg/500px-Danny%2C_calm_as_always.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Danny_Ainge"
+ },
+ "Anthony Mason": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/193.png"
+ },
+ "Michael Porter Jr.": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629008.png"
+ },
+ "Cooper Flagg": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1642843.png"
+ },
+ "Alex Caruso": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627936.png"
+ },
+ "Elvin Hayes": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76979.png"
+ },
+ "Toni Kukoc": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/389.png"
+ },
+ "Kon Knueppel": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1642851.png"
+ },
+ "Isaiah Hartenstein": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628392.png"
+ },
+ "Amen Thompson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1641708.png"
+ },
+ "Bob Love": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/e4/BobLove10.jpg/500px-BobLove10.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Bob_Love"
+ },
+ "Derrick Coleman": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/934.png"
+ },
+ "Trevor Ariza": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2772.png"
+ },
+ "De'Aaron Fox": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1628368.png"
+ },
+ "Nene Hilario": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2403.png"
+ },
+ "Marcus Smart": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203935.png"
+ },
+ "Caron Butler": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2406.png"
+ },
+ "Wes Unseld": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/78392.png"
+ },
+ "Zach LaVine": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203897.png"
+ },
+ "Dave DeBusschere": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/76545.png"
+ },
+ "Phil Smith": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/2/26/Phil_Smith_1975.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Phil_Smith_(basketball)"
+ },
+ "Brian Taylor": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/c/c8/Brian_Dwight_Taylor_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Brian_Taylor_(basketball)"
+ },
+ "Wesley Person": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/445.png"
+ },
+ "Roger Brown": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/0/0a/Roger_Brown_1970.jpeg",
+  "credit_url": "https://en.wikipedia.org/wiki/Roger_Brown_(basketball,_born_1942)"
+ },
+ "Steve Francis": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1883.png"
+ },
+ "Don Buse": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/8/81/Don_Buse_1986-87.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Don_Buse"
+ },
+ "PJ Brown": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/136.png"
+ },
+ "Bill Laimbeer": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/e9/Bill_Laimbeer_2_%28cropped%29.jpg/500px-Bill_Laimbeer_2_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Bill_Laimbeer"
+ },
+ "Mookie Blaylock": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/302.png"
+ },
+ "Dan Roundfield": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/f/fa/Dan_Roundfield_CMU.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Dan_Roundfield"
+ },
+ "Gary Harris": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/203914.png"
+ },
+ "Mike Miller": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2034.png"
+ },
+ "Brandon Ingram": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627742.png"
+ },
+ "Nate McMillan": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c9/McMillan_Hawks.jpg/500px-McMillan_Hawks.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Nate_McMillan"
+ },
+ "Raja Bell": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/2/25/Raja_Bell_Suns_2007-08_%281%29.jpg/500px-Raja_Bell_Suns_2007-08_%281%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Raja_Bell"
+ },
+ "Robert Williams": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1629057.png"
+ },
+ "Jaden McDaniels": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630183.png"
+ },
+ "Danilo Gallinari": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201568.png"
+ },
+ "Jalen Duren": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1631105.png"
+ },
+ "Ralph Sampson": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/6/6b/Ralph_Sampson_at_Family_farm_in_McGaheysville%2C_Virginia_on_May_23%2C_2024_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Ralph_Sampson"
+ },
+ "Richard Jefferson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/2210.png"
+ },
+ "Phil Chenier": {
+  "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/06/Phil_Chenier.jpg/500px-Phil_Chenier.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Phil_Chenier"
+ },
+ "Austin Reaves": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630559.png"
+ },
+ "Malcolm Brogdon": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627763.png"
+ },
+ "Herb Jones": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630529.png"
+ },
+ "Serge Ibaka": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/201586.png"
+ },
+ "Marcus Camby": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/948.png"
+ },
+ "Rod Strickland": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/393.png"
+ },
+ "Theo Ratliff": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/689.png"
+ },
+ "Ausar Thompson": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1641709.png"
+ },
+ "Kerry Kittles": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/954.png"
+ },
+ "JJ Redick": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/200755.png"
+ },
+ "Dylan Harper": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1642844.png"
+ },
+ "Buck Williams": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/5/53/Buck_Williams_-_Defense.gov_News_Photo_060406-N-0696M-015_%28cropped%29.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Buck_Williams"
+ },
+ "Mike Bibby": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1710.png"
+ },
+ "Deni Avdija": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1630166.png"
+ },
+ "LaMarcus Aldridge": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/200746.png"
+ },
+ "Jerome Kersey": {
+  "url": "https://upload.wikimedia.org/wikipedia/commons/4/4e/US_Navy_030328-N-3503M-001_Former_NBA_player_Jerome_Kersey_addresses_a_group_of_kids_on_the_basketball_court_in_the_Naval_Air_Facility%2C_Ranger_Gym_cropped.jpg",
+  "credit_url": "https://en.wikipedia.org/wiki/Jerome_Kersey"
+ },
+ "Ben Simmons": {
+  "url": "https://cdn.nba.com/headshots/nba/latest/260x190/1627732.png"
+ }
+}

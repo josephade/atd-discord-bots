@@ -213,9 +213,10 @@ function extractBoxscore(summary) {
   const competitors = [...(game.competitors || [])].sort((a, b) => (a.homeAway === 'away' ? -1 : 1));
   const teams = competitors.map(competitor => {
     const group = (summary.boxscore?.players || []).find(g => String(g.team?.id) === String(competitor.team?.id));
+    const teamStats = (summary.boxscore?.teams || []).find(g => String(g.team?.id) === String(competitor.team?.id));
     const categories = (group?.statistics || []).filter(block => block.athletes?.length).map(block => ({
       key: block.name, label: CATEGORY_TITLES[block.name] || block.name,
-      labels: block.labels || block.keys || [], totals: block.totals,
+      labels: block.labels || block.keys || [], keys: block.keys || [], totals: block.totals,
       players: (block.athletes || []).map(row => ({
         id: String(row.athlete?.id || row.athlete?.displayName), name: row.athlete?.displayName,
         starter: Boolean(row.starter), dnp: Boolean(row.didNotPlay), reason: row.reason || 'Did not play',
@@ -224,7 +225,11 @@ function extractBoxscore(summary) {
     }));
     return { name: competitor.team?.displayName || group?.team?.displayName || 'Team',
       abbreviation: competitor.team?.abbreviation, logo: competitor.team?.logo || competitor.team?.logos?.[0]?.href,
-      score: competitor.score ?? '—', side: competitor.homeAway, categories };
+      score: competitor.score ?? '—', side: competitor.homeAway, categories,
+      record: competitor.record?.find(r => r.type === 'total')?.summary || '',
+      linescores: (competitor.linescores || []).map(line => line.displayValue ?? line.value ?? '—'),
+      teamStats: Object.fromEntries((teamStats?.statistics || []).map(stat => [stat.name, stat.displayValue ?? stat.value])),
+    };
   });
   return { type: 'boxscore', eventId: summary.header.id, date: game.date,
     state: game.status?.type?.state, status: game.status?.type?.shortDetail || game.status?.type?.description || 'Status unavailable', teams };

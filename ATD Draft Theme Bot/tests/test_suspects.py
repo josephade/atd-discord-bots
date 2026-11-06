@@ -181,6 +181,46 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         self.nonce += 1
         return await suspects.guess(None, draft_id or self.draft_id, nonce or self.nonce, user, target, emoji)
 
+    async def test_guesses_left_uses_shared_duo_balance_and_confirmed_purchases(self):
+        draft_id, members = self.make_draft(mode='partner_draft', channel=80)
+        eligible = lambda: {g['user_id'] for g in suspects.guessers_with_attempts(db.get_draft(draft_id))}
+        self.assertTrue({100, 101} <= eligible())
+        await self.guess(draft_id=draft_id, user=100, target=102, emoji='🦅')
+        self.assertFalse({100, 101} & eligible())
+        purchase = db.create_suspect_purchase(draft_id, 9001, 101, [100, 101], 2)
+        self.assertFalse({100, 101} & eligible())
+        db.finish_suspect_purchase(purchase['id'], 101, [100, 101], True)
+        self.assertTrue({100, 101} <= eligible())
+        self.assertEqual(db.suspect_remaining(draft_id, [100, 101]), 2)
+        for gm in suspects.guessers_with_attempts(db.get_draft(draft_id)):
+            self.assertEqual(set(gm), {'user_id', 'display_name'})
+
+    async def test_guesses_left_includes_former_member_ledger(self):
+        await self.guess(user=100, target=102, emoji=':Lakers:')
+        db.update_drafter_state(self.members[1], {'former_user_ids': [100]})
+        self.assertEqual(db.suspect_remaining(self.draft_id, [101]), 0)
+
+    async def test_guesses_left_command_shows_names_without_logos_pairing_or_counts(self):
+        draft_id, _ = self.make_draft(mode='partner_draft', channel=90)
+        tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'cmd_guessesleft')
+        node.decorator_list = []
+        ns = {'db': db, 'discord': discord, 'themes': suspects.themes, 're': suspects.re}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), ns)
+        guild = types.SimpleNamespace(id=1, get_member=lambda uid: types.SimpleNamespace(name=f'user{uid}'))
+        ctx = types.SimpleNamespace(guild=guild, channel=types.SimpleNamespace(id=1566394824288894976),
+                                    author=types.SimpleNamespace(id=100), send=AsyncMock(), reply=AsyncMock())
+        await ns['cmd_guessesleft'](ctx, draft_id)
+        embed = ctx.send.call_args.kwargs['embed']
+        self.assertEqual(embed.description.splitlines(), [f'• user{uid}' for uid in range(100, 108)])
+        self.assertNotIn('Nets', embed.description)
+        self.assertNotIn('Lakers', embed.description)
+        ctx.reply.assert_not_awaited()
+
+    async def test_guesses_left_closes_after_identity_reveal(self):
+        self.change_state(identities_revealed=True)
+        self.assertEqual(suspects.guessers_with_attempts(db.get_draft(self.draft_id)), [])
+
     def change_state(self, **changes):
         state = db.get_draft(self.draft_id)['state']
         state.update(changes)
@@ -396,6 +436,9 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         text = ns['_send_chunked'].call_args.args[1]
         self.assertIn('<@101>', text)
         self.assertIn('−5 wins', text)
+        self.assertIn('Caught by a correct suspect', text)
+        self.assertNotIn('Lakers', text)
+        self.assertEqual(text.count('<@101>'), 1)
         ns['_send_chunked'].reset_mock()
         ctx.channel.id = 98
         await ns['cmd_suspects'](ctx, draft_ref=str(self.draft_id))
@@ -404,6 +447,29 @@ class SuspectTests(unittest.IsolatedAsyncioTestCase):
         await ns['cmd_suspects'](ctx, draft_ref=str(self.draft_id))
         ns['_send_chunked'].assert_not_awaited()
 
+    async def test_win_summary_combines_catch_and_repeated_market_purchases(self):
+        await self.guess()
+        for message in (9101, 9102):
+            purchase = db.create_suspect_purchase(self.draft_id, message, 101, [101], 1)
+            db.finish_suspect_purchase(purchase['id'], 101, [101], True)
+        db.create_suspect_purchase(self.draft_id, 9103, 102, [102], 2)
+        # Playoff odds penalties are not regular-season win deductions.
+        result = db.record_suspect(self.draft_id, 9104, 103, 102, 'PRIVATE LOGO', True,
+                                   'post_draft', db.get_draft(self.draft_id)['state'])
+        self.assertEqual(result['status'], 'correct')
+        summary = suspects.win_deduction_summary(db.get_draft(self.draft_id))
+        self.assertEqual(summary, [dict(member_ids=(101,), caught_wins=5,
+                                       market_wins=10, bought_guesses=2, total_wins=15)])
+
+    async def test_win_summary_duo_has_one_shared_total(self):
+        draft_id, _ = self.make_draft(mode='partner_draft', channel=100)
+        await self.guess(draft_id=draft_id, target=102)
+        for message, buyer in ((9201, 102), (9202, 103)):
+            purchase = db.create_suspect_purchase(draft_id, message, buyer, [102, 103], 1)
+            db.finish_suspect_purchase(purchase['id'], buyer, [102, 103], True)
+        summary = suspects.win_deduction_summary(db.get_draft(draft_id))
+        self.assertEqual(summary, [dict(member_ids=(102, 103), caught_wins=5,
+                                       market_wins=10, bought_guesses=2, total_wins=15)])
     async def test_actual_command_replies_with_requested_penalty_and_no_pick_content(self):
         tree = ast.parse((ROOT / 'bot.py').read_text(encoding='utf-8'))
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'cmd_suspect')

@@ -13,7 +13,7 @@
 #      member team, whoever submits first becomes the proposer and every
 #      other member gets an agree (`1`)-or-counter (`2`) prompt; countering
 #      hands the proposer role to them instead, ping-ponging until someone
-#      agrees or a 20-minute response window lapses (silence = agreement),
+#      agrees or a 10-minute response window lapses (silence = agreement),
 #      capped by the original pick deadline.
 #   3. Posts each finalized pick as "<logo> picks <Player> [year] [price]"
 #      into a single fixed results channel (_RESULTS_CHANNEL_ID) — the only
@@ -33,14 +33,15 @@ import db
 import lotto
 import anon_clock
 from timer import PickTimer
+from flux_rules import amount
 from .base import DraftContext, Theme, draft_lock
 from .player_years import get_default_year
 
 log = logging.getLogger(__name__)
 
 _timer = PickTimer()  # keyed by (draft_id, team_index) — one clock per team, not per drafter
-_proposal_timer = PickTimer()  # same keying — up to 20 minutes, within the original pick clock
-_PROPOSAL_RESPONSE_MINUTES = 20.0
+_proposal_timer = PickTimer()  # same keying — up to 10 minutes, within the original pick clock
+_PROPOSAL_RESPONSE_MINUTES = 10.0
 
 # This bot now runs turn order itself instead of watching ATD Timer Bot's
 # pings (see _open_pick_for_team/_advance_live_pick) — every finalized pick
@@ -253,8 +254,9 @@ class AnonDraftTheme(Theme):
                 await self._skip_locked(ctx, team_idx, entry, 'An earlier skipped pick is still owed, so this turn was automatically skipped too.')
                 return
 
-            if await self._try_consume_queued_pick(ctx, state, team_idx, entry):
-                return  # a teammate's standing pick already fired — nothing else to do
+            if anon_clock.minutes(settings, pick_number, len(state['teams']), team.get('skip_count', 0)) <= 0:
+                await self._skip_locked(ctx, team_idx, entry, 'Skip penalties leave no time on this turn, so it was automatically skipped.')
+                return
 
         # Already have a running timer for this exact pick (e.g. this got
         # called twice in a row somehow) — don't restart it or re-notify.
@@ -265,14 +267,31 @@ class AnonDraftTheme(Theme):
         ctx.save_state(state)
 
         minutes = anon_clock.minutes(settings, pick_number, len(state['teams']), team.get('skip_count', 0))
+        # Recover legacy queued duo proposals that were saved before their
+        # main clock existed. Time already spent agreeing must still count.
+        if not is_new and entry.get('proposal') and team.get('timer_deadline') is None:
+            response_left = entry.get('paused_proposal_seconds', _PROPOSAL_RESPONSE_MINUTES*60)
+            if entry.get('proposal_deadline') is not None:
+                response_left = anon_clock.remaining(entry['proposal_deadline'], time.time(), settings)
+            elapsed = max(0, _PROPOSAL_RESPONSE_MINUTES*60-response_left)
+            minutes = max(0, minutes-elapsed/60)
+
+        # A queued pick may return early after proposing to a teammate. Save
+        # the main clock first so the public card and both timeouts advance.
+        self._start_team_timer(ctx, state, team_idx, minutes)
+        if is_new and await self._try_consume_queued_pick(ctx, state, team_idx, entry):
+            return
+
         deadline_ts = int(anon_clock.deadline(time.time(), minutes*60, settings))
         clock_note = ('Timers are off. You can still pick.\n' if state.get('timers_off') else
-                      f'Deadline: <t:{deadline_ts}:R> (10am\u2013midnight ET timer hours).\n')
+                      f'Active timer allowance: {minutes:g} minutes. Deadline: **{anon_clock.et_text(deadline_ts)}**'+
+                      ('; midnight\u201310am ET is paused.\n' if settings.get('timer_window_et',True) else '.\n'))
         from timer_bridge import snapshot
         from clock_card import clock_embed
         card_data = snapshot(dict(ctx.draft, status='active')) if self.key == 'anon_budget_draft' else None
         if card_data and card_data.get('current'):
             card_data['current']['deadline'] = None if state.get('timers_off') else deadline_ts
+            card_data['current'].update(anon_clock.clock_details(card_data['current']['deadline'],settings,time.time()))
         turn_card = clock_embed(card_data) if card_data else None
         for mid in team['member_ids']:
             drafter = db.get_drafter(mid)
@@ -285,7 +304,8 @@ class AnonDraftTheme(Theme):
                 embed=turn_card,
             )
 
-        self._start_team_timer(ctx, state, team_idx, minutes)
+        if entry.get('proposal'):
+            self._restore_proposal(ctx, team_idx, pick_number)
 
     def _start_team_timer(self, ctx: DraftContext, state: dict, team_idx: int, minutes: float) -> None:
         # Persisted as a real wall-clock deadline, not just an in-memory
@@ -293,6 +313,7 @@ class AnonDraftTheme(Theme):
         # time instead of granting a fresh full clock after a restart.
         settings = self._settings(ctx)
         team = state['teams'][team_idx]
+        state['late_round_clock_policy'] = 2
         if state.get('timers_off'):
             team['timer_deadline'] = None
             team['paused_timer_seconds'] = max(0, minutes*60)
@@ -506,6 +527,8 @@ class AnonDraftTheme(Theme):
                 "Your original pick clock keeps running during timer hours. No automatic submission while timers are off.")
 
     def _arm_proposal(self, ctx, state, team_idx, entry, seconds):
+        # Also cap restored proposals created under an older response limit.
+        seconds = min(seconds, _PROPOSAL_RESPONSE_MINUTES*60)
         team = state['teams'][team_idx]
         _proposal_timer.cancel((ctx.draft_id, team_idx))
         if state.get('timers_off'):
@@ -822,8 +845,11 @@ class AnonDraftTheme(Theme):
             if len(parts) < 2:
                 return None
             try:
-                price = float(parts[-1].lstrip('$'))
-                if not math.isfinite(price) or price < 0:
+                parsed_price = amount(parts[-1])
+                if parsed_price is None:
+                    return None
+                price = float(parsed_price)
+                if not math.isfinite(price):
                     return None
             except ValueError:
                 return None
@@ -847,7 +873,7 @@ class AnonDraftTheme(Theme):
             budget, spent = float(budget), float(team.get('budget_spent', 0))
         except (ValueError, TypeError):
             return 'Budget unavailable — ask the commissioner to check it.\n'
-        if not all(math.isfinite(v) and v >= 0 for v in (budget, spent)):
+        if budget < 0 or not all(math.isfinite(v) for v in (budget, spent)):
             return 'Budget unavailable — ask the commissioner to check it.\n'
         return f'Budget remaining: **${budget - spent:g}** of **${budget:g}**.\n'
 
@@ -925,6 +951,7 @@ class AnonDraftTheme(Theme):
         agree-or-counter window) resume from their saved remaining timer
         time, capped by the pick clock. Closed Eastern hours and manual
         timer-off periods do not count."""
+        anon_clock.migrate_round_seven_clock(ctx, time.time())
         settings = self._settings(ctx)
         state = ctx.state
         if state.get('flux_wait'):

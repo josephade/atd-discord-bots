@@ -11,6 +11,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
 from columns import prepare_round_columns, column_letter
+from overrides import load_plan, plan_values, mark_applied
 from rapidfuzz import fuzz, process
 
 creds_b64 = os.environ["GOOGLE_CREDENTIALS_B64"]
@@ -95,6 +96,7 @@ def get_all_configs() -> Dict[int, Dict]:
     return {**HARDCODED_CONFIG, **dynamic_tracks}
 
 dynamic_tracks: Dict[int, Dict] = load_tracks()
+OVERRIDES_FILE = os.getenv('FLUX_OVERRIDES_PATH', os.path.join(os.path.dirname(TRACKS_FILE), 'flux_overrides.json'))
 
 # ==========================================================
 # SHEET CACHE + LOOKUP
@@ -338,6 +340,10 @@ async def flux(ctx, vol: int):
 
     log.info(f"Flux started | round={next_round} | vol={vol} | user={user}")
 
+    plan = load_plan(OVERRIDES_FILE)
+    overrides = plan_values(plan, rows, channel_id=ctx.channel.id, spreadsheet_id=sh.id,
+                           worksheet_gid=ws.id, round_number=next_round, vol=vol)
+
     new_col = prepare_round_columns(ws, rows)
     ws.update_cell(1, new_col, f"Round {next_round}")
     ctx._flux_price_write_started = True
@@ -352,7 +358,7 @@ async def flux(ctx, vol: int):
 
     ws.update(
         f"{new_letter}2:{new_letter}{row_count}",
-        [[formula]] * (row_count - 1),
+        [[overrides.get(index, formula)] for index in range(1, row_count)],
         value_input_option="USER_ENTERED"
     )
 
@@ -375,9 +381,17 @@ async def flux(ctx, vol: int):
                 },
                 "pasteType": "PASTE_VALUES"
             }
-        }]
+        }] + [{"repeatCell": {
+            "range": {"sheetId": ws.id, "startRowIndex": index, "endRowIndex": index + 1,
+                      "startColumnIndex": new_col - 1, "endColumnIndex": new_col},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": '"$"0'}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }} for index in overrides]
     })
 
+    if overrides:
+        mark_applied(OVERRIDES_FILE, plan, new_letter)
+        log.info('Applied one-time override plan %s to Round %s (%s players)', plan['id'], next_round, len(overrides))
     log.info(f"Flux completed | round={next_round} | vol={vol} | user={user}")
     await ctx.send(f"✅ **Round {next_round} Flux is done**")
 

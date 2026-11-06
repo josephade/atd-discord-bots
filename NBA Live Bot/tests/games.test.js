@@ -74,7 +74,7 @@ test('every game is retained and missing tip-off times do not break the message'
   const body = gamesPayload(slate, png);
   assert.equal(body.files[0].attachment, png);
   assert.equal(body.files[0].name, 'nba-games.png');
-  assert.equal(body.embeds, undefined);
+  assert.equal(body.embeds.length, 1);
 });
 
 test('late pregame feed is awaiting tip-off, never incorrectly marked live', () => {

@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, AsyncMock
 from columns import prepare_round_columns, column_letter
+from overrides import plan_values
 
 
 class FluxColumnTests(unittest.TestCase):
@@ -69,8 +70,9 @@ class FluxCommandTests(unittest.IsolatedAsyncioTestCase):
         ws = NS(col_count=14, id=123, add_cols=Mock(), resize=Mock(), spreadsheet=NS(batch_update=Mock(),
                 fetch_sheet_metadata=Mock(return_value={'sheets':[{'properties':{'sheetId':123,'gridProperties':{'columnCount':14}}}]})),
                 get_all_values=Mock(return_value=rows), update_cell=Mock(), update=Mock())
-        ns = dict(discord=NS(Member=NS), has_commish_role=lambda user: True, get_ws=lambda channel: (None, ws),
+        ns = dict(discord=NS(Member=NS), has_commish_role=lambda user: True, get_ws=lambda channel: (NS(id='sheet'), ws),
                   log=Mock(), prepare_round_columns=prepare_round_columns, column_letter=column_letter,
+                  load_plan=Mock(return_value=None), plan_values=plan_values, mark_applied=Mock(), OVERRIDES_FILE='test-plan.json',
                   ROUND_2_TEMPLATE='base={VAL}', ROUND_3_PLUS_TEMPLATE='base={VAL};previous={PREV}')
         exec(compile(ast.Module(body=nodes, type_ignores=[]), 'flux_bot.py', 'exec'), ns)
         return ns, ws, NS(author=NS(id=1), channel=NS(id=99), send=AsyncMock())
@@ -89,3 +91,15 @@ class FluxCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in ws.update.call_args_list], ['F2:F2', 'G2:G2'])
         self.assertEqual(ws.update.call_args_list[0].args[1], [['base=D;previous=E']])
         self.assertEqual(ws.update.call_args_list[1].args[1], [['base=D;previous=F']])
+
+    async def test_round_four_overrides_only_selected_row_and_freezes_before_marking_applied(self):
+        rows = [['Position', 'Player', 'ADP', 'Value', 'Round 2', 'Round 3'],
+                ['Wing', 'Vince Carter', 1, 20, 20, '$22'], ['Guard', 'Other Player', 2, 10, 12, 11]]
+        ns, ws, ctx = self.namespace(rows)
+        plan = dict(id='test', status='pending', channel_id=99, spreadsheet_id='sheet', worksheet_gid=123, round=4, vol=3,
+                    players=[dict(player='Vince Carter', previous_price=22, target_price=20, drop=2, value=20.070139298493)])
+        ns['load_plan'].return_value = plan
+        ns['mark_applied'].side_effect = lambda *args: self.assertTrue(ws.spreadsheet.batch_update.called)
+        await ns['flux'](ctx, 3)
+        self.assertEqual(ws.update.call_args.args, ('G2:G3', [[20.070139298493], ['base=D;previous=F']]))
+        ns['mark_applied'].assert_called_once_with('test-plan.json', plan, 'G')

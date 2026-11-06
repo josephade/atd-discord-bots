@@ -15,9 +15,38 @@ import db
 import asyncio
 import sheets
 import logging
+import difflib
+import re
+import unicodedata
 from flux_rules import parse_prices, find_player, amount
 
 log = logging.getLogger(__name__)
+
+
+def budget_price_record(book, player):
+    """Absent players are free; ambiguous/invalid listed prices are not."""
+    if not book:
+        raise ValueError('The ADP sheet has no player rows; check the price source.')
+    try:
+        return find_player(book, player)
+    except ValueError:
+        fingerprint = lambda name: re.sub(r'[^a-z0-9]', '', ''.join(
+            c for c in unicodedata.normalize('NFKD', name).casefold()
+            if not unicodedata.combining(c)))
+        query = fingerprint(player)
+        same = [record for record in book.values() if fingerprint(record['player']) == query]
+        if len(same) == 1 and not same[0].get('ambiguous'):
+            return same[0]
+        # Do not treat an ambiguous abbreviation or a punctuation variant of
+        # conflicting duplicate rows as a missing/free player.
+        if same or any(query and query in fingerprint(r['player']) for r in book.values()):
+            raise ValueError('Use a full player name that uniquely matches the ADP sheet.') from None
+        close = difflib.get_close_matches(query, [fingerprint(r['player']) for r in book.values()],
+                                         n=1, cutoff=.92)
+        if close:
+            suggestion = next(r['player'] for r in book.values() if fingerprint(r['player']) == close[0])
+            raise ValueError(f'Check the player spelling: did you mean {suggestion}? No free pick was accepted.') from None
+        return dict(player=player, current=amount(0), previous=None, off_sheet=True)
 
 
 class AnonBudgetDraftTheme(AnonDraftTheme):
@@ -36,12 +65,15 @@ class AnonBudgetDraftTheme(AnonDraftTheme):
             round_number = max(1, state['flux_wait']['round']-1)
         if state.get('flux_in_progress'):
             return 'Flux is currently running. Wait for its completion before submitting your pick; no pick was accepted.'
-        first_round = (entry['pick_number']-1)//count+1 if entry and entry.get('skipped') else round_number
+        skipped_round = (entry['pick_number']-1)//count+1 if entry and entry.get('skipped') else None
+        # Once a later Flux has been released, a makeup costs the player's
+        # historical maximum, including the Round 1 baseline before the skip.
+        first_round = 1 if skipped_round is not None and skipped_round < round_number else round_number
         description = (f'Round {round_number}' if first_round == round_number else
                        f'Rounds {first_round}\u2013{round_number} (highest price for your makeup pick)')
         try:
             rows = await asyncio.to_thread(sheets.load_flux_rule_rows, source)
-            records = [find_player(parse_prices(rows, number), player)
+            records = [budget_price_record(parse_prices(rows, number), player)
                        for number in range(first_round, round_number+1)]
             if not records or any(r['current'] is None for r in records):
                 raise ValueError(f'{player} has a blank or invalid price in the required round history.')
@@ -53,6 +85,8 @@ class AnonBudgetDraftTheme(AnonDraftTheme):
             log.exception('Could not read Flux source for draft %s, tab %s', getattr(ctx, 'draft_id', '?'), source.get('tab'))
             return f'I could not read the price sheet ({source.get("tab", "unknown tab")}) to verify {player}. No pick was accepted. Check sheet access and !fluxsource, then try again.'
         if amount(price) != record['current']:
+            if record.get('off_sheet'):
+                return f'{player} is not on the ADP sheet and is free ($0). Submit your pick again with $0.'
             entered = f'${price:g}' if isinstance(price, (int, float)) else 'no valid price'
             return f"{record['player']} costs ${record['current']:g} in {description}; you entered {entered}. Submit your pick again with ${record['current']:g}."
         return None
@@ -84,16 +118,16 @@ class AnonBudgetDraftTheme(AnonDraftTheme):
         try:
             price = float(price)
         except (TypeError, ValueError):
-            return "Price must be a finite, non-negative amount."
-        if not math.isfinite(price) or price < 0:
-            return "Price must be a finite, non-negative amount."
+            return "Price must be a finite number."
+        if not math.isfinite(price):
+            return "Price must be a finite number."
         settings = self._settings(ctx)
         try:
             budget = float(settings['budget'])
             spent = float(team.get('budget_spent', 0.0))
         except (TypeError, ValueError):
             return 'Your team budget is invalid. Ask the commissioner to check the settings.'
-        if not all(math.isfinite(value) and value >= 0 for value in (budget, spent)):
+        if budget < 0 or not all(math.isfinite(value) for value in (budget, spent)):
             return 'Your team budget is invalid. Ask the commissioner to check the settings.'
         if spent + price > budget:
             remaining = budget - spent

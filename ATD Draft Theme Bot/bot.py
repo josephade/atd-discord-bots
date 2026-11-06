@@ -956,6 +956,12 @@ async def cmd_anonreplacegm(ctx, *, text: str = ''):
     await member_admin.execute(ctx, bot, text, replace=True)
 
 
+@bot.command(name='anonremovegm')
+async def cmd_anonremovegm(ctx, *, text: str = ''):
+    import member_admin
+    await member_admin.remove(ctx, text)
+
+
 @bot.command(name='setwaiver')
 @commands.has_permissions(administrator=True)
 async def cmd_setwaiver(ctx, draft_ref: str = '', *, text: str = ''):
@@ -1856,6 +1862,53 @@ async def cmd_suspect(ctx, member: discord.Member = None, *, emoji: str = ''):
     await ctx.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
 
+@bot.command(name='guessesleft', aliases=['suspectleft'])
+async def cmd_guessesleft(ctx, draft_id: int = None):
+    """List individual GM names with guesses left, without team identities."""
+    import suspects
+    if not ctx.guild or ctx.channel.id not in suspects.ALLOWED_CHANNEL_IDS:
+        await ctx.reply('Use `!guessesleft` in <#1566394824288894976> or the private admin channel.',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
+    if draft_id is None:
+        draft, error = suspects.resolve_draft(ctx.guild.id, ctx.channel.id, ctx.author.id)
+        if error:
+            await ctx.reply('Specify the anonymous draft ID: `!guessesleft 30`.',
+                            mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            return
+    else:
+        draft = db.get_draft(draft_id)
+    if not draft or draft['guild_id'] != ctx.guild.id or draft['theme'] not in suspects.ANON_THEMES:
+        await ctx.reply('Choose an anonymous draft in this server: `!guessesleft <draft ID>`.',
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
+    async with themes.base.draft_lock(draft['id']):
+        draft = db.get_draft(draft['id'])
+        if draft['status'] not in ('active', 'paused', 'complete') or draft['state'].get('identities_revealed'):
+            await ctx.reply('Suspect guesses are closed for this draft.', mention_author=False)
+            return
+        eligible = suspects.guessers_with_attempts(draft)
+    names = []
+    for gm in eligible:
+        member = ctx.guild.get_member(gm['user_id'])
+        # Usernames avoid nicknames containing team logos. No mentions or duo
+        # grouping: each GM appears independently in alphabetical order.
+        name = member.name if member else re.sub(r'<a?:[^:<>]+:\d+>', '', gm['display_name']).strip()
+        name = discord.utils.escape_mentions(discord.utils.escape_markdown(name))
+        names.append(name or 'Unknown GM')
+    names.sort(key=str.casefold)
+    pages = ['']
+    for name in names:
+        line = f'• {name}\n'
+        if len(pages[-1]) + len(line) > 3500:
+            pages.append('')
+        pages[-1] += line
+    for page in pages:
+        await ctx.send(embed=discord.Embed(title='GMs with guesses left',
+                       description=page or 'No GMs have guesses remaining.', color=0xD4AF37),
+                       allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.command(name='suspectseeding')
 async def cmd_suspectseeding(ctx, draft_id: int, *, entries: str = ''):
     """Owner private: !suspectseeding <draft ID> then 16 team emojis/lotto numbers."""
@@ -1888,6 +1941,12 @@ async def cmd_suspectstatus(ctx, draft_id: int):
         await ctx.send('Choose an anonymous draft in this server.')
         return
     await ctx.send(suspects.phase_summary(draft),allowed_mentions=discord.AllowedMentions.none())
+    odds = [row for row in db.suspect_attempts(draft['id'])
+            if row['correct'] and row['penalty_kind'] == 'odds_percent']
+    if odds:
+        await _send_chunked(ctx, '**Playoff odds deductions**\n' + '\n'.join(
+            f'<@{row["target_id"]}> — −{row["penalty_amount"]} percentage points: caught by a correct suspect'
+            for row in odds))
     await cmd_suspects.callback(ctx,draft_ref=str(draft_id))
 
 
@@ -1906,32 +1965,20 @@ async def cmd_suspects(ctx, *, draft_ref: str = ''):
     if not draft or draft['guild_id'] != ctx.guild.id:
         await ctx.send('Usage: `!suspects <draft ID>` for a draft in this server.')
         return
-    rows = db.suspect_attempts(draft['id'])
-    catches = [row for row in rows if row['correct']]
-    lines = [f'**Suspect penalties — {draft["name"]}**',
-             'Recorded for commissioner application to this draft’s results or next matchup.']
-    for row in catches:
-        penalty = '−5 wins' if row['penalty_kind'] == 'wins' else '−10 percentage points of odds in next playoff matchup'
-        lines.append(f'<@{row["target_id"]}> · {row["logo"]} · {penalty} · caught by <@{row["guesser_id"]}>')
-    if not catches:
-        lines.append('No correct catches recorded.')
-    purchases = [p for p in db.suspect_purchases(draft['id']) if p['status'] == 'confirmed']
-    if purchases:
-        import json
-        lines.append('**Market win deductions (separate from catches)**')
-        totals = {}
-        for purchase in purchases:
-            members = tuple(json.loads(purchase['team_users']))
-            import suspects
-            for team in suspects.teams(draft):
-                current_users = [db.get_drafter(mid)['user_id'] for mid in team['member_ids']]
-                if set(members) & set(db.anonymous_ledger_users(draft['id'], current_users)):
-                    members = tuple(sorted(current_users))
-                    break
-            totals[members] = totals.get(members, 0)+purchase['cost']
-            lines.append(f"Buyer <@{purchase['buyer_id']}>: {purchase['quantity']} extra guesses / -{purchase['cost']} wins")
-        for members, cost in totals.items():
-            lines.append('Team '+ ' / '.join(f'<@{uid}>' for uid in members)+f': **-{cost} wins total market cost**')
+    import suspects
+    summary = suspects.win_deduction_summary(draft)
+    lines = [f'**Wins lost — {draft["name"]}**']
+    for entry in summary:
+        names = ' / '.join(f'<@{uid}>' for uid in entry['member_ids'])
+        lines.extend(['', f'**{names} — −{entry["total_wins"]} wins**'])
+        if entry['caught_wins']:
+            lines.append(f'• Caught by a correct suspect: −{entry["caught_wins"]} wins')
+        if entry['market_wins']:
+            quantity = entry['bought_guesses']
+            label = 'guess' if quantity == 1 else 'guesses'
+            lines.append(f'• Bought {quantity} extra {label}: −{entry["market_wins"]} wins')
+    if not summary:
+        lines.append('No GMs have lost wins from suspects or market purchases.')
     await _send_chunked(ctx, '\n'.join(lines))
 
 
@@ -2349,6 +2396,7 @@ async def cmd_help(ctx):
     )
     embed.add_field(name='Anonymous identity guesses',
                     value='`!suspect @GM :emoji:` — only in <#1566394824288894976> or the owner’s private channel; one free attempt per team per anonymous draft, shared by partners. `!market` buys extras for 5 wins each. '
+                          '`!guessesleft` — names of GMs with guesses remaining; no team identities. '
                           'Correct catch: −5 wins before seeding; −10 percentage points of playoff odds after seeding. '
                           '5-win penalties continue through voting; `!suspectseeding <draft ID>` switches to the 16-team playoff pool and 10-point odds penalties. Guesses close at official GM reveal. `!suspects <draft ID>` — owner-only private penalty ledger.',
                     inline=False)
@@ -2416,6 +2464,7 @@ async def cmd_help(ctx):
         embed.add_field(
             name='Anonymous Draft moderator commands',
             value=(
+                '`!anonremovegm <id> @LeavingGM` — owner private channel only; keeps the team and history, including after drafting\n'
                 '`!setteams <id>` — **owner DM/private owner channel**, secret logo→GM mapping\n'
                 '`!theme start <id>` — opens pick #1; turn order runs itself from here\n'
                 '`!anonoverride <id> <pick#> <team#/logo>` — safety valve to force-open a pick\n'

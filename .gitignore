@@ -3,7 +3,11 @@
 service_account.json
 credentials.json
 __pycache__/
+ATD Playoff Bot/data/
+ATD Playoff Bot/.venv/
+ATD Playoff Bot/*.sqlite3*
 *.pyc
 .env
 node_modules/
 .claude
+artifacts/

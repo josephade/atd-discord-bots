@@ -4,8 +4,12 @@ primary_region = "ewr"
 [build]
   dockerfile = "Dockerfile"
 
+[deploy]
+  strategy = "immediate"
+
 [env]
   NODE_ENV = "production"
+  RESTRICT_TO_GUILD = "false"
   PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
   PUPPETEER_NO_SANDBOX = "true"
 

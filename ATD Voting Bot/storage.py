@@ -26,10 +26,21 @@ class Store:
             CREATE TABLE IF NOT EXISTS reveal_results (
                 draft TEXT NOT NULL, team TEXT NOT NULL, payload TEXT NOT NULL,
                 PRIMARY KEY (draft, team));
+            CREATE TABLE IF NOT EXISTS reveal_penalty_links (
+                draft TEXT PRIMARY KEY, theme_draft_id INTEGER NOT NULL);
         ''')
 
     def tracks(self):
         return [dict(r) for r in self.db.execute('SELECT * FROM tracks WHERE active=1')]
+
+    def penalty_link(self, draft):
+        row = self.db.execute('SELECT theme_draft_id FROM reveal_penalty_links WHERE draft=?', (str(draft),)).fetchone()
+        return row[0] if row else None
+
+    def set_penalty_link(self, draft, theme_draft_id):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO reveal_penalty_links VALUES (?,?)',
+                            (str(draft), int(theme_draft_id)))
 
     def reveal_mapping(self, draft, team):
         from votes import normalize
@@ -55,11 +66,15 @@ class Store:
 
     def save_reveal_results(self, draft, rows, sheet, gid, replace=False):
         from votes import normalize
+        from penalties import carryover_details
         with self.db:
             if replace:
                 self.db.execute('DELETE FROM reveal_results WHERE draft=?', (str(draft),))
             for row in rows:
                 payload = dict(row, draft=str(draft), sheet=sheet, gid=gid, saved_at=time.time())
+                for key in ('carryover_wins', 'carryover_raw_wins', 'carryover_to_draft'):
+                    payload.pop(key, None)
+                payload.update(carryover_details(row, draft))
                 self.db.execute('INSERT OR REPLACE INTO reveal_results VALUES (?,?,?)', (str(draft), normalize(row['team']), json.dumps(payload)))
 
     def previous_reveal(self, draft, user_id):

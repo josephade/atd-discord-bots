@@ -198,6 +198,22 @@ def suspect_attempts(draft_id):
         return [dict(row) for row in con.execute('SELECT * FROM suspect_attempts WHERE draft_id=? ORDER BY id', (draft_id,))]
 
 
+def suspect_remaining(draft_id, user_ids):
+    """Read a team's shared free/purchased allowance, including replaced GMs."""
+    with _conn() as con:
+        users = _anonymous_ledger_users(con, draft_id, user_ids)
+        if not users:
+            return 0
+        placeholders = ','.join('?' for _ in users)
+        used = con.execute(
+            f'SELECT COALESCE(SUM(charged),0) FROM suspect_attempts WHERE draft_id=? AND guesser_id IN ({placeholders})',
+            (draft_id, *users)).fetchone()[0]
+        bought = con.execute(
+            f"SELECT COALESCE(SUM(quantity),0) FROM suspect_purchases WHERE draft_id=? AND buyer_id IN ({placeholders}) AND status='confirmed'",
+            (draft_id, *users)).fetchone()[0]
+        return max(0, 1 + bought - used)
+
+
 def get_draft_by_name(name: str) -> dict | None:
     with _conn() as con:
         return _row(con.execute(
@@ -261,9 +277,10 @@ def get_drafter(drafter_id: int) -> dict | None:
 
 def get_drafter_by_user(draft_id: int, user_id: int) -> dict | None:
     with _conn() as con:
-        return _row(con.execute(
+        row = _row(con.execute(
             'SELECT * FROM drafters WHERE draft_id = ? AND user_id = ?', (draft_id, user_id)
         ).fetchone())
+        return row if row and not row['state'].get('membership_removed') else None
 
 
 def get_active_drafters_for_user(user_id: int) -> list[dict]:
@@ -275,7 +292,7 @@ def get_active_drafters_for_user(user_id: int) -> list[dict]:
             JOIN drafts ON drafts.id = drafters.draft_id
             WHERE drafters.user_id = ? AND drafts.status IN ('setup', 'active', 'paused')
         ''', (user_id,)).fetchall()
-        return [_row(r) for r in rows]
+        return [_row(r) for r in rows if not json.loads(r['state_json']).get('membership_removed')]
 
 
 def get_drafters_for_user(user_id: int, statuses: tuple[str, ...]) -> list[dict]:
@@ -290,7 +307,7 @@ def get_drafters_for_user(user_id: int, statuses: tuple[str, ...]) -> list[dict]
             JOIN drafts ON drafts.id = drafters.draft_id
             WHERE drafters.user_id = ? AND drafts.status IN ({placeholders})
         ''', (user_id, *statuses)).fetchall()
-        return [_row(r) for r in rows]
+        return [_row(r) for r in rows if not json.loads(r['state_json']).get('membership_removed')]
 
 
 def list_drafters(draft_id: int) -> list[dict]:
@@ -298,7 +315,7 @@ def list_drafters(draft_id: int) -> list[dict]:
         rows = con.execute(
             'SELECT * FROM drafters WHERE draft_id = ? ORDER BY seat_index IS NULL, seat_index, id', (draft_id,)
         ).fetchall()
-        return [_row(r) for r in rows]
+        return [_row(r) for r in rows if not json.loads(r['state_json']).get('membership_removed')]
 
 
 def set_drafter_state(drafter_id: int, state: dict):
@@ -524,6 +541,42 @@ def _anonymous_ledger_users(con, draft_id, user_ids):
         if row['user_id'] in users:
             users.update(json.loads(row['state_json']).get('former_user_ids', []))
     return sorted(users)
+
+
+def remove_anonymous_member(draft_id, expected_state, user_id, actor_id):
+    """Revoke membership, retaining historical rows and all team deductions."""
+    with _conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        draft = con.execute('SELECT * FROM drafts WHERE id=?', (draft_id,)).fetchone()
+        if not draft or draft['theme'] not in ('anon_draft', 'anon_budget_draft') or draft['status'] not in ('setup', 'active', 'paused', 'complete'):
+            raise ValueError('Choose an Anonymous Draft or Anonymous Budget draft that is not cancelled.')
+        state = json.loads(draft['state_json'])
+        if state != expected_state:
+            raise ValueError('The draft changed. Try again; no membership was changed.')
+        old = con.execute('SELECT * FROM drafters WHERE draft_id=? AND user_id=?', (draft_id, user_id)).fetchone()
+        matches = [i for i, t in enumerate(state.get('teams', [])) if old and old['id'] in t['member_ids']]
+        if len(matches) != 1:
+            raise ValueError('That GM is not currently assigned to a team in this draft.')
+        index = matches[0]
+        team = state['teams'][index]
+        if len(team['member_ids']) < 2:
+            raise ValueError('You cannot remove the last GM. Add or replace a GM instead.')
+        team['member_ids'].remove(old['id'])
+        keeper = con.execute('SELECT * FROM drafters WHERE id=?', (team['member_ids'][0],)).fetchone()
+        keeper_state = json.loads(keeper['state_json'])
+        old_state = json.loads(old['state_json'])
+        keeper_state['former_user_ids'] = sorted(set(keeper_state.get('former_user_ids', [])) | set(old_state.get('former_user_ids', [])) | {user_id})
+        con.execute('UPDATE drafters SET state_json=? WHERE id=?', (json.dumps(keeper_state), keeper['id']))
+        con.execute('UPDATE drafters SET state_json=? WHERE id=?', (json.dumps({'membership_removed': True, 'removed_at': _now()}), old['id']))
+        cleared = False
+        for entry in team.get('open_picks', []):
+            if entry.get('proposal'):
+                cleared = True
+                entry.update(proposal=None, pending_from=[], proposal_deadline=None)
+                entry.pop('paused_proposal_seconds', None)
+        state.setdefault('membership_changes', []).append(dict(actor_id=actor_id, team=index, old_user=user_id, new_user=None, action='remove', created_at=_now()))
+        con.execute('UPDATE drafts SET state_json=? WHERE id=?', (json.dumps(state), draft_id))
+        return dict(team_index=index, cleared_proposal=cleared)
 
 
 def edit_anonymous_member(draft_id, expected_state, index, new_user, display_name, actor_id, replace_user=None):

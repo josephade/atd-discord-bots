@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
+from row_highlights import managed_rule_requests
 
 load_dotenv()
 
@@ -205,43 +206,38 @@ async def batch_update_with_retry(sh, body: dict, retries: int = 4):
             else:
                 raise
 
+highlight_locks = {}
+
+
+async def _update_highlight(sh, ws, row, color: dict, remove=False, replace=False):
+    rows = [row] if isinstance(row, int) else list(row)
+    lock = highlight_locks.setdefault((sh.id, ws.id), asyncio.Lock())
+    async with lock:
+        metadata = await asyncio.to_thread(sh.fetch_sheet_metadata, params={
+            'fields': 'sheets(properties(sheetId),conditionalFormats)'})
+        requests = managed_rule_requests(metadata, ws.id, rows, color,
+                                        remove=remove, replace=replace,
+                                        start_column=col_to_index(ROW_START_COL) - 1)
+        # Keep the base fill too: other bots use it to recognize taken players.
+        # An open-ended range also covers columns added by later Flux rounds.
+        requests.extend({'repeatCell': {
+            'range': {'sheetId': ws.id, 'startRowIndex': row - 1,
+                      'endRowIndex': row,
+                      'startColumnIndex': col_to_index(ROW_START_COL) - 1},
+            'cell': {'userEnteredFormat': {} if remove else {'backgroundColor': color}},
+            'fields': 'userEnteredFormat.backgroundColor',
+        }} for row in rows)
+        if requests:
+            await batch_update_with_retry(sh, {'requests': requests})
+
+
 async def apply_highlight(sh, ws, row: int, color: dict):
-    start = col_to_index(ROW_START_COL) - 1
-    end = col_to_index(ROW_END_COL)
-    await batch_update_with_retry(sh, {
-        "requests": [{
-            "repeatCell": {
-                "range": {
-                    "sheetId": ws.id,
-                    "startRowIndex": row - 1,
-                    "endRowIndex": row,
-                    "startColumnIndex": start,
-                    "endColumnIndex": end,
-                },
-                "cell": {"userEnteredFormat": {"backgroundColor": color}},
-                "fields": "userEnteredFormat.backgroundColor",
-            }
-        }]
-    })
+    await _update_highlight(sh, ws, row, color)
+
 
 async def clear_highlight(sh, ws, row: int):
-    start = col_to_index(ROW_START_COL) - 1
-    end = col_to_index(ROW_END_COL)
-    await batch_update_with_retry(sh, {
-        "requests": [{
-            "repeatCell": {
-                "range": {
-                    "sheetId": ws.id,
-                    "startRowIndex": row - 1,
-                    "endRowIndex": row,
-                    "startColumnIndex": start,
-                    "endColumnIndex": end,
-                },
-                "cell": {"userEnteredFormat": {}},
-                "fields": "userEnteredFormat.backgroundColor",
-            }
-        }]
-    })
+    await _update_highlight(sh, ws, row, HIGHLIGHT_COLOR, remove=True)
+
 
 # ==========================================================
 # STATE
@@ -602,7 +598,7 @@ async def on_message(message: discord.Message):
                 "`!status` – Show draft progress\n"
                 "`!undo` – Undo last highlighted pick\n"
                 "`!redo` – Redo last undone pick\n"
-                "`!endhighlight <column>` – Change highlight end column\n"
+                "Highlights cover full rows, including future Flux columns.\n"
                 "`!rehighlight` – Re-apply highlight to all picked players\n"
                 "`!force <name>` – Force highlight a player\n"
                 "`!changehexcolour <hex>` – Change highlight colour\n"
@@ -634,28 +630,12 @@ async def on_message(message: discord.Message):
             await message.reply("❌ Only commissioners can change the highlight range.")
             return
         
-        parts = content.split()
-        if len(parts) != 2:
-            await message.reply(f"Usage: {CMD_ENDHIGHLIGHT} <column letter>\nExample: `{CMD_ENDHIGHLIGHT} L`")
-            return
-        
-        new_end_col = parts[1].upper()
-        
-        # Validate it's a single letter A-Z
-        if not re.match(r'^[A-Z]$', new_end_col):
-            await message.reply("❌ Please provide a single column letter (A-Z).")
-            return
-        
-        # Update the global variable
-        global ROW_END_COL
-        ROW_END_COL = new_end_col
-        
-        log.info(f"[ENDHIGHLIGHT] channel={channel_id} new_end_col={new_end_col} by={message.author}")
-        await message.reply(f"✅ Highlight end column changed to **{new_end_col}**\nUse `!rehighlight` to apply this to all existing picks.")
+        await message.reply("Highlights now cover full rows automatically, including new Flux columns. Use `!rehighlight` to refresh existing picks.")
         return
 
     # ================= RESET =================
     if content == CMD_RESET:
+        await _update_highlight(sh, ws, [], HIGHLIGHT_COLOR, replace=True)
         state["highlighted"].clear()
         state["stack"].clear()
         state["redo_stack"].clear()
@@ -709,8 +689,8 @@ async def on_message(message: discord.Message):
 
         await message.reply("🔄 Re-highlighting all picks...")
 
-        for name, row in state["stack"]:
-            await apply_highlight(sh, ws, row, HIGHLIGHT_COLOR)
+        await _update_highlight(sh, ws, [row for name, row in state["stack"]],
+                                HIGHLIGHT_COLOR, replace=True)
 
         log.info(f"[REHIGHLIGHT] channel={channel_id} re-highlighted {len(state['stack'])} picks by={message.author}")
         await message.reply(f"✅ Re-highlighted **{len(state['stack'])}** picks.")

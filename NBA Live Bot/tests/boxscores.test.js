@@ -55,6 +55,16 @@ test('pregame box score explains pending tip-off and escapes provider text', () 
   assert.doesNotMatch(markup, /<unsafe>/);
 });
 
+test('box score shows each team overall record beside its name and omits it when missing', () => {
+  const s = summary();
+  s.header.competitions[0].competitors[1].record = [{ type: 'road', summary: '4-0' }, { type: 'total', summary: '8-1' }];
+  const model = extractBoxscore(s);
+  assert.equal(model.teams[0].record, '8-1'); assert.equal(model.teams[1].record, '');
+  const markup = boxscoreHTML(model);
+  assert.match(markup, /<h2>AWAY Team<em class="team-record">8-1<\/em><\/h2>/);
+  assert.match(markup, /<h2>HOME Team<\/h2>/);
+});
+
 function fixture(options = {}) {
   const edits = [], notices = [], calls = [], acks = [];
   const message = { id: 'menu', edit: async body => edits.push(body) };

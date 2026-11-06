@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254"><defs>
+  <radialGradient id="bg" cx="50%" cy="42%" r="55%"><stop offset="0" stop-color="#a855f7" stop-opacity=".30"/><stop offset=".7" stop-color="#a855f7" stop-opacity=".05"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+  <linearGradient id="ringG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#dcb6ff"/><stop offset=".5" stop-color="#a855f7"/><stop offset="1" stop-color="#dcb6ff"/></linearGradient>
+  <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset=".6" stop-color="#e6ebf3"/><stop offset="1" stop-color="#8f9bb0"/></linearGradient>
+  <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#55607a"/><stop offset="1" stop-color="#1b2133"/></linearGradient>
+  <radialGradient id="eye" cx="50%" cy="42%" r="60%"><stop offset="0" stop-color="#fff"/><stop offset=".45" stop-color="#dcb6ff"/><stop offset="1" stop-color="#a855f7"/></radialGradient>
+  <radialGradient id="orb" cx="38%" cy="32%" r="70%"><stop offset="0" stop-color="#fff"/><stop offset=".35" stop-color="#dcb6ff"/><stop offset="1" stop-color="#5b1aa8"/></radialGradient>
+  <linearGradient id="atd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#dcb6ff"/><stop offset=".5" stop-color="#a855f7"/><stop offset="1" stop-color="#5b1aa8"/></linearGradient>
+  <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#cfd8e6"/></linearGradient>
+  <linearGradient id="box" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a3350"/><stop offset="1" stop-color="#0b0f1d"/></linearGradient>
+  <linearGradient id="boxTop" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6b7799"/><stop offset="1" stop-color="#3a4464"/></linearGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7d5204"/><stop offset=".2" stop-color="#fff0b0"/><stop offset=".45" stop-color="#ffc62e"/><stop offset=".8" stop-color="#b47708"/><stop offset="1" stop-color="#5e3c02"/></linearGradient>
+  <linearGradient id="goldV" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe38f"/><stop offset="1" stop-color="#9a6306"/></linearGradient>
+  <radialGradient id="bball" cx="36%" cy="30%" r="80%"><stop offset="0" stop-color="#ffb060"/><stop offset=".5" stop-color="#ee6a12"/><stop offset="1" stop-color="#7a2604"/></radialGradient>
+  <filter id="glow" filterUnits="userSpaceOnUse" x="-2000" y="-2000" width="6000" height="6000"><feGaussianBlur in="SourceGraphic" stdDeviation="26" result="a"/><feGaussianBlur in="SourceGraphic" stdDeviation="9" result="b"/><feMerge><feMergeNode in="a"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  <filter id="soft" filterUnits="userSpaceOnUse" x="-2000" y="-2000" width="6000" height="6000"><feGaussianBlur in="SourceGraphic" stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  <filter id="shadow" filterUnits="userSpaceOnUse" x="-2000" y="-2000" width="6000" height="6000"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity=".75"/></filter>
+</defs>
+  <rect width="1254" height="1254" fill="#000"/>
+  <circle cx="627" cy="627" r="560" fill="url(#bg)"/>
+  <circle cx="627" cy="627" r="584" fill="none" stroke="url(#ringG)" stroke-width="20" filter="url(#glow)"/>
+  <circle cx="627" cy="627" r="560" fill="none" stroke="url(#ringG)" stroke-width="3" opacity=".55"/>
+      
+  <clipPath id="slotClip"><rect x="0" y="0" width="1254" height="628"/></clipPath>
+  <g filter="url(#shadow)">
+    <path d="M618 668 L690 588 H1000 L1072 668 Z" fill="url(#boxTop)" stroke="#dcb6ff" stroke-width="5" stroke-linejoin="round"/>
+    <rect x="696" y="610" width="298" height="28" rx="14" fill="#03050c"/>
+  </g>
+  <g clip-path="url(#slotClip)"><g transform="translate(735 208) rotate(4) scale(.9)">
+    <rect width="300" height="470" rx="20" fill="url(#paper)" stroke="#1b2133" stroke-width="8"/>
+    <text x="150" y="68" font-family="'Arial Black', sans-serif" font-size="44" text-anchor="middle" fill="#121829" letter-spacing="2">BALLOT</text>
+    <rect x="30" y="96" width="40" height="40" rx="9" fill="#fff" stroke="#1b2133" stroke-width="6"/>
+    <rect x="86" y="104" width="176" height="24" rx="12" fill="#86efac"/><rect x="30" y="158" width="40" height="40" rx="9" fill="#fff" stroke="#1b2133" stroke-width="6"/>
+    <rect x="86" y="166" width="152" height="24" rx="12" fill="#a3e635"/><rect x="30" y="220" width="40" height="40" rx="9" fill="#fff" stroke="#1b2133" stroke-width="6"/>
+    <rect x="86" y="228" width="128" height="24" rx="12" fill="#facc15"/><rect x="30" y="282" width="40" height="40" rx="9" fill="#fff" stroke="#1b2133" stroke-width="6"/>
+    <rect x="86" y="290" width="104" height="24" rx="12" fill="#fb923c"/><rect x="30" y="344" width="40" height="40" rx="9" fill="#fff" stroke="#1b2133" stroke-width="6"/>
+    <rect x="86" y="352" width="80" height="24" rx="12" fill="#f87171"/>
+    <path d="M38 118 L52 132 L82 84" fill="none" stroke="#16a34a" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+  </g></g>
+  <g filter="url(#shadow)">
+    <rect x="618" y="668" width="454" height="210" rx="20" fill="url(#box)" stroke="#dcb6ff" stroke-width="6"/>
+    <text x="845" y="782" font-family="'Arial Black', sans-serif" font-size="88" text-anchor="middle" fill="#dcb6ff" letter-spacing="6" filter="url(#soft)">VOTE</text>
+  </g>
+      <g transform="translate(370 470)" filter="url(#shadow)">
+    <rect x="-142" y="150" width="284" height="230" rx="70" fill="url(#shell)"/>
+    <circle cx="0" cy="262" r="36" fill="#0a0e1a" stroke="#a855f7" stroke-width="7"/>
+    <circle cx="0" cy="262" r="17" fill="url(#orb)" filter="url(#soft)"/>
+    <rect x="-264" y="-58" width="50" height="116" rx="20" fill="url(#metal)" stroke="#a855f7" stroke-width="5"/>
+    <rect x="214" y="-58" width="50" height="116" rx="20" fill="url(#metal)" stroke="#a855f7" stroke-width="5"/>
+    <path d="M0 -160V-238" stroke="#aeb8ca" stroke-width="15" stroke-linecap="round"/>
+    <circle cx="0" cy="-258" r="32" fill="url(#orb)" filter="url(#glow)"/>
+    <path d="M-150 -165H150C235 -165 244 -40 228 62C216 132 150 168 90 168H-90C-150 168 -216 132 -228 62C-244 -40 -235 -165 -150 -165Z" fill="url(#shell)"/>
+    <path d="M-140 -146H140C190 -146 205 -100 205 -74C120 -112 -120 -112 -205 -74C-205 -100 -190 -146 -140 -146Z" fill="#fff" opacity=".85"/>
+    <rect x="-172" y="-88" width="344" height="184" rx="86" fill="#060914" stroke="#2c3550" stroke-width="7"/>
+    <g filter="url(#soft)"><ellipse cx="-78" cy="-4" rx="44" ry="54" fill="url(#eye)"/><ellipse cx="78" cy="-4" rx="44" ry="54" fill="url(#eye)"/></g>
+       <ellipse cx="-92" cy="-26" rx="12" ry="15" fill="#fff"/><ellipse cx="64" cy="-26" rx="12" ry="15" fill="#fff"/>
+    
+    <path d="M-30 62 Q0 82 30 62" fill="none" stroke="#a855f7" stroke-width="10" stroke-linecap="round" filter="url(#soft)"/>
+  </g>
+      <g filter="url(#shadow)">
+  <path d="M478 690 C570 700 660 650 712 520" fill="none" stroke="#7f8ba1" stroke-width="66" stroke-linecap="round"/>
+  <path d="M478 690 C570 700 660 650 712 520" fill="none" stroke="url(#shell)" stroke-width="54" stroke-linecap="round"/>
+  <circle cx="712" cy="520" r="46" fill="url(#shell)" stroke="#7f8ba1" stroke-width="5"/></g>
+      <g transform="translate(186 770) scale(0.84)" filter="url(#shadow)">
+  <circle r="100" fill="url(#bball)"/>
+  <g fill="none" stroke="#1a0a04" stroke-width="7"><path d="M-100 0C-40 -24 40 -24 100 0"/><path d="M0 -100C-22 -40 -22 40 0 100"/><path d="M-72 -70C-30 -30 -30 30 -72 70"/><path d="M72 -70C30 -30 30 30 72 70"/></g></g>
+      
+  <g font-family="'Arial Black', Impact, sans-serif" text-anchor="middle">
+    <g filter="url(#glow)" opacity=".75"><text x="627" y="1000" font-size="262" fill="#a855f7" stroke="#a855f7" stroke-width="14" stroke-linejoin="round" letter-spacing="2">ATD</text></g>
+    <text x="627" y="1000" font-size="262" fill="#000" stroke="#000" stroke-width="30" stroke-linejoin="round" letter-spacing="2">ATD</text>
+    <text x="627" y="1000" font-size="262" fill="url(#atd)" stroke="#ffffff" stroke-opacity=".9" stroke-width="5" stroke-linejoin="round" letter-spacing="2">ATD</text>
+    <text x="627" y="1088" font-size="60" fill="#fff" letter-spacing="7">VOTING BOT</text>
+  </g>
+  <g stroke="#a855f7" stroke-width="7" stroke-linecap="round" filter="url(#soft)"><path d="M292 1066H346"/><path d="M908 1066H962"/></g></svg>

@@ -28,7 +28,7 @@ def validate_budget(submitted: list[str], price_lookup: dict[str, float],
             price = float(price)
         except (TypeError, ValueError):
             price = None
-        if price is None or not math.isfinite(price) or price < 0:
+        if price is None or not math.isfinite(price):
             missing.append(player)
         else:
             total += price

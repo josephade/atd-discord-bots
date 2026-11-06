@@ -631,10 +631,15 @@ class BudgetTests(unittest.TestCase):
         self.theme = AnonBudgetDraftTheme()
         self.ctx = types.SimpleNamespace(settings={'budget': 100})
 
-    def test_parser_rejects_nonfinite_negative_prices(self):
-        for price in ('NaN', 'inf', '-inf', '-1'):
+    def test_parser_rejects_nonfinite_prices_but_accepts_negative_prices(self):
+        for price in ('NaN', 'inf', '-inf'):
             self.assertIsNone(self.theme._parse_submission(self.ctx, 'LeBron James 2013 ' + price))
         self.assertEqual(self.theme._parse_submission(self.ctx, 'LeBron James 2013 $40')[2], 40)
+        for price in ('$-1', '-$1', '-1', '\u2212$1', '($1)'):
+            self.assertEqual(self.theme._parse_submission(self.ctx, 'Nene ' + price)[2], -1)
+        self.assertIsNone(self.theme._check_budget(self.ctx, {'budget_spent': 0}, -1))
+        self.assertIsNone(self.theme._check_budget(self.ctx, {'budget_spent': -1}, 101))
+        self.assertIn('$101', self.theme._budget_note(self.ctx, {'budget_spent': -1}))
 
     def test_year_is_optional_but_budget_price_is_required(self):
         for text, expected in (
@@ -645,16 +650,16 @@ class BudgetTests(unittest.TestCase):
                 ('LeBron James 2012-13 $43', ('LeBron James', '2012-13', 43)),
                 ('Nene $0', ('Nene', '', 0))):
             self.assertEqual(self.theme._parse_submission(self.ctx, text), expected)
-        for text in ('LeBron James', 'LeBron James $NaN', 'LeBron James $inf', 'LeBron James $-1', '$43', '2013 $43'):
+        for text in ('LeBron James', 'LeBron James $NaN', 'LeBron James $inf', '$43', '2013 $43'):
             self.assertIsNone(self.theme._parse_submission(self.ctx, text))
 
     def test_budget_remaining_and_invalid_values(self):
-        for value in (float('nan'), float('inf'), -1, 'invalid', None):
+        for value in (float('nan'), float('inf'), 'invalid', None):
             self.assertIsNotNone(self.theme._check_budget(self.ctx, {}, value))
         self.assertIsNone(self.theme._check_budget(self.ctx, {'budget_spent': 60}, 40))
         self.assertIsNotNone(self.theme._check_budget(self.ctx, {'budget_spent': 60}, 41))
         for key in ('budget', 'budget_spent'):
-            for value in (float('nan'), float('inf'), -1, 'invalid'):
+            for value in (float('nan'), float('inf'), 'invalid') + ((-1,) if key == 'budget' else ()):
                 ctx = types.SimpleNamespace(settings={'budget': value if key == 'budget' else 100})
                 self.assertIsNotNone(self.theme._check_budget(ctx, {key: value} if key != 'budget' else {}, 1))
 
@@ -662,7 +667,9 @@ class BudgetTests(unittest.TestCase):
         self.assertTrue(roster.validate_roster(['Free'], ['Free'], {'Free': 0}, 0)[0])
         for value in (float('nan'), float('inf'), -1, 'bad'):
             self.assertFalse(roster.validate_roster(['Free'], ['Free'], {'Free': 0}, value)[0])
-            self.assertFalse(roster.validate_roster(['Free'], ['Free'], {'Free': value}, 100)[0])
+            if value != -1:
+                self.assertFalse(roster.validate_roster(['Free'], ['Free'], {'Free': value}, 100)[0])
+        self.assertTrue(roster.validate_roster(['Free'], ['Free'], {'Free': -1}, 100)[0])
 
 
 if __name__ == '__main__':

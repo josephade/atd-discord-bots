@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY restart_recovery.py bot.py config.py player_positions.py emoji_map.py budget_rules.py private_roster.py ./
+COPY roster_prices.py ./
 COPY draft_history.py player_draft_history.json ./
 COPY tests/ ./tests/
 RUN python -m unittest discover -s tests -v

@@ -87,7 +87,13 @@ async def roster(draft_id, owner_id, guild_id, action=None, price_source=None):
                 if queue:
                     db.update_drafter_state(drafter['id'], {'draftlist_queue': queue})
             drafters = [db.get_drafter(d['id']) for d in drafters]
-        return {'members': [dict(user_id=str(d['user_id']), **view(draft, d)) for d in drafters]}
+        current = db.get_draft(draft_id)
+        labels = {mid: dict(logo=team['logo'], team_index=index)
+                  for index, team in enumerate(current['state'].get('teams', []))
+                  for mid in team['member_ids']}
+        return {'draft': {'id': draft_id, 'name': current['name'], 'status': current['status']},
+                'members': [dict(user_id=str(d['user_id']), display_name=d['display_name'],
+                                 **labels[d['id']], **view(current, d)) for d in drafters]}
 
 
 def validate(picks):
@@ -106,8 +112,8 @@ def validate(picks):
             price = float(pick['price'])
         except (KeyError, TypeError, ValueError):
             raise ValueError(f'{player}: a price is required, for example Michael Jordan $44.') from None
-        if not math.isfinite(price) or price < 0:
-            raise ValueError(f'{player}: price must be a finite, non-negative number.')
+        if not math.isfinite(price):
+            raise ValueError(f'{player}: price must be a finite number.')
         if pick.get('lock'):
             raise ValueError('Lock picks are not supported in Anonymous Budget.')
         key = player.casefold()

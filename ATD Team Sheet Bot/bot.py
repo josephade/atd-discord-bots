@@ -19,6 +19,7 @@ from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, SPREADSHEET_ID, SERVICE_AC
 from player_positions import PLAYER_POSITIONS
 from draft_history import load_history, player_key
 import budget_rules
+from roster_prices import read_prices
 from emoji_map import EMOJI_TEAM_MAP, UNICODE_EMOJI_MAP
 
 # Shared reference spreadsheet (same one ATD Draft List Bot and ATD Win Bot
@@ -945,7 +946,7 @@ _MENTION_EMOJI_PAIR_RE = re.compile(
     r'<@!?(\d+)>\s*(?:<a?:([\w~]+):\d+>|(' + '|'.join(re.escape(k) for k in UNICODE_EMOJI_MAP) + r'))'
 )
 _YEAR_RE         = re.compile(r"'?(\d{2})-(\d{2})\b|(\d{4})-(\d{4})\b|(\d{4})-(\d{2})\b|\b(19\d{2}|20[0-4]\d)\b|'(\d{2})\b|\b(\d{2})'|\b(\d{2})\b")
-_PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?)\)?|\((\d+(?:\.\d+)?)\)|\b(\d+(?:\.\d+)?)\$')
+_PRICE_RE        = re.compile(r'\(?(-?\$\d+(?:\.\d+)?|\$-\d+(?:\.\d+)?)\)?|\((\d+(?:\.\d+)?)\)|\b(\d+(?:\.\d+)?)\$')
 _PICK_RE         = re.compile(r'^\s*\d+\.\s*')
 _BENCH_POS_RE    = re.compile(r'\bBench\s+(PG|SG|SF|PF|C)\b', re.IGNORECASE)
 _BENCH_RE        = re.compile(r'\bBench\b', re.IGNORECASE)
@@ -2256,8 +2257,15 @@ async def _swap_roster(ctx, args: str, team_name: str, current_sheet_only: bool 
                 {"range": gspread.utils.rowcol_to_a1(slot_b["row"], team_col + 1), "values": [[slot_a["year"]]]},
             ]
             if has_price_col:
-                updates.append({"range": gspread.utils.rowcol_to_a1(slot_a["row"], team_col + 2), "values": [[slot_b["price"]]]})
-                updates.append({"range": gspread.utils.rowcol_to_a1(slot_b["row"], team_col + 2), "values": [[slot_a["price"]]]})
+                price_ranges = [gspread.utils.rowcol_to_a1(slot["row"], team_col + 2) for slot in (slot_a, slot_b)]
+                price_a, price_b = read_prices(manager, price_ranges)
+                updates.append({"range": price_ranges[0], "values": [[price_b]]})
+                updates.append({"range": price_ranges[1], "values": [[price_a]]})
+                # Change only the number format, retaining team colours,
+                # borders and the destination slot's other styling.
+                manager._call('batch_format', [{"range": cell, "format": {
+                    "numberFormat": {"type": "CURRENCY", "pattern": '"$"0'}
+                }} for cell in price_ranges])
             manager._call('batch_update', updates)
 
     except Exception as exc:

@@ -28,6 +28,61 @@ class AnonymousLists:
     def linked(self, uid):
         return bool(self.data.get(str(uid), {}).get('anon_draft_id'))
 
+    async def alllists(self, ctx):
+        """Owner-only live report; never use old normal-draft emoji/list caches."""
+        drafts = sorted({entry['anon_draft_id'] for entry in self.data.values() if entry.get('anon_draft_id')})
+        if not drafts:
+            return False
+        private = int(os.getenv('OWNER_REPORT_CHANNEL_ID') or '1533242104304631969')
+        if ctx.author.id != self.owner:
+            return True
+        if ctx.guild is not None:
+            if ctx.channel.id != private:
+                await ctx.send(f'Anonymous lists are private. Use <#{private}> or DM me. No GM mappings were posted.')
+                return True
+            if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+                await ctx.send('Hide this channel from @everyone before viewing anonymous lists.')
+                return True
+        reports = []
+        # Finish all reads before posting so a failed source cannot fall back to
+        # an old draft or leave a misleading partial report.
+        for draft in drafts:
+            report = await self.request(self.owner, draft, endpoint='picklist-members')
+            if 'draft' not in report or any('logo' not in m for m in report['members']):
+                raise BridgeError('Theme Bot could not supply current team assignments. No cached teams were shown; try again shortly.')
+            reports.append(report)
+        embeds = []
+        for report in reports:
+            info = report['draft']
+            for member in report['members']:
+                picks = member['picks']
+                enabled = member['enabled']
+                embed = discord.Embed(title=member['display_name'][:220],color=0x2ECC71 if enabled else 0x747F8D)
+                embed.add_field(name='Team',value=member['logo'],inline=True)
+                embed.add_field(name='Status',value='Active' if enabled else 'Paused',inline=True)
+                embed.add_field(name='Picks',value=str(len(picks)),inline=True)
+                lines = []
+                for index,pick in enumerate(picks[:15],1):
+                    name=pick['player']+(f" '{pick['year']}" if pick.get('year') else '')
+                    rule=(f"drop >= ${pick['flux_drop']}" if 'flux_drop' in pick else f"${pick['price']:g}")
+                    lines.append(f'{index}. {name} - {rule}')
+                if len(picks)>15:
+                    lines.append(f'...and {len(picks)-15} more')
+                embed.add_field(name='Pick List',value=('\n'.join(lines)[:950] if lines else 'No saved picks'),inline=False)
+                embed.set_footer(text=f"{info['name']} | Theme draft {info['id']} | Live Theme Bot lists")
+                embeds.append(embed)
+        if not embeds:
+            await ctx.send('No GMs are assigned to the linked anonymous drafts.')
+        batch,size=[],0
+        for embed in embeds:
+            if batch and (len(batch)==10 or size+len(embed)>5500):
+                await ctx.send(embeds=batch,allowed_mentions=discord.AllowedMentions.none())
+                batch,size=[],0
+            batch.append(embed);size+=len(embed)
+        if batch:
+            await ctx.send(embeds=batch,allowed_mentions=discord.AllowedMentions.none())
+        return True
+
     async def request(self, uid, draft, payload=None, endpoint='picklist'):
         key = os.getenv('THEME_BRIDGE_KEY', '')
         guild = self.guild()
