@@ -1,7 +1,7 @@
 'use strict';
 
 const BATCH_SIZE = 10;
-const SCREENS = ['welcome', 'username', 'vote', 'later', 'done', 'closed'];
+const SCREENS = ['welcome', 'username', 'vote', 'later', 'done', 'closed', 'my-votes-screen'];
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,6 +13,8 @@ const state = {
   link: null,
   afterWelcome: null,
   savedMessage: '',
+  myVotes: null,
+  reviewEdit: false,
 };
 
 class ApiFailure extends Error {
@@ -111,6 +113,8 @@ async function submitUsername(event) {
   button.disabled = true;
   try {
     await api('POST', '/api/session', { username: $('username-input').value });
+    state.link = null;
+    await rememberSession();
     await loadCard();
   } catch (err) {
     if (err.status === 403) {
@@ -118,6 +122,10 @@ async function submitUsername(event) {
       show('closed');
     } else {
       setText($('username-error'), err.message);
+      if (err.status === 409) {
+        $('returning-voter').open = true;
+        $('resume-link-input').focus();
+      }
     }
   } finally {
     button.disabled = false;
@@ -134,7 +142,7 @@ async function loadCard(position) {
     if (card.done) {
       state.card = null;
       $('done-total').textContent = String(card.total);
-      show('done');
+      await openMyVotes();
       return;
     }
     state.card = card;
@@ -176,6 +184,7 @@ function renderCard() {
   document.querySelector('.vote-main').style.setProperty('--card-accent', palette[Number(card.player.id) % palette.length]);
 
   $('player-name').textContent = card.player.name;
+  $('current-player-price').textContent = `$${card.player.current_price}`;
   $('player-position').textContent = `PLAYER ${card.position} / ${card.total}`;
   setText($('save-status'), state.savedMessage || (answer ? 'Your saved answer. Choose another price to update it.' : 'Choose a price to save and continue.'));
   $('save-status').classList.toggle('is-saved', Boolean(state.savedMessage));
@@ -264,7 +273,7 @@ function renderProgress(answered, total) {
 function setBusy(busy) {
   state.saving = busy;
   $('options').setAttribute('aria-busy', String(busy));
-  document.querySelectorAll('#back, #resume-voting, #continue-later, #copy-link').forEach(button => {
+  document.querySelectorAll('#back, #resume-voting, #continue-later, #copy-link, #my-votes').forEach(button => {
     button.disabled = busy || (button.id === 'back' && state.card && state.card.position <= 1);
   });
   document.querySelectorAll('.option, #dont-know, #other-form button').forEach((button) => {
@@ -285,8 +294,8 @@ function submitOther(event) {
   const raw = $('other-input').value.trim();
   const price = Number(raw);
   const max = state.card.other_max;
-  if (raw === '' || !Number.isInteger(price) || price < 1 || price > max) {
-    setText($('vote-error'), `Enter a whole dollar amount from $1 to $${max}.`);
+  if (raw === '' || !Number.isInteger(price) || price < 0 || price > max) {
+    setText($('vote-error'), `Enter a whole dollar amount from $0 to $${max}.`);
     return;
   }
   saveAnswer('other', price);
@@ -312,6 +321,11 @@ async function saveAnswer(answerType, price) {
     const saved = await api('PUT', `/api/votes/${card.player.id}`, body);
     state.pendingAnswer = null;
     state.savedMessage = `Locked in ✓ ${card.player.name}${answerType === 'dont_know' ? ' · skipped' : ` · $${price}`}`;
+    if (state.reviewEdit) {
+      state.reviewEdit = false;
+      await openMyVotes();
+      return;
+    }
     showMilestone(saved.answered, saved.total, wasAnswered);
     if (wasAnswered && card.position < card.total) {
       await loadCard(card.position + 1);
@@ -356,12 +370,121 @@ function showMilestone(answered, total, wasAnswered) {
 
 /* Resume link */
 
+function voteNode(tag, text, className='') {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  element.className = className;
+  return element;
+}
+
+function deltaText(value) {
+  return value === null ? '—' : value > 0 ? `+$${value}` : value < 0 ? `−$${Math.abs(value)}` : '$0';
+}
+
+async function openMyVotes() {
+  try {
+    const data = await api('GET', '/api/my-votes');
+    const firstCompletedReport = data.answered === data.total && (!state.myVotes || state.myVotes.answered < state.myVotes.total);
+    if (firstCompletedReport) {
+      $('my-votes-filter').value = 'all';
+      $('my-votes-sort').value = 'price';
+    }
+    state.myVotes = data;
+    state.reviewEdit = false;
+    state.votingOpen = data.voting_open;
+    $('connection').hidden = true;
+    $('my-votes-title').textContent = data.answered === data.total ? 'Scouting complete.' : 'Your scouting report.';
+    $('my-votes-subtitle').textContent = `${data.username} · ${data.answered} of ${data.total} players answered. Search any player to revisit your price.`;
+    $('my-votes-continue').hidden = !data.voting_open || data.answered === data.total;
+    $('my-votes-notice').textContent = `${data.voting_open ? 'You can edit your prices while voting is open.' : 'Voting is closed. Your saved answers are available to view.'} ${data.excluded ? `${data.excluded} answer(s) were excluded by an admin; editing does not restore them to results.` : ''}`;
+    $('my-votes-feedback').textContent = state.savedMessage;
+    const metrics = $('my-votes-metrics'); metrics.replaceChildren();
+    for (const [value, label] of [[data.answered,'Players answered'],[data.priced,'Price votes'],[data.dont_know,"Don't know"],[data.total-data.answered,'Still to price']]) {
+      const box = document.createElement('div');box.append(voteNode('strong',value),voteNode('span',label));metrics.append(box);
+    }
+    for (const [id, rows] of [['my-increases',data.biggest_increases],['my-decreases',data.biggest_decreases]]) {
+      const host = $(id);host.replaceChildren();
+      for (const row of rows) {
+        const button=voteNode('button','', 'my-price-highlight');button.type='button';button.disabled=!data.voting_open;
+        button.append(voteNode('span',row.name),voteNode('strong',deltaText(row.difference)));
+        button.onclick=()=>editMyPlayer(row.position);host.append(button);
+      }
+      if (!rows.length) host.append(voteNode('p','No saved prices in this category yet.','fine'));
+    }
+    renderMyVotes();
+    show('my-votes-screen');
+  } catch (err) { handleFailure(err, openMyVotes); }
+}
+
+function editMyPlayer(position) {
+  state.reviewEdit=true;
+  state.savedMessage='';
+  setText($('milestone'),'');
+  loadCard(position);
+}
+
+function renderMyVotes() {
+  const data = state.myVotes;
+  if (!data) return;
+  const query=$('my-votes-search').value.trim().toLocaleLowerCase();
+  const filter=$('my-votes-filter').value;
+  const rows=data.players.filter(row=>row.name.toLocaleLowerCase().includes(query) && (
+    filter==='all' || filter==='answered'&&row.answered || filter==='unanswered'&&!row.answered ||
+    filter==='unknown'&&row.answer_type==='dont_know' || row.difference!==null && (
+      filter==='higher'&&row.difference>0 || filter==='lower'&&row.difference<0 || filter==='same'&&row.difference===0)));
+  const sort=$('my-votes-sort').value;
+  const ranking = [...data.players].sort((a,b)=>a.price===null||b.price===null ? a.price===b.price?a.name.localeCompare(b.name):a.price===null?1:-1 : b.price-a.price || a.name.localeCompare(b.name));
+  const ranks = new Map(ranking.filter(row=>row.price!==null).map((row,index)=>[row.player_id,index+1]));
+  if (sort==='name') rows.sort((a,b)=>a.name.localeCompare(b.name));
+  else if (sort==='price') rows.sort((a,b)=>a.price===null||b.price===null ? a.price===b.price?a.name.localeCompare(b.name):a.price===null?1:-1 : b.price-a.price || a.name.localeCompare(b.name));
+  else if (sort!=='order') rows.sort((a,b)=>a.difference===null||b.difference===null ? a.difference===b.difference?0:a.difference===null?1:-1 : sort==='highest'?b.difference-a.difference:a.difference-b.difference);
+  $('my-adp-heading').textContent = sort==='price' ? 'Your ADP — highest price first' : 'Your player list';
+  $('my-votes-count').textContent=`${rows.length} of ${data.total} players shown · Your rank uses your saved price. Equal prices sort by name; unpriced players have no rank. Difference = your price minus current ADP price.`;
+  const body=$('my-votes-rows');body.replaceChildren();
+  for (const row of rows) {
+    const tr=document.createElement('tr');
+    tr.append(voteNode('td',ranks.get(row.player_id) || '—'));
+    const answer=!row.answered?'Not answered':row.answer_type==='dont_know'?"Don't know":`$${row.price}`;
+    [row.name,`$${row.current_price}`,answer,deltaText(row.difference)].forEach((text,index)=>{
+      const td=voteNode('td',text);
+      if(index===3) td.className=row.difference>0?'my-diff-up':row.difference<0?'my-diff-down':'';
+      if(index===0&&row.excluded) td.append(voteNode('small','Excluded from results'));
+      tr.append(td);
+    });
+    const td=document.createElement('td');const button=voteNode('button',row.answered?'Edit':'Price','secondary');button.type='button';button.disabled=!data.voting_open;
+    button.setAttribute('aria-label',`${row.answered?'Edit':'Price'} ${row.name}`);button.onclick=()=>editMyPlayer(row.position);td.append(button);tr.append(td);body.append(tr);
+  }
+  if (!rows.length) { const tr=document.createElement('tr');const td=voteNode('td','No players match. Choose All players or change your search.');td.colSpan=6;tr.append(td);body.append(tr); }
+}
+
 async function getLink() {
   if (!state.link) {
     const data = await api('GET', '/api/resume-link');
     state.link = data.link;
   }
+  try { localStorage.setItem('tfm-voter-resume', new URL(state.link, location.origin).pathname); } catch (_) {}
   return state.link;
+}
+
+async function rememberSession() {
+  try { await getLink(); } catch (_) { /* A backup failure must never block saved progress. */ }
+}
+
+function resumePath(value) {
+  try {
+    const url = new URL(value.trim(), location.origin);
+    return url.origin === location.origin && /^\/r\/\d+\.[A-Za-z0-9_-]{20,100}$/.test(url.pathname) ? url.pathname : null;
+  } catch (_) { return null; }
+}
+
+function resumeFromInput() {
+  const path = resumePath($('resume-link-input').value);
+  if (!path) {
+    setText($('resume-link-error'), 'Paste your full private resume link for this site. Ask the commissioner if you have lost it.');
+    return;
+  }
+  try { localStorage.removeItem('tfm-voter-resume'); } catch (_) {}
+  location.assign(path);
 }
 
 async function copyText(text) {
@@ -461,6 +584,8 @@ function bindEvents() {
     arena.replaceWith(replacement);
   });
   $('username-form').addEventListener('submit', submitUsername);
+  $('resume-from-link').addEventListener('click', resumeFromInput);
+  $('resume-link-input').addEventListener('keydown', event => { if(event.key==='Enter') { event.preventDefault(); resumeFromInput(); } });
   $('other-form').addEventListener('submit', submitOther);
   $('dont-know').addEventListener('click', () => saveAnswer('dont_know', null));
   $('retry').addEventListener('click', () => {
@@ -482,6 +607,17 @@ function bindEvents() {
   });
   $('copy-link').addEventListener('click', copyLinkFromVote);
   $('continue-later').addEventListener('click', openLater);
+  $('my-votes').addEventListener('click', openMyVotes);
+  $('my-votes-search').addEventListener('input', renderMyVotes);
+  $('my-votes-filter').addEventListener('change', renderMyVotes);
+  $('my-votes-sort').addEventListener('change', renderMyVotes);
+  $('view-my-adp').addEventListener('click', () => {
+    $('my-votes-search').value=''; $('my-votes-filter').value='all'; $('my-votes-sort').value='price';
+    renderMyVotes(); $('my-adp-heading').scrollIntoView({block:'start'});
+  });
+  $('my-votes-continue').addEventListener('click', () => { state.reviewEdit=false; state.savedMessage=''; loadCard(); });
+  $('my-votes-link').addEventListener('click', openLater);
+  $('closed-my-votes').addEventListener('click', openMyVotes);
   $('later-copy').addEventListener('click', copyLinkFromLater);
   $('email-form').addEventListener('submit', submitEmail);
   $('later-back').addEventListener('click', () => {
@@ -491,13 +627,14 @@ function bindEvents() {
       loadCard();
     }
   });
-  $('review').addEventListener('click', () => loadCard(Number($('done-total').textContent)));
+  $('review').addEventListener('click', openMyVotes);
 }
 
 async function start() {
   bindEvents();
   const params = new URLSearchParams(window.location.search);
   if (params.get('link') === 'invalid') {
+    try { localStorage.removeItem('tfm-voter-resume'); } catch (_) {}
     $('link-notice').hidden = false;
     window.history.replaceState(null, '', '/');
   }
@@ -510,12 +647,22 @@ async function start() {
   }
   state.votingOpen = me.voting_open;
   if (me.voter) {
+    rememberSession();
+    $('closed-my-votes').hidden = false;
     // A returning voter skips the animation and goes straight to their next player.
     if (state.votingOpen) {
       loadCard();
     } else {
-      show('closed');
+      openMyVotes();
     }
+    return;
+  }
+  let saved;
+  try { saved = localStorage.getItem('tfm-voter-resume'); } catch (_) {}
+  const savedPath = saved && resumePath(saved);
+  if (savedPath) {
+    try { localStorage.removeItem('tfm-voter-resume'); } catch (_) {}
+    location.replace(savedPath);
     return;
   }
   playWelcome(showUsername);

@@ -93,13 +93,124 @@ class SiteTestCase(AioHTTPTestCase):
 
 
 class VoterFlowTests(SiteTestCase):
-    async def test_card_has_options_and_never_marks_the_current_price(self):
+    async def test_combined_adp_includes_partial_votes_zero_and_excludes_deleted_answers(self):
+        players=self.store.players()
+        voters=[self.store.create_voter(f'Combined {i}',[p['id'] for p in players],f'net-{i}',lambda uid:f'combined-session-{uid}') for i in range(3)]
+        for vi, pi, kind, price in [(0,0,'other',0),(0,1,'other',10),(0,2,'dont_know',None),
+                                    (1,0,'other',0),(1,1,'other',30),(1,2,'dont_know',None),(1,3,'other',0),
+                                    (2,0,'dont_know',None),(2,1,'other',100),(0,4,'other',50)]:
+            self.store.save_vote(voters[vi]['id'],players[pi]['id'],kind,price)
+        removed=next(v for v in self.store.all_votes() if v['player_id']==players[4]['id'])
+        self.store.delete_vote(removed['id'],'excluded test price')
+        await self.login_admin()
+        data=(await(await self.client.get('/api/admin/players')).json())['combined_adp']
+        self.assertEqual((data['contributors'],data['price_votes'],data['priced_players']),(3,6,3))
+        rows={r['id']:r for r in data['players']}
+        top=rows[players[1]['id']]
+        self.assertEqual((top['median'],top['average'],top['median_rank'],top['average_rank']),(30,46.67,1,1))
+        self.assertEqual(rows[players[0]['id']]['median'],0)
+        self.assertIsNotNone(rows[players[3]['id']]['median_rank'])
+        self.assertIsNone(rows[players[2]['id']]['median_rank'])
+        self.assertIsNone(rows[players[4]['id']]['median_rank'])
+        tied=sorted([rows[players[i]['id']] for i in (0,3)],key=lambda r:r['name'].casefold())
+        self.assertEqual([r['median_rank'] for r in tied],[2,3])
+        batch=self.store.delete_voter(voters[1]['id'],'removed voter')
+        updated=(await(await self.client.get('/api/admin/players')).json())['combined_adp']
+        self.assertEqual((updated['contributors'],updated['price_votes']),(2,3))
+        self.assertEqual(next(r for r in updated['players'] if r['id']==players[1]['id'])['median'],55)
+        self.store.restore_batch(batch)
+        restored=(await(await self.client.get('/api/admin/players')).json())['combined_adp']
+        self.assertEqual(restored,data)
+
+    async def test_admin_report_matches_voters_report_without_changing_identity(self):
+        await self.start_voter(username='Commissioner voter')
+        other=await self.new_client()
+        await self.start_voter(other,'Report target')
+        voter=next(v for v in self.store.voters() if v['discord_username']=='Report target')
+        for i,player in enumerate(self.store.players()[:24]):
+            self.store.save_vote(voter['id'],player['id'],'other',100 if i%2 else 0)
+        excluded=next(v for v in self.store.all_votes() if v['voter_id']==voter['id'])
+        self.store.delete_vote(excluded['id'],'test exclusion')
+        path=f"/api/admin/voters/{voter['id']}/report"
+        self.assertEqual((await self.client.get(path)).status,401)
+        await self.login_admin()
+        response=await self.client.get(path)
+        self.assertEqual(response.status,200)
+        self.assertNotIn('Set-Cookie',response.headers)
+        report=await response.json()
+        self.assertEqual(report,await(await other.get('/api/my-votes')).json())
+        self.assertEqual(len(report['biggest_increases']),10)
+        self.assertEqual(len(report['biggest_decreases']),10)
+        self.assertEqual(report['excluded'],1)
+        self.assertEqual((await(await self.client.get('/api/me')).json())['voter']['username'],'Commissioner voter')
+        self.store.set_setting('voting_open','0')
+        self.assertEqual((await self.client.get(path)).status,200)
+        self.store.delete_voter(voter['id'],'test removal')
+        self.assertEqual((await self.client.get(path)).status,404)
+
+    async def test_my_votes_uses_existing_answers_and_updates_after_edit(self):
+        await self.start_voter()
+        first = await self.next_card()
+        path = f"/api/votes/{first['player']['id']}"
+        await self.client.put(path,json={'answer_type':'other','price':0})
+        second = await self.next_card()
+        await self.client.put(f"/api/votes/{second['player']['id']}",json={'answer_type':'other','price':100})
+        third = await self.next_card()
+        await self.client.put(f"/api/votes/{third['player']['id']}",json={'answer_type':'dont_know'})
+        data = await (await self.client.get('/api/my-votes')).json()
+        self.assertEqual((data['total'],data['answered'],data['priced'],data['dont_know']),(313,3,2,1))
+        self.assertEqual(data['players'][0]['price'],0)
+        self.assertEqual(data['players'][0]['position'],1)
+        self.assertEqual(data['biggest_decreases'][0]['player_id'],first['player']['id'])
+        self.assertEqual(data['biggest_increases'][0]['player_id'],second['player']['id'])
+        self.assertIsNone(data['players'][2]['difference'])
+        self.assertFalse(data['players'][3]['answered'])
+        await self.client.put(path,json={'answer_type':'other','price':100})
+        updated = await (await self.client.get('/api/my-votes')).json()
+        self.assertEqual(updated['answered'],3)
+        self.assertEqual(updated['players'][0]['price'],100)
+        self.assertEqual(updated['biggest_decreases'],[])
+
+    async def test_my_votes_is_private_and_available_read_only_after_closure(self):
+        self.assertEqual((await self.client.get('/api/my-votes')).status,401)
+        await self.start_voter()
+        card = await self.vote_next()
+        own = self.store.voters()[0]['id']
+        other = await self.new_client()
+        await self.start_voter(other,'Different voter')
+        foreign = await (await other.get(f'/api/my-votes?voter_id={own}')).json()
+        self.assertEqual(foreign['answered'],0)
+        self.assertEqual(foreign['username'],'Different voter')
+        self.store.set_setting('voting_open','0')
+        data = await (await self.client.get('/api/my-votes')).json()
+        self.assertFalse(data['voting_open'])
+        self.assertEqual(data['answered'],1)
+        self.assertEqual((await self.client.put(f"/api/votes/{card['player']['id']}",json={'answer_type':'other','price':0})).status,403)
+        self.store.delete_voter(own,'test removal')
+        self.assertEqual((await self.client.get('/api/my-votes')).status,401)
+
+    async def test_existing_completed_voter_gets_full_summary_including_exclusions(self):
+        await self.start_voter()
+        voter = self.store.voters()[0]
+        for player in self.store.players():
+            self.store.save_vote(voter['id'],player['id'],'other',player['current_price'])
+        self.store.delete_vote(self.store.all_votes()[0]['id'],'excluded test answer')
+        data = await (await self.client.get('/api/my-votes')).json()
+        self.assertEqual((data['answered'],data['priced'],data['excluded']),(313,313,1))
+        self.assertEqual(len(data['players']),313)
+        self.assertEqual(data['biggest_increases'],[])
+        self.assertEqual(data['biggest_decreases'],[])
+        self.assertTrue(all(row['difference']==0 for row in data['players']))
+
+    async def test_card_has_options_and_the_stored_current_price(self):
         await self.start_voter()
         card = await self.next_card()
         self.assertEqual(card['position'], 1)
         self.assertEqual(card['total'], 313)
         self.assertEqual(len(card['options']), 5)
-        self.assertNotIn('current_price', json.dumps(card))
+        player = self.store.player(card['player']['id'])
+        self.assertEqual(card['player']['current_price'], player['current_price'])
+        self.assertEqual(card['options'], pricing.options_for(player['current_price']))
 
     async def test_card_includes_the_players_photo_or_none(self):
         await self.start_voter()
@@ -143,7 +254,7 @@ class VoterFlowTests(SiteTestCase):
             {'answer_type': 'option', 'price': off_list},
             {'answer_type': 'option', 'price': float(card['options'][0])},
             {'answer_type': 'option', 'price': str(card['options'][0])},
-            {'answer_type': 'other', 'price': 0},
+            {'answer_type': 'other', 'price': -1},
             {'answer_type': 'other', 'price': 101},
             {'answer_type': 'other', 'price': 12.5},
             {'answer_type': 'other', 'price': True},
@@ -166,6 +277,22 @@ class VoterFlowTests(SiteTestCase):
         await self.client.put(f"/api/votes/{card['player']['id']}", json={'answer_type': 'dont_know', 'price': 9})
         back = await (await self.client.get('/api/card?position=2')).json()
         self.assertEqual(back['answer'], {'answer_type': 'dont_know', 'price': None})
+
+    async def test_zero_price_is_saved_counted_and_exported_as_a_price(self):
+        await self.start_voter()
+        card = await self.next_card()
+        response = await self.client.put(f"/api/votes/{card['player']['id']}", json={'answer_type':'other','price':0})
+        self.assertEqual(response.status,200)
+        back = await (await self.client.get('/api/card?position=1')).json()
+        self.assertEqual(back['answer'],{'answer_type':'other','price':0})
+        await self.login_admin()
+        row = await self.player_row(card['player']['id'])
+        self.assertEqual((row['votes'],row['median'],row['average'],row['low']), (1,0,0,0))
+        self.assertEqual(row['dont_know'],0)
+        detail = await (await self.client.get(f"/api/admin/players/{card['player']['id']}")).json()
+        self.assertIn({'price':0,'count':1},detail['histogram'])
+        exported = server.export_vote_rows(self.store)
+        self.assertEqual(exported[0]['price'],0)
 
     async def test_changing_an_answer_keeps_one_row(self):
         await self.start_voter()
@@ -251,6 +378,7 @@ class VoterFlowTests(SiteTestCase):
             self.assertTrue(cookie['httponly'])
             self.assertTrue(cookie['secure'])
             self.assertEqual(cookie['samesite'], 'Lax')
+            self.assertEqual(int(cookie['max-age']), server.VOTER_COOKIE_SECONDS)
 
     async def test_security_headers_are_set(self):
         for path in ('/', '/api/me', '/admin'):
@@ -334,13 +462,39 @@ class ResumeLinkTests(SiteTestCase):
         response = await other.put('/api/votes/1', json={'answer_type': 'dont_know'})
         self.assertEqual(response.status, 403)
 
-    async def test_retyping_a_username_starts_a_new_voter(self):
+    async def test_retyping_an_existing_username_does_not_create_or_expose_a_session(self):
         await self.start_voter(username='same name')
         await self.vote_next()
         other = await self.new_client()
-        await self.start_voter(other, username='same name')
-        self.assertEqual((await self.next_card(other))['answered'], 0)
-        self.assertEqual(len(self.store.voters()), 2)
+        response = await other.post('/api/session',json={'username':'SAME NAME'})
+        self.assertEqual(response.status,409)
+        self.assertNotIn('link',await response.json())
+        self.assertEqual((await other.get('/api/card')).status,401)
+        self.assertEqual(len(self.store.voters()),1)
+        self.assertEqual((await self.next_card())['answered'],1)
+
+    async def test_current_session_username_is_idempotent(self):
+        await self.start_voter(username='Same name')
+        await self.vote_next()
+        response=await self.client.post('/api/session',json={'username':'SAME NAME'})
+        self.assertEqual(response.status,200)
+        self.assertEqual((await response.json())['voter']['answered'],1)
+        self.assertEqual(len(self.store.voters()),1)
+
+    async def test_admin_can_recover_an_existing_voter_without_creating_another(self):
+        await self.start_voter()
+        await self.vote_next()
+        voter=self.store.voters()[0]
+        path=f"/api/admin/voters/{voter['id']}/resume-link"
+        self.assertEqual((await self.client.get(path)).status,401)
+        await self.login_admin()
+        data=await(await self.client.get(path)).json()
+        other=await self.new_client()
+        await other.get(data['link'].replace('https://vote.example',''),allow_redirects=False)
+        self.assertEqual((await self.next_card(other))['answered'],1)
+        self.assertEqual(len(self.store.voters()),1)
+        self.store.delete_voter(voter['id'],'test')
+        self.assertEqual((await self.client.get(path)).status,404)
 
 
 class EmailTests(SiteTestCase):
@@ -432,6 +586,56 @@ class AdminAuthTests(SiteTestCase):
 
 
 class DeletionTests(SiteTestCase):
+    async def remove_session(self, voter_id):
+        response = await self.client.delete(f'/api/admin/voters/{voter_id}', json={'reason':'Test session cleanup'})
+        self.assertEqual(response.status, 200, await response.text())
+        return (await response.json())['batch_id']
+
+    async def test_empty_voter_can_be_removed_restored_and_cannot_vote_while_removed(self):
+        voter_id = self.store.voters()[0]['id']
+        batch = await self.remove_session(voter_id)
+        self.assertEqual(self.store.voters(), [])
+        self.assertIsNone(self.store.voter(voter_id))
+        self.assertEqual((await self.client.get('/api/card')).status, 401)
+        self.assertEqual((await self.client.delete(f'/api/admin/voters/{voter_id}', json={'reason':'again'})).status,409)
+        data = await (await self.client.get('/api/admin/players')).json()
+        self.assertEqual(data['overview']['total_voters'], 0)
+        response = await self.restore(batch)
+        self.assertEqual((await response.json())['restored'],0)
+        self.assertEqual(len(self.store.voters()),1)
+        self.assertEqual((await self.client.get('/api/card')).status,200)
+
+    async def test_session_delete_preserves_earlier_exclusions_and_other_voters(self):
+        await self.vote_next()
+        first = self.store.all_votes()[0]['id']
+        earlier = await self.delete_vote(first)
+        await self.vote_next()
+        voter_id = self.store.voters()[0]['id']
+        other = await self.new_client()
+        await self.start_voter(other, 'Another voter')
+        await self.vote_next(other)
+        batch = await self.remove_session(voter_id)
+        self.assertEqual(len(self.store.active_votes()),1)
+        self.assertEqual(len(self.store.voters()),1)
+        self.assertEqual((await self.restore(earlier)).status,409)
+        dashboard = await (await self.client.get('/api/admin/players')).json()
+        self.assertEqual(dashboard['overview']['total_votes'],1)
+        self.assertAlmostEqual(dashboard['dashboard']['average_completion'],round(100/313,1))
+        export = await (await self.client.get('/api/admin/export.csv')).text()
+        self.assertNotIn('Hoops Fan',export)
+        self.assertIn('Another voter',export)
+        await self.restore(batch)
+        self.assertEqual(len(self.store.voters()),2)
+        self.assertEqual(len(self.store.active_votes()),2)
+        self.assertIsNotNone(self.store.db.execute('SELECT deleted_at FROM votes WHERE id=?',(first,)).fetchone()['deleted_at'])
+
+    async def test_session_delete_requires_admin_and_reason(self):
+        voter_id = self.store.voters()[0]['id']
+        stranger = await self.new_client()
+        self.assertEqual((await stranger.delete(f'/api/admin/voters/{voter_id}',json={'reason':'test'})).status,401)
+        self.assertEqual((await self.client.delete(f'/api/admin/voters/{voter_id}',json={'reason':''})).status,400)
+        self.assertIsNotNone(self.store.voter(voter_id))
+
     async def setUpAsync(self):
         await super().setUpAsync()
         await self.start_voter()

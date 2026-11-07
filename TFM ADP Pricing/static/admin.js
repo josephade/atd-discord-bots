@@ -182,20 +182,20 @@ function showTab(name) {
   document.querySelectorAll('.tab-page').forEach((page) => {
     page.hidden = page.id !== `tab-${name}`;
   });
-  const active = name === 'player' ? 'players' : name === 'voter' ? 'voters' : name;
+  const active = name === 'player' ? 'players' : name === 'voter' || name === 'voter-report' ? 'voters' : name;
   document.querySelectorAll('.tab').forEach((tab) => {
     const on = tab.dataset.tab === active;
     tab.classList.toggle('active', on);
     tab.setAttribute('aria-current', on ? 'page' : 'false');
   });
-  $('section-name').textContent = {overview: 'Overview', players: 'Player insights', player: 'Player details', voters: 'Voters & review', voter: 'Voter details', deleted: 'Deleted answers'}[name];
+  $('section-name').textContent = {overview: 'Overview', combined:'Combined ADP', players: 'Player insights', player: 'Player details', voters: 'Voters & review', voter: 'Voter details', 'voter-report':'Voter report', deleted: 'Deleted answers'}[name];
   setStatus('');
 }
 
 async function openTab(name) {
   showTab(name);
   try {
-    if (name === 'overview' || name === 'players') {
+    if (name === 'overview' || name === 'players' || name === 'combined') {
       await loadResults();
     } else if (name === 'voters') {
       await loadVoters();
@@ -244,6 +244,35 @@ async function loadResults() {
   $('last-refreshed').textContent = `Updated ${new Date(state.data.generated_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`;
   renderOverview();
   renderPlayersTable();
+  renderCombinedAdp();
+}
+
+function renderCombinedAdp() {
+  if(!state.data?.combined_adp)return;
+  const data=state.data.combined_adp, field=$('combined-method').value;
+  const filter=$('combined-filter').value, query=$('combined-search').value.trim().toLocaleLowerCase();
+  const rankField=`${field}_rank`;
+  const rows=[...data.players].sort((a,b)=>a[rankField]===null||b[rankField]===null ? a[rankField]===b[rankField]?a.name.localeCompare(b.name):a[rankField]===null?1:-1 : a[rankField]-b[rankField]);
+  const visible=rows.filter(row=>row.name.toLocaleLowerCase().includes(query) && (
+    filter==='all'||filter==='qualified'&&row.votes>=5||filter==='low'&&row.votes>0&&row.votes<5||filter==='none'&&row.votes===0||
+    row[field]!==null&&(filter==='higher'&&row[field]>row.current_price||filter==='lower'&&row[field]<row.current_price||filter==='same'&&row[field]===row.current_price)));
+  $('combined-metrics').replaceChildren(metric(number(data.contributors),'Contributing sessions','At least one included price vote'),
+    metric(number(data.price_votes),'Price votes','Includes $0; excludes Don’t know'),
+    metric(`${data.priced_players} / ${data.players.length}`,'Players priced','Unpriced players remain unranked'),
+    metric(field==='median'?'Median':'Average','Ranking method',field==='median'?'The middle submitted price':'Mean of submitted prices'));
+  $('combined-count').textContent=`${visible.length} of ${rows.length} players shown · ${field==='median'?'Median':'Average'} price, highest first. Equal prices sort by name. Rank uses the full list, not the current filter.`;
+  const body=make('tbody',{},visible.map(row=>{
+    const difference=row[field]===null?null:Math.round((row[field]-row.current_price)*100)/100;
+    const name=make('button',{type:'button',className:'link',textContent:row.name});name.onclick=()=>openPlayer(row.id);
+    return make('tr',{},[
+      make('td',{className:'num',textContent:row[`${field}_rank`]||'—'}),make('td',{},[name]),
+      make('td',{className:'num',textContent:money(row.median)}),make('td',{className:'num',textContent:money(row.average)}),
+      make('td',{className:'num',textContent:money(row.current_price)}),
+      make('td',{className:`num ${difference>0?'gap-up':difference<0?'gap-down':''}`,textContent:difference===null?'—':signedMoney(difference)}),
+      make('td',{className:'num',textContent:String(row.votes)}),make('td',{textContent:row.votes===0?'No price votes':row.votes<5?'Early: fewer than 5':'5+ price votes'})]);
+  }));
+  if(!visible.length)body.append(emptyTable(8,'No players match these filters.'));
+  $('combined-table').replaceChildren(make('thead',{},[make('tr',{},['Rank','Player','Median price','Average price','Current','Difference','Price votes','Coverage'].map((label,i)=>make('th',{className:i===1||i===7?'':'num',textContent:label,title:label==='Difference'?`${field} minus current ADP price`:''})))]),body);
 }
 
 function renderOverview() {
@@ -539,20 +568,55 @@ function renderVotersTable() {
     if(!row.flags.length) cells[4].append(make('span',{className:'fine',textContent:'No flags'}));
     cells[5].textContent = relativeTime(row.last_seen_at);
     cells[5].title = timeText(row.last_seen_at);
+    const remove = make('button', {type:'button', className:'danger small', textContent:'Delete', ariaLabel:`Delete voter ${row.username}`});
+    const resume = make('button', {type:'button', className:'secondary small', textContent:'Copy resume link', ariaLabel:`Copy resume link for ${row.username}`});
+    const report = make('button', {type:'button', className:'secondary small', textContent:'View report', ariaLabel:`View report for ${row.username}`});
+    report.onclick = () => openVoterReport(row.id);
+    resume.onclick = () => copyVoterResume(row.id);
+    remove.addEventListener('click', () => askDeleteVoter(row.id, row.username, row.votes_in_results));
+    cells.push(make('td', {className:'voter-row-actions'}, [report, resume, remove]));
     return make('tr', {}, cells);
   }));
-  if(!rows.length) body.append(emptyTable(VOTER_COLUMNS.length,filter==='flagged'?'No voter sessions need review.':'No voter sessions match these filters.'));
-  $('voters-table').replaceChildren(make('thead', {}, [headerRow(VOTER_COLUMNS, state.voterSort, renderVotersTable)]), body);
+  if(!rows.length) body.append(emptyTable(VOTER_COLUMNS.length+1,filter==='flagged'?'No voter sessions need review.':'No voter sessions match these filters.'));
+  const header = headerRow(VOTER_COLUMNS, state.voterSort, renderVotersTable);
+  header.append(make('th', {textContent:'Actions'}));
+  $('voters-table').replaceChildren(make('thead', {}, [header]), body);
+}
+
+function askDeleteVoter(id, username, count) {
+  askDelete({title:`Delete voter ${username}?`,
+    detail:`This removes this voter session from the admin list and excludes ${count} included answer(s) from results and exports. Its voting and resume links stop working until restored. You can restore the session from Deleted answers. Earlier answer deletions remain separate.`,
+    confirmLabel:'Delete voter', reasonLabel:'Why are you deleting this voter?',
+    path:`/api/admin/voters/${id}`, after:()=>openTab('voters')});
+}
+
+async function copyVoterResume(id) {
+  try {
+    const data = await api('GET', `/api/admin/voters/${id}/resume-link`);
+    try {
+      await navigator.clipboard.writeText(data.link);
+      setStatus('Private resume link copied. Share it only with this voter; it gives access to their saved answers.');
+    } catch (_) {
+      setStatus(`Copy this private resume link and share it only with this voter: ${data.link}`);
+    }
+  } catch (err) { if(err.status!==401) setStatus(err.message); }
 }
 
 async function openVoter(voterId) {
   try {
+  if (state.currentVoter !== voterId) {
+    $('voter-difference-filter').value = 'all';
+    $('voter-difference-sort').value = 'saved';
+  }
   state.currentVoter = voterId;
   showTab('voter');
   const detail = await api('GET', `/api/admin/voters/${voterId}`);
   await loadVoters();
   $('voter-title').textContent = detail.voter.username;
+  $('voter-copy-resume').onclick = () => copyVoterResume(voterId);
+  $('voter-view-report').onclick = () => openVoterReport(voterId);
   const active = detail.votes.filter((vote) => !vote.deleted).length;
+  $('voter-delete-session').onclick = () => askDeleteVoter(voterId, detail.voter.username, active);
   const info=state.voters.find(row=>row.id===voterId);
   $('voter-summary').textContent=`${detail.votes.length} of ${info?.total||state.data?.overview.total_players||313} answered · ${active} included · ${detail.votes.length-active} removed`;
   $('voter-flags').replaceChildren(...(info?.flags||[]).map(flag=>make('div',{className:'review-notice'},[
@@ -565,7 +629,32 @@ async function openVoter(voterId) {
     after: () => openVoter(voterId),
   });
 
-  const rows = detail.votes.map((vote) => {
+  state.voterDetail = detail;
+  renderVoterVotes();
+  return true;
+  } catch(err) { if(err.status!==401) setStatus(err.message); return false; }
+}
+
+const voteDifference = vote => vote.answer_type === 'dont_know' || vote.price === null ? null : vote.price - vote.current_price;
+
+function renderVoterVotes() {
+  const detail = state.voterDetail;
+  if (!detail) return;
+  const voterId = detail.voter.id;
+  const filter = $('voter-difference-filter').value;
+  const sort = $('voter-difference-sort').value;
+  const visible = detail.votes.filter(vote => {
+    const diff = voteDifference(vote);
+    return filter === 'all' || (filter === 'unknown' ? diff === null : diff !== null && (
+      filter === 'higher' ? diff > 0 : filter === 'lower' ? diff < 0 : diff === 0));
+  });
+  if (sort !== 'saved') visible.sort((a,b) => {
+    const x = voteDifference(a), y = voteDifference(b);
+    if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+    return sort === 'highest' ? y-x : sort === 'lowest' ? x-y : Math.abs(y)-Math.abs(x);
+  });
+  $('voter-answer-count').textContent = `${visible.length} of ${detail.votes.length} answers`;
+  const rows = visible.map((vote) => {
     const action = make('td');
     if (!vote.deleted) {
       const remove = make('button', { type: 'button', className: 'danger small', textContent: 'Delete' });
@@ -579,29 +668,89 @@ async function openVoter(voterId) {
     } else {
       action.textContent = 'Deleted';
     }
+    const difference = voteDifference(vote);
     return make('tr', { className: vote.deleted ? 'deleted' : '' }, [
       make('td', { textContent: vote.player }),
       make('td', { className: 'num', textContent: money(vote.current_price) }),
-      make('td', { textContent: answerText(vote) }),
+      make('td', { className:'num', textContent: answerText(vote) }),
+      make('td', { className: `num${difference > 0 ? ' gap-up' : difference < 0 ? ' gap-down' : ''}`, textContent: difference === null ? '—' : signedMoney(difference), title:'Answer minus current ADP price' }),
       make('td', { textContent: timeText(vote.updated_at) }),
       action,
     ]);
   });
   $('voter-votes').replaceChildren(
-    make('thead', {}, [make('tr', {}, ['Player', 'Current', 'Answer', 'Saved', ''].map((label) => make('th', { textContent: label })))]),
+    make('thead', {}, [make('tr', {}, ['Player', 'Current', 'Answer', 'Difference', 'Saved', ''].map((label) => {
+      const header = make('th', { className:['Current','Answer','Difference'].includes(label) ? 'num' : '', textContent:label });
+      if (label === 'Difference') {
+        header.title = 'Answer minus current ADP price; click to sort';
+        const button = make('button', {type:'button', textContent:'Difference'});
+        button.onclick = () => { $('voter-difference-sort').value = sort === 'highest' ? 'lowest' : 'highest'; renderVoterVotes(); };
+        header.replaceChildren(button);
+        if (sort === 'highest' || sort === 'lowest') header.setAttribute('aria-sort',sort === 'highest' ? 'descending' : 'ascending');
+      }
+      return header;
+    }))]),
     make('tbody', {}, rows),
   );
-  if(!rows.length) $('voter-votes').querySelector('tbody').append(emptyTable(5,'This voter has not submitted any answers yet.'));
-  return true;
-  } catch(err) { if(err.status!==401) setStatus(err.message); return false; }
+  if(!rows.length) $('voter-votes').querySelector('tbody').append(emptyTable(6,detail.votes.length ? 'No answers match this Difference filter.' : 'This voter has not submitted any answers yet.'));
 }
 
 /* Deleting and restoring */
+
+async function openVoterReport(voterId) {
+  try {
+    if (state.reportVoter !== voterId) {
+      $('report-search').value=''; $('report-filter').value='all'; $('report-sort').value='price';
+    }
+    state.currentVoter=voterId; state.reportVoter=voterId;
+    const data=await api('GET',`/api/admin/voters/${voterId}/report`);
+    state.voterReport=data;
+    showTab('voter-report');
+    $('report-title').textContent=`${data.username} — Scouting report`;
+    $('report-subtitle').textContent=`${data.answered} of ${data.total} answered · ${data.excluded} excluded from results · Read-only admin view`;
+    $('report-metrics').replaceChildren(
+      metric(number(data.answered),'Answered','Saved player answers'),metric(number(data.priced),'Price votes','Includes $0 valuations'),
+      metric(number(data.dont_know),"Don't know",'Unpriced answers'),metric(number(data.total-data.answered),'Remaining','Not answered yet'));
+    for (const [id,rows] of [['report-increases',data.biggest_increases],['report-decreases',data.biggest_decreases]]) {
+      $(id).replaceChildren(...rows.map(row=>make('div',{className:'report-highlight'},[
+        make('div',{},[make('b',{textContent:row.name}),make('small',{className:'fine',textContent:`Current ${money(row.current_price)} → voted ${money(row.price)}${row.excluded?' · Excluded from results':''}`})]),
+        make('strong',{className:row.difference>0?'gap-up':'gap-down',textContent:signedMoney(row.difference)})])));
+      if(!rows.length) $(id).append(make('p',{className:'fine',textContent:'No saved prices in this category.'}));
+    }
+    renderVoterReport();
+    return true;
+  } catch(err) { if(err.status!==401) setStatus(err.message); return false; }
+}
+
+function renderVoterReport() {
+  const data=state.voterReport;
+  if(!data)return;
+  const priceSort=(a,b)=>a.price===null||b.price===null ? a.price===b.price?a.name.localeCompare(b.name):a.price===null?1:-1 : b.price-a.price||a.name.localeCompare(b.name);
+  const ranked=[...data.players].sort(priceSort);
+  const ranks=new Map(ranked.filter(r=>r.price!==null).map((r,i)=>[r.player_id,i+1]));
+  const filter=$('report-filter').value, query=$('report-search').value.trim().toLocaleLowerCase(), sort=$('report-sort').value;
+  const rows=ranked.filter(row=>row.name.toLocaleLowerCase().includes(query) && (
+    filter==='all'||filter==='answered'&&row.answered||filter==='unanswered'&&!row.answered||filter==='unknown'&&row.answer_type==='dont_know'||
+    row.difference!==null&&(filter==='higher'&&row.difference>0||filter==='lower'&&row.difference<0||filter==='same'&&row.difference===0)));
+  if(sort==='name')rows.sort((a,b)=>a.name.localeCompare(b.name));
+  else if(sort!=='price')rows.sort((a,b)=>a.difference===null||b.difference===null ? a.difference===b.difference?0:a.difference===null?1:-1 : sort==='highest'?b.difference-a.difference:a.difference-b.difference);
+  $('report-count').textContent=`${rows.length} of ${data.total} players · Rank uses saved voter prices. Equal prices sort by name; unpriced players stay at the bottom.`;
+  const body=make('tbody',{},rows.map(row=>make('tr',{},[
+    make('td',{className:'num',textContent:ranks.get(row.player_id)||'—'}),
+    make('td',{},[make('span',{textContent:row.name}),...(row.excluded?[make('small',{className:'report-excluded fine',textContent:'Excluded from results'})]:[])]),
+    make('td',{className:'num',textContent:money(row.current_price)}),
+    make('td',{className:'num',textContent:!row.answered?'Not answered':row.answer_type==='dont_know'?"Don't know":money(row.price)}),
+    make('td',{className:`num ${row.difference>0?'gap-up':row.difference<0?'gap-down':''}`,textContent:row.difference===null?'—':signedMoney(row.difference)})])));
+  if(!rows.length)body.append(emptyTable(5,'No players match these filters.'));
+  $('report-table').replaceChildren(make('thead',{},[make('tr',{},['Rank','Player','Current','Voter price','Difference'].map((text,i)=>make('th',{className:i===1?'':'num',textContent:text})))]),body);
+}
 
 function askDelete(request) {
   state.pendingDelete = request;
   $('delete-title').textContent = request.title;
   $('delete-detail').textContent = request.detail;
+  $('delete-confirm').textContent = request.confirmLabel || 'Remove answers';
+  document.querySelector('label[for="delete-reason"]').textContent = request.reasonLabel || 'Why are you removing these answers?';
   $('delete-reason').value = '';
   setText($('delete-error'), '');
   $('delete-dialog').showModal();
@@ -638,7 +787,7 @@ async function loadBatches() {
         try {
           const result = await api('POST', `/api/admin/deletion-batches/${batch.id}/restore`);
           await loadBatches();
-          setStatus(`Restored ${result.restored} votes from batch ${batch.id}.`);
+          setStatus(`${batch.removes_voter ? 'Voter session restored. ' : ''}Restored ${result.restored} votes from batch ${batch.id}.`);
         } catch (err) {
           restore.disabled = false;
           setStatus(err.message);
@@ -648,7 +797,7 @@ async function loadBatches() {
     }
     return make('tr', {}, [
       make('td', { className: 'num', textContent: String(batch.id) }),
-      make('td', { textContent: batch.scope === 'voter' ? 'All of a voter\'s votes' : 'One vote' }),
+      make('td', { textContent: batch.removes_voter ? 'Voter session + answers' : batch.scope === 'voter' ? 'All of a voter\'s votes' : 'One vote' }),
       make('td', { textContent: batch.username }),
       make('td', { className: 'num', textContent: String(batch.vote_count) }),
       make('td', { className: 'wrap', textContent: batch.reason }),
@@ -670,6 +819,7 @@ async function refreshCurrent() {
   try {
     if(state.tab==='voters') await loadVoters();
     else if(state.tab==='voter') { if(await openVoter(state.currentVoter)===false) return; }
+    else if(state.tab==='voter-report') { if(await openVoterReport(state.currentVoter)===false) return; }
     else if(state.tab==='deleted') await loadBatches();
     else if(state.tab==='player') { if(await openPlayer(state.currentPlayer)===false) return; }
     else await loadResults();
@@ -720,6 +870,8 @@ function bindEvents() {
     renderPlayersTable();
   });
   $('voter-filter').addEventListener('change',renderVotersTable);
+  $('voter-difference-filter').addEventListener('change',renderVoterVotes);
+  $('voter-difference-sort').addEventListener('change',renderVoterVotes);
   document.querySelectorAll('[data-player-filter]').forEach(button=>button.addEventListener('click',()=>filterPlayers(button.dataset.playerFilter)));
   $('login-form').addEventListener('submit', submitLogin);
   $('logout').addEventListener('click', async () => {
@@ -736,6 +888,13 @@ function bindEvents() {
   $('voter-search').addEventListener('input', renderVotersTable);
   $('player-back').addEventListener('click', () => openTab('players'));
   $('voter-back').addEventListener('click', () => openTab('voters'));
+  $('combined-search').addEventListener('input',renderCombinedAdp);
+  $('combined-filter').addEventListener('change',renderCombinedAdp);
+  $('combined-method').addEventListener('change',renderCombinedAdp);
+  $('report-back').addEventListener('click', () => openVoter(state.currentVoter));
+  $('report-search').addEventListener('input', renderVoterReport);
+  $('report-filter').addEventListener('change', renderVoterReport);
+  $('report-sort').addEventListener('change', renderVoterReport);
   $('toggle-voting').addEventListener('click', toggleVoting);
   $('export-sheets').addEventListener('click', exportSheets);
   $('delete-form').addEventListener('submit', confirmDelete);
@@ -758,4 +917,4 @@ async function start() {
 }
 
 start();
-setInterval(()=>{if(!document.hidden && ['overview','players','voters'].includes(state.tab)) refreshCurrent();},60000);
+setInterval(()=>{if(!document.hidden && ['overview','players','voters','combined'].includes(state.tab)) refreshCurrent();},60000);

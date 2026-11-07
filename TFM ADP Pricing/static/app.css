@@ -580,3 +580,65 @@ body { background:var(--bg); }
  .vote-actions { gap:0; }
  .vote-actions .ghost { padding:8px 6px; font-size:11px; }
 }
+.current-price-badge { display:flex; align-items:center; gap:12px; flex-wrap:wrap; width:fit-content; padding:9px 12px; margin-top:16px; background:#ffffff08; border:1px solid color-mix(in srgb,var(--card-accent) 45%,transparent); border-radius:9px; }
+.current-price-badge>span { color:#c7d2e0; font-size:11px; }
+.current-price-badge strong { color:var(--card-accent); font-size:23px; font-weight:800; letter-spacing:-.5px; line-height:1; }
+.current-price-badge small { color:#a8b6c9; font-size:9px; }
+@media(max-width:700px) { .current-price-badge { gap:7px; padding:8px; margin-top:12px; } .current-price-badge>span { font-size:9px; } .current-price-badge strong { font-size:21px; } .current-price-badge small { font-size:8px; } }
+/* A private, searchable record of this voter's saved answers. */
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.my-votes-screen { padding:90px 24px 45px; background:radial-gradient(ellipse at top,#e8975909,transparent 60%),var(--bg); }
+.my-votes-header { max-width:1050px; margin:0 auto 40px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.my-votes-header .vote-brand { font-size:12px; letter-spacing:1px; }
+.my-votes-main { max-width:1050px; margin:auto; }
+.my-votes-main>.player-kicker { color:var(--muted); }
+.my-votes-main h1 { font-size:clamp(30px,5vw,48px); letter-spacing:-1.5px; line-height:1.1; margin:8px 0 15px; }
+#my-votes-feedback { text-align:left; min-height:20px; }
+#my-votes-link { padding-left:0; font-size:12px; }
+.my-votes-metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:22px 0; }
+.my-votes-metrics>div { padding:20px; background:var(--panel); border:1px solid var(--line); border-radius:14px; }
+.my-votes-metrics strong { display:block; font-size:29px; letter-spacing:-1px; }
+.my-votes-metrics span { font-size:12px; color:var(--muted); }
+.my-votes-comparisons { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin:22px 0 28px; }
+.my-votes-comparisons section { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px; }
+.my-votes-comparisons h2 { margin:0 0 6px; font-size:18px; letter-spacing:-.3px; }
+.my-votes-comparisons .fine { margin-bottom:14px; }
+.my-price-highlight { display:flex; align-items:center; justify-content:space-between; width:100%; padding:12px 0; gap:12px; color:var(--text); background:none; text-align:left; border-bottom:1px solid var(--line); font-size:13px; }
+.my-price-highlight:last-child { border:0; }
+.my-price-highlight strong { white-space:nowrap; }
+#my-increases strong,.my-diff-up { color:#246b56; }
+#my-decreases strong,.my-diff-down { color:#9e432f; }
+[data-theme="dark"] #my-increases strong,[data-theme="dark"] .my-diff-up { color:#8dceb4; }
+[data-theme="dark"] #my-decreases strong,[data-theme="dark"] .my-diff-down { color:#e2a294; }
+.my-votes-controls { display:flex; gap:10px; flex-wrap:wrap; }
+.my-votes-controls input { flex:1; min-width:200px; background:var(--panel); }
+.my-votes-controls select { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:13px; min-height:48px; }
+#my-votes-count { margin:16px 0; }
+.my-votes-table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:14px; background:var(--panel); }
+.my-votes-table { border-collapse:collapse; width:100%; font-size:13px; }
+.my-votes-table th { background:var(--panel-2); color:var(--muted); font-size:11px; font-weight:600; }
+.my-votes-table th,.my-votes-table td { padding:14px 18px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.my-votes-table th:first-child,.my-votes-table td:first-child { text-align:left; }
+.my-votes-table td small { display:block; color:var(--muted); font-size:10px; }
+.my-votes-table tr:last-child td { border:0; }
+.my-votes-table button { min-height:36px; padding:5px 12px; font-size:12px; }
+#my-votes-notice { margin-top:20px; }
+@media(max-width:700px) {
+ .my-votes-screen { padding:90px 14px 30px; }
+ .my-votes-header { align-items:flex-start; flex-direction:column; margin-bottom:26px; }
+ .my-votes-metrics { grid-template-columns:1fr 1fr; gap:9px; }
+ .my-votes-metrics>div { padding:15px; }
+ .my-votes-comparisons { grid-template-columns:1fr; gap:12px; }
+ .my-votes-controls select { flex:1; min-width:140px; }
+ .my-votes-table th,.my-votes-table td { padding:12px 11px; }
+}
+.my-adp-heading { display:flex; align-items:center; justify-content:space-between; gap:15px; margin:28px 0 18px; }
+.my-adp-heading h2 { margin:0; font-size:21px; letter-spacing:-.5px; }
+.my-adp-heading button { min-height:40px; font-size:12px; white-space:nowrap; }
+.my-votes-table th:first-child,.my-votes-table td:first-child { text-align:right; color:var(--muted); }
+.my-votes-table th:nth-child(2),.my-votes-table td:nth-child(2) { text-align:left; }
+.returning-voter { border-top:1px solid var(--line); padding-top:18px; margin-top:20px; font-size:12px; }
+.returning-voter summary { cursor:pointer; color:var(--text); font-weight:650; }
+.returning-voter p { font-size:11px; line-height:1.8; margin-top:12px; }
+.returning-voter .secondary { width:100%; margin-top:12px; }
+#username-form .returning-voter label { margin-top:15px; }

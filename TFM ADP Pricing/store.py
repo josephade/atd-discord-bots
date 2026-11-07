@@ -76,6 +76,13 @@ class Store:
         self.db.execute('PRAGMA foreign_keys = ON')
         self.db.execute('PRAGMA journal_mode = WAL')
         self.db.executescript(SCHEMA)
+        # Additive migration: preserve existing votes and deletion history.
+        for table, column, definition in (
+            ('voters', 'removed_batch_id', 'INTEGER REFERENCES deletion_batches(id)'),
+            ('deletion_batches', 'removes_voter', 'INTEGER NOT NULL DEFAULT 0'),
+        ):
+            if column not in {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}:
+                self.db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         self.db.commit()
 
     def close(self):
@@ -151,15 +158,15 @@ class Store:
         return self.voter(voter_id)
 
     def voter(self, voter_id):
-        return self.db.execute('SELECT * FROM voters WHERE id = ?', (voter_id,)).fetchone()
+        return self.db.execute('SELECT * FROM voters WHERE id = ? AND removed_batch_id IS NULL', (voter_id,)).fetchone()
 
     def voter_by_session_hash(self, session_hash):
         return self.db.execute(
-            'SELECT * FROM voters WHERE session_token_hash = ?', (session_hash,)
+            'SELECT * FROM voters WHERE session_token_hash = ? AND removed_batch_id IS NULL', (session_hash,)
         ).fetchone()
 
     def voters(self):
-        return self.db.execute('SELECT * FROM voters ORDER BY created_at, id').fetchall()
+        return self.db.execute('SELECT * FROM voters WHERE removed_batch_id IS NULL ORDER BY created_at, id').fetchall()
 
     # Votes
 
@@ -193,14 +200,15 @@ class Store:
 
     def active_votes(self):
         return self.db.execute(
-            'SELECT * FROM votes WHERE deleted_at IS NULL ORDER BY created_at, id'
+            'SELECT votes.* FROM votes JOIN voters ON voters.id=votes.voter_id '
+            'WHERE votes.deleted_at IS NULL AND voters.removed_batch_id IS NULL ORDER BY votes.created_at, votes.id'
         ).fetchall()
 
     def votes_for_player(self, player_id):
         return self.db.execute(
             'SELECT votes.*, voters.discord_username FROM votes '
             'JOIN voters ON voters.id = votes.voter_id '
-            'WHERE votes.player_id = ? AND votes.deleted_at IS NULL '
+            'WHERE votes.player_id = ? AND votes.deleted_at IS NULL AND voters.removed_batch_id IS NULL '
             'ORDER BY votes.price DESC, voters.discord_username',
             (player_id,),
         ).fetchall()
@@ -253,15 +261,31 @@ class Store:
         with self.db:
             return self._create_batch('voter', voter_id, reason, [r['id'] for r in rows], self._clock())
 
+    def delete_voter(self, voter_id, reason):
+        """Remove a session and its included answers as one restorable batch."""
+        with self.db:
+            if self.voter(voter_id) is None:
+                return None
+            rows = self.db.execute('SELECT id FROM votes WHERE voter_id=? AND deleted_at IS NULL', (voter_id,)).fetchall()
+            batch_id = self._create_batch('voter', voter_id, reason, [r['id'] for r in rows], self._clock())
+            self.db.execute('UPDATE deletion_batches SET removes_voter=1 WHERE id=?', (batch_id,))
+            self.db.execute('UPDATE voters SET removed_batch_id=? WHERE id=?', (batch_id, voter_id))
+            return batch_id
+
     def restore_batch(self, batch_id):
         """Restore one batch. Returns the restored count, or None if it can't be restored."""
         batch = self.db.execute(
-            'SELECT id FROM deletion_batches WHERE id = ? AND restored_at IS NULL', (batch_id,)
+            'SELECT * FROM deletion_batches WHERE id = ? AND restored_at IS NULL', (batch_id,)
         ).fetchone()
         if batch is None:
             return None
+        removed = self.db.execute('SELECT removed_batch_id FROM voters WHERE id=?', (batch['voter_id'],)).fetchone()
+        if removed and removed['removed_batch_id'] not in (None, batch_id):
+            raise ValueError('Restore the voter session first, then restore earlier answer batches.')
         now = self._clock()
         with self.db:
+            if batch['removes_voter']:
+                self.db.execute('UPDATE voters SET removed_batch_id=NULL WHERE id=? AND removed_batch_id=?', (batch['voter_id'], batch_id))
             restored = self.db.execute(
                 'UPDATE votes SET deleted_at = NULL, deleted_batch_id = NULL WHERE deleted_batch_id = ?',
                 (batch_id,),
@@ -292,6 +316,7 @@ class Store:
     def clear_voting_data(self):
         """Remove test voters and votes. Players and settings stay."""
         with self.db:
+            self.db.execute('UPDATE voters SET removed_batch_id=NULL')
             counts = {}
             for table in ('votes', 'deletion_batches', 'voters', 'admin_actions'):
                 counts[table] = self.db.execute(f'DELETE FROM {table}').rowcount

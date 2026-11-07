@@ -216,6 +216,13 @@ async def create_session(request):
     username = security.clean_username(body.get('username'))
     if username is None:
         raise ApiError(400, 'Enter a Discord username from 2 to 32 characters.')
+    existing = current_voter(request)
+    if existing and existing['discord_username'].casefold() == username.casefold():
+        response = web.json_response({'voter': voter_payload(store, existing)})
+        set_session_cookie(response, request, existing['id'])
+        return response
+    if any(v['discord_username'].casefold() == username.casefold() for v in store.voters()):
+        raise ApiError(409, 'That username already has a voting session. Use your private resume link to return to it. If you lost the link, ask the commissioner to recover your existing session. No new session was created.')
     ip = client_ip(request)
     if not request.app[LIMITER].allow(f'voter:{ip}', NEW_VOTER_LIMIT, NEW_VOTER_WINDOW):
         raise ApiError(429, 'Too many new voters from this network. Try again later.')
@@ -255,11 +262,40 @@ async def get_card(request):
         position=position,
         answered=len(answers),
         total=len(order),
-        player=dict(id=player['id'], name=player['name'], photo=request.app[PHOTOS].get(player['name'])),
+        player=dict(id=player['id'], name=player['name'], current_price=player['current_price'], photo=request.app[PHOTOS].get(player['name'])),
         options=pricing.options_for(player['current_price']),
         answer=answer_payload(answers.get(player['id'])),
         other_max=pricing.OTHER_MAX,
     ))
+
+
+async def get_my_votes(request):
+    store = request.app[STORE]
+    voter = require_voter(request)
+    return web.json_response(voter_report(store, voter))
+
+
+def voter_report(store, voter):
+    """One report calculation shared by voters and authenticated admin views."""
+    answers = store.answers_for(voter['id'])
+    players = {p['id']: p for p in store.players()}
+    rows = []
+    for position, player_id in enumerate(json.loads(voter['player_order']), 1):
+        player, answer = players[player_id], answers.get(player_id)
+        priced = answer is not None and answer['answer_type'] != 'dont_know'
+        rows.append(dict(player_id=player_id, position=position, name=player['name'],
+                         current_price=player['current_price'], answered=answer is not None,
+                         answer_type=answer['answer_type'] if answer else None,
+                         price=answer['price'] if answer else None,
+                         difference=answer['price']-player['current_price'] if priced else None,
+                         excluded=bool(answer and answer['deleted_at'] is not None)))
+    priced = [r for r in rows if r['difference'] is not None]
+    return dict(username=voter['discord_username'], voting_open=store.voting_open(),
+        total=len(rows), answered=len(answers), priced=len(priced),
+        dont_know=sum(r['answer_type']=='dont_know' for r in rows),
+        excluded=sum(r['excluded'] for r in rows), players=rows,
+        biggest_increases=sorted((r for r in priced if r['difference']>0), key=lambda r:(-r['difference'],r['name']))[:10],
+        biggest_decreases=sorted((r for r in priced if r['difference']<0), key=lambda r:(r['difference'],r['name']))[:10])
 
 
 async def put_vote(request):
@@ -388,7 +424,7 @@ def results_snapshot(store):
     players = store.players()
     voters = store.voters()
     all_votes = store.all_votes()
-    active = [vote for vote in all_votes if vote['deleted_at'] is None]
+    active = store.active_votes()
     rows = results.player_rows(players, active)
     return dict(
         overview=results.overview(players, voters, all_votes, active),
@@ -414,6 +450,7 @@ async def admin_players(request):
         voting_open=store.voting_open(),
         overview=snapshot['overview'],
         players=snapshot['players'],
+        combined_adp=results.combined_adp(snapshot['players'], store.active_votes()),
         gaps=snapshot['gaps'],
         fewest_votes=snapshot['fewest_votes'],
         email_ready=emailer.email_configured(request.app[SETTINGS]),
@@ -447,6 +484,23 @@ async def admin_player_detail(request):
 async def admin_voters(request):
     store = request.app[STORE]
     return web.json_response({'voters': results.voter_rows(store.players(), store.voters(), store.all_votes())})
+
+
+@require_admin
+async def admin_voter_report(request):
+    store = request.app[STORE]
+    voter = store.voter(int_param(request, 'voter_id'))
+    if voter is None:
+        raise ApiError(404, 'That voter session does not exist or was deleted.')
+    return web.json_response(voter_report(store, voter))
+
+
+@require_admin
+async def admin_voter_resume_link(request):
+    voter = request.app[STORE].voter(int_param(request, 'voter_id'))
+    if voter is None:
+        raise ApiError(404, 'That voter session does not exist or was deleted.')
+    return web.json_response({'link': resume_link(request, voter['id'])})
 
 
 @require_admin
@@ -498,6 +552,15 @@ async def admin_delete_voter_votes(request):
 
 
 @require_admin
+async def admin_delete_voter(request):
+    reason = await read_reason(request)
+    batch_id = request.app[STORE].delete_voter(int_param(request, 'voter_id'), reason)
+    if batch_id is None:
+        raise ApiError(409, 'That voter session was already deleted or does not exist.')
+    return web.json_response({'batch_id': batch_id})
+
+
+@require_admin
 async def admin_deletion_batches(request):
     return web.json_response({'batches': [dict(
         id=b['id'],
@@ -508,12 +571,16 @@ async def admin_deletion_batches(request):
         vote_count=b['vote_count'],
         created_at=b['created_at'],
         restored_at=b['restored_at'],
+        removes_voter=bool(b['removes_voter']),
     ) for b in request.app[STORE].deletion_batches()]})
 
 
 @require_admin
 async def admin_restore_batch(request):
-    restored = request.app[STORE].restore_batch(int_param(request, 'batch_id'))
+    try:
+        restored = request.app[STORE].restore_batch(int_param(request, 'batch_id'))
+    except ValueError as exc:
+        raise ApiError(409, str(exc))
     if restored is None:
         raise ApiError(409, 'That batch was already restored or does not exist.')
     return web.json_response({'restored': restored})
@@ -625,6 +692,7 @@ def create_app(settings, email_sender=None, sheets_exporter=None, store=None):
         web.get('/healthz', healthz),
         web.get('/r/{token}', open_resume_link),
         web.get('/api/me', get_me),
+        web.get('/api/my-votes', get_my_votes),
         web.post('/api/session', create_session),
         web.get('/api/card', get_card),
         web.put('/api/votes/{player_id}', put_vote),
@@ -636,6 +704,9 @@ def create_app(settings, email_sender=None, sheets_exporter=None, store=None):
         web.get('/api/admin/players/{player_id}', admin_player_detail),
         web.get('/api/admin/voters', admin_voters),
         web.get('/api/admin/voters/{voter_id}', admin_voter_detail),
+        web.get('/api/admin/voters/{voter_id}/resume-link', admin_voter_resume_link),
+        web.get('/api/admin/voters/{voter_id}/report', admin_voter_report),
+        web.delete('/api/admin/voters/{voter_id}', admin_delete_voter),
         web.delete('/api/admin/votes/{vote_id}', admin_delete_vote),
         web.delete('/api/admin/voters/{voter_id}/votes', admin_delete_voter_votes),
         web.get('/api/admin/deletion-batches', admin_deletion_batches),

@@ -120,6 +120,7 @@
     <p id="username-error" class="error" role="alert" hidden></p>
     <button class="primary" type="submit">Take my seat ↗</button>
     <p class="draft-room-footnote">No Discord password needed. Every saved vote counts, even if you don't finish.</p>
+    <details id="returning-voter" class="returning-voter"><summary>Already voted? Resume your progress</summary><p class="fine">Use the same browser, or paste your private resume link. A username alone does not recover your votes. Lost your link? Ask the commissioner.</p><label for="resume-link-input">Private resume link</label><input id="resume-link-input" type="text" autocomplete="off" spellcheck="false" placeholder="Paste your resume link"><button id="resume-from-link" class="secondary" type="button">Resume my votes</button><p id="resume-link-error" class="error" role="alert" hidden></p></details>
   </form>
 </section>
 
@@ -143,7 +144,7 @@
         <p class="player-kicker">ON THE BOARD / YOUR VALUATION</p>
         <h1 id="player-name" class="player-name"></h1>
         <p class="question">What should he cost?</p>
-        <p class="pricing-context">Price him for a $100 team budget, before Flux.</p>
+        <div class="current-price-badge"><span>Current ADP price</span><strong id="current-player-price"></strong></div>
         <div class="player-edition"><span>TFM ADP</span><span>COMMUNITY EDITION</span></div>
       </div>
     </div>
@@ -156,7 +157,7 @@
       <label for="other-input">Your price, in whole dollars</label>
       <div class="other-row">
         <span class="dollar" aria-hidden="true">$</span>
-        <input id="other-input" type="number" inputmode="numeric" min="1" step="1">
+        <input id="other-input" type="number" inputmode="numeric" min="0" step="1">
         <button class="primary" type="submit">Save</button>
       </div>
     </form>
@@ -168,6 +169,7 @@
     <button id="dont-know" class="secondary dont-know" type="button">Not familiar with this player? Skip</button>
 
     <nav class="vote-actions">
+      <button id="my-votes" class="ghost" type="button">My votes / Edit a player</button>
       <button id="back" class="ghost" type="button">Back</button>
       <button id="resume-voting" class="ghost" type="button" hidden>Next unanswered</button>
       <button id="copy-link" class="ghost" type="button">Copy my resume link</button>
@@ -203,6 +205,18 @@
   </div>
 </section>
 
+<section id="my-votes-screen" class="screen my-votes-screen" hidden>
+  <header class="my-votes-header"><div class="vote-brand"><img src="/static/ball.svg" width="28" height="28" alt=""> TFM / MY SCOUTING REPORT</div><button id="my-votes-continue" class="primary" type="button">Continue voting ↗</button></header>
+  <main class="my-votes-main">
+    <p class="player-kicker">YOUR PRICES. YOUR CALL.</p><h1 id="my-votes-title">My votes</h1><p id="my-votes-subtitle" class="fine"></p><p id="my-votes-feedback" class="copy-status" role="status" aria-live="polite"></p><button id="my-votes-link" class="ghost" type="button">Save my resume link</button>
+    <div id="my-votes-metrics" class="my-votes-metrics"></div>
+    <div class="my-votes-comparisons"><section><h2>Biggest increases</h2><p class="fine">Your price above current ADP</p><div id="my-increases"></div></section><section><h2>Biggest decreases</h2><p class="fine">Your price below current ADP</p><div id="my-decreases"></div></section></div>
+    <div class="my-adp-heading"><h2 id="my-adp-heading">Your player list</h2><button id="view-my-adp" class="secondary" type="button">View my ADP</button></div><div class="my-votes-controls"><label class="sr-only" for="my-votes-search">Search a player</label><input id="my-votes-search" type="search" placeholder="Find any player…"><label class="sr-only" for="my-votes-filter">Filter your votes</label><select id="my-votes-filter"><option value="answered">My answered players</option><option value="all">All players</option><option value="unanswered">Not answered yet</option><option value="higher">Higher than current</option><option value="lower">Lower than current</option><option value="same">Same as current</option><option value="unknown">Don't know</option></select><label class="sr-only" for="my-votes-sort">Sort players</label><select id="my-votes-sort"><option value="price">Your price: highest first</option><option value="order" selected>Voting order</option><option value="name">Player name</option><option value="highest">Difference: highest first</option><option value="lowest">Difference: lowest first</option></select></div>
+    <p id="my-votes-count" class="fine"></p><div class="my-votes-table-wrap"><table class="my-votes-table"><thead><tr><th>Your rank</th><th>Player</th><th>Current</th><th>Your price</th><th>Difference</th><th></th></tr></thead><tbody id="my-votes-rows"></tbody></table></div>
+    <p id="my-votes-notice" class="fine"></p>
+  </main>
+</section>
+
 <section id="done" class="screen panel-screen" hidden>
   <div class="panel">
     <img class="panel-ball" src="/static/ball.svg" alt="" width="52" height="52">
@@ -217,6 +231,7 @@
     <img class="panel-ball" src="/static/ball.svg" alt="" width="52" height="52">
     <h1>Voting is closed</h1>
     <p>TFM ADP Player Pricing isn't taking votes right now. Any votes you already saved are safe.</p>
+    <button id="closed-my-votes" class="primary" type="button" hidden>View my votes</button>
   </div>
 </section>
 

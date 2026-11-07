@@ -37,9 +37,9 @@ class OptionTests(unittest.TestCase):
             self.assertLessEqual(options[-1], pricing.OTHER_MAX, player['name'])
 
     def test_other_accepts_only_whole_dollars_in_range(self):
-        for value in (1, 57, 100):
+        for value in (0, 1, 57, 100):
             self.assertTrue(pricing.valid_other(value))
-        for value in (0, 101, -3, 12.5, '12', None, True):
+        for value in (101, -3, 12.5, '12', None, True):
             self.assertFalse(pricing.valid_other(value))
 
 

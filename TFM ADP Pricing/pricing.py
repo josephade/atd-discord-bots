@@ -1,7 +1,7 @@
 """Pure price rules: the five options, price bands and each voter's saved order."""
 import random
 
-OTHER_MIN = 1
+OTHER_MIN = 0
 OTHER_MAX = 100
 BATCH_MIX = {1: 2, 2: 2, 3: 6}
 

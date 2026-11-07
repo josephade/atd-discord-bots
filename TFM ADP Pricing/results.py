@@ -76,6 +76,20 @@ def biggest_gaps(rows):
     return dict(overpriced=overpriced[:GAP_LIMIT], underpriced=underpriced[:GAP_LIMIT])
 
 
+def combined_adp(rows, active_votes):
+    """Rank included price votes without treating unpriced players as $0."""
+    ranks = {}
+    for field in ('median', 'average'):
+        priced = sorted((row for row in rows if row[field] is not None),
+                        key=lambda row: (-row[field], row['name'].casefold()))
+        ranks[field] = {row['id']: i+1 for i, row in enumerate(priced)}
+    return dict(players=[dict(row, median_rank=ranks['median'].get(row['id']),
+                              average_rank=ranks['average'].get(row['id'])) for row in rows],
+                contributors=len({v['voter_id'] for v in active_votes if v['answer_type'] != 'dont_know'}),
+                price_votes=sum(v['answer_type'] != 'dont_know' for v in active_votes),
+                priced_players=len(ranks['median']))
+
+
 def histogram(current_price, votes):
     counts = Counter(v['price'] for v in votes if v['answer_type'] != 'dont_know')
     counts.setdefault(current_price, 0)
@@ -192,7 +206,7 @@ def dashboard(players, voters, all_votes, active_votes, player_results, voter_re
               for v in sorted(active_votes, key=lambda v: (v['updated_at'], v['id']), reverse=True)[:8]]
     qualified = sum(row['votes'] >= GAP_MIN_VOTES for row in player_results)
     return dict(
-        average_completion=round(sum(answered.values()) / (len(voters) * total) * 100, 1) if voters and total else 0,
+        average_completion=round(sum(answered[v['id']] for v in voters) / (len(voters) * total) * 100, 1) if voters and total else 0,
         active_voters_24h=sum(_timestamp(v['last_seen_at']) >= now.timestamp() - 86400 for v in voters),
         qualified_players=qualified, low_coverage_players=total - qualified,
         coverage_percent=round(qualified / total * 100, 1) if total else 0,
